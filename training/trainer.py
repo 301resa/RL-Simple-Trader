@@ -192,6 +192,7 @@ class Trainer:
         models_dir: str = "logs/models",
         train_date_range: str = "",
         vec_normalize=None,   # VecNormalize wrapper — stats saved alongside model
+        resume: bool = False, # True when continuing from a checkpoint
     ) -> None:
         self.agent = agent
         self.train_env = train_env
@@ -216,6 +217,7 @@ class Trainer:
         self.log_dir        = Path(log_dir)
         self.models_dir     = Path(models_dir)
         self.train_date_range = train_date_range
+        self.resume         = resume
 
     def run(self) -> PPOAgent:
         """
@@ -241,7 +243,7 @@ class Trainer:
             total_timesteps=self.total_timesteps,
             callback=callbacks,
             progress_bar=True,
-            reset_num_timesteps=True,
+            reset_num_timesteps=not self.resume,
         )
 
         elapsed = time.time() - start_time

@@ -439,8 +439,26 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
     )
 
     if args.checkpoint:
-        log.info("Loading checkpoint", path=args.checkpoint)
+        log.info("Loading checkpoint for resume", path=args.checkpoint)
         agent.load(args.checkpoint, env=c.train_env)
+        # Restore VecNormalize stats so running mean/std continues from where
+        # training left off rather than starting fresh.
+        ckpt_path = Path(args.checkpoint)
+        for candidate in ["vecnormalize.pkl", "vec_normalize.pkl"]:
+            vn_resume_path = ckpt_path.parent / candidate
+            if not vn_resume_path.exists():
+                # Also check models dir (two levels up from checkpoints/)
+                vn_resume_path = ckpt_path.parent.parent / candidate
+            if vn_resume_path.exists():
+                from stable_baselines3.common.vec_env import VecNormalize
+                c.train_env = VecNormalize.load(str(vn_resume_path), c.train_env)
+                c.train_env.training    = True
+                c.train_env.norm_reward = False
+                c.vec_normalize         = c.train_env
+                log.info("VecNormalize stats restored for resume", path=str(vn_resume_path))
+                break
+        else:
+            log.warning("No VecNormalize stats found for resume — running stats will restart from scratch")
 
     ckpt_cfg = agent_cfg.get("checkpointing", {})
     checkpoint_manager = CheckpointManager(
@@ -472,6 +490,7 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
         models_dir=str(models_dir),
         train_date_range=f"{c.split.train[0]}→{c.split.train[-1]}",
         vec_normalize=c.vec_normalize,
+        resume=bool(args.checkpoint),
     )
 
     trainer.run()
