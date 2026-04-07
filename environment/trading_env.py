@@ -265,6 +265,49 @@ class TradingEnv(gym.Env):
         self._entry_atr_state = None
         self._peak_unrealised_r = 0.0
 
+        # ── Pre-compute all market feature states for every bar ───────────────
+        # Market features depend only on price history — never on agent actions.
+        # One pass here eliminates repeated Pandas slicing inside step().
+        self._precomputed_states: list = []
+
+        for bar_idx in range(self._n_steps):
+            atr_s = self.atr_calculator.compute_session_state(
+                date=self._current_day,
+                session_bars=self._session_bars,
+                current_bar_idx=bar_idx,
+            )
+            if atr_s is None:
+                from features.atr_calculator import ATRState as _ATRState
+                cp = float(self._session_bars.iloc[bar_idx]["close"])
+                atr_s = _ATRState(
+                    atr_daily=100.0, prior_day_high=cp + 50,
+                    prior_day_low=cp - 50, prior_day_range=100.0,
+                    session_high=cp, session_low=cp,
+                    current_daily_range=0.0, atr_pct_used=0.0,
+                    atr_remaining_pts=100.0, atr_exhausted=False, atr_warning=False,
+                )
+            zone_s = self.zone_detector.scan_and_update(
+                bars=self._session_bars,
+                atr_series=self._atr_series,
+                current_bar_idx=bar_idx,
+            )
+            liq_s = self.liquidity_detector.compute_state(
+                bars=self._session_bars,
+                atr_series=self._atr_series,
+                current_bar_idx=bar_idx,
+            )
+            oz_s = self.order_zone_engine.compute(
+                bars=self._session_bars,
+                current_bar_idx=bar_idx,
+                atr_state=atr_s,
+                zone_state=zone_s,
+                liquidity_state=liq_s,
+                trend_snapshot=None,
+            )
+            self._precomputed_states.append({
+                "atr": atr_s, "zone": zone_s, "liq": liq_s, "oz": oz_s
+            })
+
         # Build initial observation
         obs, info = self._build_obs_and_info()
 
@@ -443,45 +486,17 @@ class TradingEnv(gym.Env):
         step = min(self._current_step, self._n_steps - 1)
         current_price = float(self._session_bars.iloc[step]["close"])
 
-        # ── Compute all features ──────────────────────────────
-        atr_state = self.atr_calculator.compute_session_state(
-            date=self._current_day,
-            session_bars=self._session_bars,
-            current_bar_idx=step,
-        )
-        if atr_state is None:
-            # Fallback with a rough ATR estimate
-            from features.atr_calculator import ATRState
-            atr_state = ATRState(
-                atr_daily=100.0, prior_day_high=current_price + 50,
-                prior_day_low=current_price - 50, prior_day_range=100.0,
-                session_high=current_price, session_low=current_price,
-                current_daily_range=0.0, atr_pct_used=0.0,
-                atr_remaining_pts=100.0, atr_exhausted=False, atr_warning=False,
-            )
+        # ── O(1) lookup from pre-computed states ─────────────────────────────
+        states          = self._precomputed_states[step]
+        atr_state       = states["atr"]
+        zone_state      = states["zone"]
+        liquidity_state = states["liq"]
+        order_zone_state = states["oz"]
 
-        self._current_atr_state = atr_state
-
-        zone_state = self.zone_detector.scan_and_update(
-            bars=self._session_bars,
-            atr_series=self._atr_series,
-            current_bar_idx=step,
-        )
-
-        liquidity_state = self.liquidity_detector.compute_state(
-            bars=self._session_bars,
-            atr_series=self._atr_series,
-            current_bar_idx=step,
-        )
-
-        order_zone_state = self.order_zone_engine.compute(
-            bars=self._session_bars,
-            current_bar_idx=step,
-            atr_state=atr_state,
-            zone_state=zone_state,
-            liquidity_state=liquidity_state,
-            trend_snapshot=None,   # trend removed — LSTM carries directional memory
-        )
+        self._current_atr_state      = atr_state
+        self._last_zone_state        = zone_state
+        self._last_liquidity_state   = liquidity_state
+        self._last_order_zone_state  = order_zone_state
 
         portfolio_state = self.position_manager.get_portfolio_state(current_price)
 
@@ -519,22 +534,29 @@ class TradingEnv(gym.Env):
         return obs, info
 
     def _get_current_order_zone_state(self) -> OrderZoneState:
+        step = min(self._current_step, self._n_steps - 1)
+        if hasattr(self, "_precomputed_states") and self._precomputed_states:
+            return self._precomputed_states[step]["oz"]
         return self._last_order_zone_state if hasattr(self, "_last_order_zone_state") else \
             self.order_zone_engine.compute(
                 bars=self._session_bars,
-                current_bar_idx=min(self._current_step, self._n_steps - 1),
+                current_bar_idx=step,
                 atr_state=self._current_atr_state,
-                zone_state=self._last_zone_state if hasattr(self, "_last_zone_state") else None,
-                liquidity_state=self._last_liquidity_state if hasattr(self, "_last_liquidity_state") else None,
+                zone_state=None,
+                liquidity_state=None,
                 trend_snapshot=None,
             )
 
     def _compute_action_mask(self, atr_state: ATRState) -> np.ndarray:
+        step = min(self._current_step, self._n_steps - 1)
         portfolio_state = self.position_manager.get_portfolio_state(
-            float(self._session_bars.iloc[min(self._current_step, self._n_steps - 1)]["close"])
+            float(self._session_bars.iloc[step]["close"])
         )
-        order_zone_state = self._last_order_zone_state if hasattr(self, "_last_order_zone_state") else \
-            self._get_current_order_zone_state()
+        order_zone_state = (
+            self._precomputed_states[step]["oz"]
+            if (hasattr(self, "_precomputed_states") and self._precomputed_states)
+            else self._get_current_order_zone_state()
+        )
 
         bars_remaining = self._n_steps - 1 - self._current_step
 
@@ -603,6 +625,10 @@ class TradingEnv(gym.Env):
 
         idx = int(self._rng.integers(0, len(candidates)))
         return candidates[idx]
+
+    def _set_shaping_scale(self, scale: float) -> None:
+        """Called by ShapingDecayCallback to update reward shaping weight."""
+        self.reward_calculator.shaping_scale = scale
 
     def _filter_rth(self, bars: pd.DataFrame) -> pd.DataFrame:
         """Keep only Regular Trading Hours bars."""

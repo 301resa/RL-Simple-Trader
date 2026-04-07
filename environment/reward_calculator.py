@@ -112,6 +112,10 @@ class RewardCalculator:
         self.entry_cost = entry_cost
         self.gave_back_profit_weight = gave_back_profit_weight
 
+        # Shaping scale: 1.0 = full shaping, 0.0 = pure P&L only.
+        # Decayed externally by ShaingDecayCallback during training.
+        self.shaping_scale: float = 1.0
+
         # Default reward values (overridden by config)
         self.entry_bonuses = entry_bonuses or {
             "full_order_zone_confluence": 0.50,
@@ -206,9 +210,9 @@ class RewardCalculator:
             is_bearish_action = direction == -1
             is_bullish_action = direction == 1
 
-            # R:R check
+            # R:R check (shaping penalty — scaled)
             if order_zone_state.rr_ratio < min_rr_ratio:
-                entry_penalty += self.entry_penalties["rr_below_minimum"]
+                entry_penalty += self.entry_penalties["rr_below_minimum"] * self.shaping_scale
                 note += "rr_too_low "
 
             # Zone presence check
@@ -218,42 +222,42 @@ class RewardCalculator:
             )
             if not in_zone:
                 if not order_zone_state.in_bearish_order_zone and not order_zone_state.in_bullish_order_zone:
-                    entry_penalty += self.entry_penalties["no_zone_present"]
+                    entry_penalty += self.entry_penalties["no_zone_present"] * self.shaping_scale
                     note += "no_zone "
-                entry_penalty += self.entry_penalties["no_liquidity_confluence"]
+                entry_penalty += self.entry_penalties["no_liquidity_confluence"] * self.shaping_scale
                 note += "no_liq "
             else:
-                # Bonuses for quality setup
+                # Bonuses for quality setup (all shaping — scaled to zero over time)
                 score = order_zone_state.confluence_score
 
                 if score >= 0.85:
-                    entry_bonus += self.entry_bonuses["full_order_zone_confluence"]
+                    entry_bonus += self.entry_bonuses["full_order_zone_confluence"] * self.shaping_scale
                     note += "full_confluence "
                 else:
                     if order_zone_state.in_bearish_order_zone or order_zone_state.in_bullish_order_zone:
-                        entry_bonus += self.entry_bonuses["in_supply_demand_zone"]
+                        entry_bonus += self.entry_bonuses["in_supply_demand_zone"] * self.shaping_scale
                     if order_zone_state.rejection_candle.detected:
-                        entry_bonus += self.entry_bonuses["rejection_candle_present"] * order_zone_state.rejection_candle.strength
+                        entry_bonus += self.entry_bonuses["rejection_candle_present"] * order_zone_state.rejection_candle.strength * self.shaping_scale
 
                 if not atr_state.atr_warning:
-                    entry_bonus += self.entry_bonuses["atr_has_room"]
+                    entry_bonus += self.entry_bonuses["atr_has_room"] * self.shaping_scale
 
                 if order_zone_state.rr_ratio >= min_rr_ratio:
-                    entry_bonus += self.entry_bonuses["high_rr_ratio"]
+                    entry_bonus += self.entry_bonuses["high_rr_ratio"] * self.shaping_scale
 
-            # Loss streak discipline
+            # Loss streak discipline (keep always — not shaping, it's a guardrail)
             if portfolio_state.get("consecutive_losses", 0) >= self.discipline["loss_streak_threshold"]:
                 entry_penalty += self.discipline["re_entry_after_loss_streak_penalty"]
                 note += "loss_streak_reentry "
 
-        # ── Trail stop bonus ──────────────────────────────────
+        # ── Trail stop bonus (shaping — scaled) ──────────────
         elif action == 4 and is_position_open:  # TRAIL_STOP
             unrealised_r = portfolio_state.get("current_pnl_r", 0.0)
             if unrealised_r >= 4.0:
-                entry_bonus += self.exit_bonuses["aggressive_trail_at_4r"]
+                entry_bonus += self.exit_bonuses["aggressive_trail_at_4r"] * self.shaping_scale
                 note += "trail_at_4r "
             elif unrealised_r >= 2.0:
-                entry_bonus += self.exit_bonuses["trailing_stop_correctly"]
+                entry_bonus += self.exit_bonuses["trailing_stop_correctly"] * self.shaping_scale
                 note += "trail_at_2r "
 
         reward = (entry_bonus + entry_penalty + step_penalty) * self.core_scale
@@ -307,19 +311,20 @@ class RewardCalculator:
             note += "hit_target "
 
         if was_trailing:
-            exit_bonus += self.exit_bonuses.get("trailing_stop_correctly", 0.0)
+            exit_bonus += self.exit_bonuses.get("trailing_stop_correctly", 0.0) * self.shaping_scale
             note += "used_trail "
 
-        # ── Greed penalty: gave back large unrealised profit ──
+        # ── Greed penalty: gave back large unrealised profit (shaping — scaled) ──
         if peak_unrealised_r >= 4.0 and not was_trailing:
-            exit_penalty += self.exit_penalties.get("held_past_4r_no_trail", 0.0)
+            exit_penalty += self.exit_penalties.get("held_past_4r_no_trail", 0.0) * self.shaping_scale
             note += "no_trail_at_4r "
 
         r_given_back = peak_unrealised_r - trade.pnl_r
         if r_given_back > 1.0 and trade.exit_reason in (ExitReason.STOP_LOSS, ExitReason.AGENT_EXIT):
-            exit_penalty -= self.gave_back_profit_weight * r_given_back
+            exit_penalty -= self.gave_back_profit_weight * r_given_back * self.shaping_scale
             note += f"gave_back_{r_given_back:.1f}r "
 
+        # core_r is NEVER scaled — always full P&L signal
         total = (core_r + exit_bonus + exit_penalty) * self.core_scale
 
         log.debug(

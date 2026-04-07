@@ -25,6 +25,7 @@ from stable_baselines3.common.callbacks import (
 )
 from training.trading_eval_callback import TradingEvalCallback
 from training.metrics_logger_callback import MetricsPrinterCallback
+from training.shaping_decay_callback import ShapingDecayCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from agent.ppo_agent import PPOAgent
@@ -190,10 +191,12 @@ class Trainer:
         log_dir: str = "logs",
         models_dir: str = "logs/models",
         train_date_range: str = "",
+        vec_normalize=None,   # VecNormalize wrapper — stats saved alongside model
     ) -> None:
         self.agent = agent
         self.train_env = train_env
         self.eval_env = eval_env
+        self.vec_normalize = vec_normalize
         self.checkpoint_manager = checkpoint_manager
         self.curriculum_scheduler = curriculum_scheduler
         self.total_timesteps = total_timesteps
@@ -248,10 +251,14 @@ class Trainer:
             steps_per_second=round(self.total_timesteps / elapsed, 0),
         )
 
-        # Save final model into the dedicated models folder
+        # Save final model + VecNormalize stats into the dedicated models folder
         self.models_dir.mkdir(parents=True, exist_ok=True)
         final_path = self.models_dir / "final_model"
         self.agent.save(final_path)
+        if self.vec_normalize is not None:
+            vn_path = str(self.models_dir / "vecnormalize.pkl")
+            self.vec_normalize.save(vn_path)
+            log.info("VecNormalize stats saved", path=vn_path)
         log.info("Final model saved", path=str(final_path))
 
         return self.agent
@@ -308,7 +315,16 @@ class Trainer:
             )
         )
 
-        # 5. Curriculum (optional)
+        # 5. Reward shaping decay (Stage 1 → 2 → 3)
+        cbs.append(
+            ShapingDecayCallback(
+                stage1_end=600_000,
+                stage2_end=1_200_000,
+                verbose=0,
+            )
+        )
+
+        # 6. Curriculum (optional)
         if self.curriculum_scheduler is not None:
             cbs.append(CurriculumCallback(self.curriculum_scheduler))
 

@@ -88,27 +88,36 @@ class ObservationBuilder:
         current_close = float(current_bar["close"])
         features: list = []
 
-        # ── 1. Recent price history (normalised by ATR) ───────
+        # ── 1. Recent price history (log returns) ────────────
+        # Log returns: log(price_t / price_{t-1}) are stationary,
+        # zero-centred, and scale-invariant — neural nets learn faster
+        # than ATR-normalised absolute offsets.
+        # OHLC: log return relative to previous bar's close.
+        # Volume: ratio vs 20-bar rolling average (unchanged).
         for i in range(self.price_history_len):
             idx = current_bar_idx - (self.price_history_len - 1 - i)
             if idx < 0:
                 features.extend([0.0, 0.0, 0.0, 0.0, 0.0])
                 continue
-            b = bars.iloc[idx]
-            ref = current_close
-            features.append(float(np.clip((float(b["open"])  - ref) / atr, -cv, cv)))
-            features.append(float(np.clip((float(b["high"])  - ref) / atr, -cv, cv)))
-            features.append(float(np.clip((float(b["low"])   - ref) / atr, -cv, cv)))
-            features.append(float(np.clip((float(b["close"]) - ref) / atr, -cv, cv)))
-            # Volume ratio (current vs rolling 20-bar average)
+            b    = bars.iloc[idx]
+            # Previous bar's close as the base for log returns
+            prev_close = float(bars.iloc[idx - 1]["close"]) if idx > 0 else float(b["close"])
+            prev_close = max(prev_close, 1e-6)  # guard against zero
+
+            def _lr(price: float) -> float:
+                return float(np.clip(np.log(max(price, 1e-6) / prev_close), -cv, cv))
+
+            features.append(_lr(float(b["open"])))
+            features.append(_lr(float(b["high"])))
+            features.append(_lr(float(b["low"])))
+            features.append(_lr(float(b["close"])))
+            # Volume ratio (unchanged — already a ratio, no log needed)
             vol = float(b["volume"]) if "volume" in b.index else 0.0
-            # Normalise against the 20 bars BEFORE this bar (exclude current
-            # bar from its own denominator — avoids self-referencing).
             vol_window = bars.iloc[max(0, idx - 20): idx]
             if "volume" in bars.columns and len(vol_window) > 0:
                 avg_vol = float(vol_window["volume"].mean())
             else:
-                avg_vol = max(vol, 1.0)  # fallback for first bar
+                avg_vol = max(vol, 1.0)
             features.append(float(np.clip(vol / max(avg_vol, 1.0), 0.0, 5.0)))
 
         # ── 2. ATR features ───────────────────────────────────

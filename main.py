@@ -328,11 +328,39 @@ def build_components(configs: dict, data_dir: str):
         train_vec_env = DummyVecEnv(train_env_fns)
         log.info("Using DummyVecEnv for training", n_envs=n_envs)
 
-    eval_env = make_env(split.validation, is_eval=True)
-    test_env = make_env(split.test, is_eval=True)
+    # ── VecNormalize: normalise observations, NOT rewards ────────────────────
+    # norm_obs=True  → running mean/std normalisation of observations
+    # norm_reward=False → keep raw R-multiple rewards (LSTM value estimates
+    #                     are sensitive to reward scale changes mid-training)
+    from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv as _DummyVecEnv
+    train_vec_env = VecNormalize(
+        train_vec_env,
+        norm_obs=True,
+        norm_reward=False,
+        clip_obs=10.0,
+        training=True,
+    )
 
-    # Keep a single-env handle for the trainer (eval/curriculum logic)
+    # Eval/test share the same normalisation stats (frozen — no update during eval)
+    eval_vec_env = VecNormalize(
+        _DummyVecEnv([lambda: make_env(split.validation, is_eval=True)]),
+        norm_obs=True,
+        norm_reward=False,
+        clip_obs=10.0,
+        training=False,   # don't update running stats during eval
+    )
+    test_vec_env = VecNormalize(
+        _DummyVecEnv([lambda: make_env(split.test, is_eval=True)]),
+        norm_obs=True,
+        norm_reward=False,
+        clip_obs=10.0,
+        training=False,
+    )
+
+    # Keep train VecNormalize reference so trainer can save its stats
     train_env = train_vec_env
+    eval_env  = eval_vec_env
+    test_env  = test_vec_env
 
     # ── Namespace ─────────────────────────────────────────────
     class Components:
@@ -342,9 +370,10 @@ def build_components(configs: dict, data_dir: str):
     c.data_loader = data_loader
     c.split = split
     c.atr_calculator = atr_calculator
-    c.train_env = train_env
-    c.eval_env = eval_env
-    c.test_env = test_env
+    c.train_env      = train_env
+    c.eval_env       = eval_env
+    c.test_env       = test_env
+    c.vec_normalize  = train_vec_env   # reference for saving normalisation stats
     c.curriculum_scheduler = curriculum_scheduler
     c.reward_calculator = reward_calculator
     c.real_capital = real_capital
@@ -442,10 +471,17 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
         log_dir=str(log_dir),
         models_dir=str(models_dir),
         train_date_range=f"{c.split.train[0]}→{c.split.train[-1]}",
+        vec_normalize=c.vec_normalize,
     )
 
     trainer.run()
     log.info("Training run finished. Models saved to: %s", models_dir)
+
+    # Save VecNormalize running stats — must be loaded alongside the model
+    # for evaluation/backtest to receive correctly scaled observations.
+    vec_path = models_dir / "vec_normalize.pkl"
+    c.train_env.save(str(vec_path))
+    log.info("VecNormalize stats saved", path=str(vec_path))
 
 
 def run_evaluate(args: argparse.Namespace, configs: dict) -> None:
@@ -460,6 +496,18 @@ def run_evaluate(args: argparse.Namespace, configs: dict) -> None:
 
     log.info("Mode: EVALUATE", checkpoint=args.checkpoint)
     c = build_components(configs, args.data)
+
+    # Load VecNormalize stats so the agent receives the same scaled observations
+    # it was trained with. Stats file lives next to the model checkpoint.
+    from stable_baselines3.common.vec_env import VecNormalize
+    vec_path = Path(args.checkpoint).parent / "vec_normalize.pkl"
+    if vec_path.exists():
+        c.test_env = VecNormalize.load(str(vec_path), c.test_env)
+        c.test_env.training    = False
+        c.test_env.norm_reward = False
+        log.info("VecNormalize stats loaded", path=str(vec_path))
+    else:
+        log.warning("vec_normalize.pkl not found — observations will not be correctly scaled!", path=str(vec_path))
 
     agent = PPOAgent.from_checkpoint(
         args.checkpoint,

@@ -186,6 +186,11 @@ class TradingEvalCallback(BaseCallback):
             return True   # not time yet
 
         self._last_eval_step = self.num_timesteps
+
+        # Sync VecNormalize obs stats from train → eval env so eval uses
+        # the same normalisation the model was trained with.
+        self._sync_vec_normalize()
+
         metrics = self._run_eval()
 
         if metrics is None:
@@ -200,6 +205,8 @@ class TradingEvalCallback(BaseCallback):
             self._best_score_step = self.num_timesteps
             best_path = self.save_path / "best_model"
             self.model.save(str(best_path))
+            # Also save VecNormalize stats alongside best model
+            self._save_vec_normalize(self.save_path / "best_model_vecnormalize.pkl")
             log.info(
                 "New best model saved",
                 step=self.num_timesteps,
@@ -222,6 +229,30 @@ class TradingEvalCallback(BaseCallback):
                 return False  # signals SB3 to stop training
 
         return True
+
+    # ── VecNormalize helpers ──────────────────────────────────────────────────
+
+    def _sync_vec_normalize(self) -> None:
+        """Copy obs running stats from training env → eval env."""
+        try:
+            from stable_baselines3.common.vec_env import VecNormalize
+            train_vn = self.training_env
+            eval_vn  = self.eval_env
+            if isinstance(train_vn, VecNormalize) and isinstance(eval_vn, VecNormalize):
+                eval_vn.obs_rms   = train_vn.obs_rms
+                eval_vn.ret_rms   = train_vn.ret_rms
+                eval_vn.clip_obs  = train_vn.clip_obs
+        except Exception:
+            pass
+
+    def _save_vec_normalize(self, path) -> None:
+        """Save VecNormalize stats if the training env is wrapped."""
+        try:
+            from stable_baselines3.common.vec_env import VecNormalize
+            if isinstance(self.training_env, VecNormalize):
+                self.training_env.save(str(path))
+        except Exception:
+            pass
 
     # ── Evaluation runner ─────────────────────────────────────────────────────
 
