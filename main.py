@@ -476,12 +476,9 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
 
     trainer.run()
     log.info("Training run finished. Models saved to: %s", models_dir)
-
-    # Save VecNormalize running stats — must be loaded alongside the model
-    # for evaluation/backtest to receive correctly scaled observations.
-    vec_path = models_dir / "vec_normalize.pkl"
-    c.train_env.save(str(vec_path))
-    log.info("VecNormalize stats saved", path=str(vec_path))
+    # VecNormalize stats are saved by Trainer.run() as logs/models/vecnormalize.pkl
+    # and by TradingEvalCallback as logs/models/best_model_vecnormalize.pkl —
+    # no additional save needed here.
 
 
 def run_evaluate(args: argparse.Namespace, configs: dict) -> None:
@@ -498,16 +495,36 @@ def run_evaluate(args: argparse.Namespace, configs: dict) -> None:
     c = build_components(configs, args.data)
 
     # Load VecNormalize stats so the agent receives the same scaled observations
-    # it was trained with. Stats file lives next to the model checkpoint.
+    # it was trained with.  The filename depends on which checkpoint is loaded:
+    #   best_model.zip        → best_model_vecnormalize.pkl  (stats at best eval)
+    #   final_model.zip       → vecnormalize.pkl             (stats at end of training)
+    #   anything else         → vec_normalize.pkl            (legacy fallback)
     from stable_baselines3.common.vec_env import VecNormalize
-    vec_path = Path(args.checkpoint).parent / "vec_normalize.pkl"
-    if vec_path.exists():
+    ckpt_path = Path(args.checkpoint)
+    if ckpt_path.stem == "best_model":
+        vec_candidates = ["best_model_vecnormalize.pkl", "vecnormalize.pkl", "vec_normalize.pkl"]
+    elif ckpt_path.stem == "final_model":
+        vec_candidates = ["vecnormalize.pkl", "vec_normalize.pkl"]
+    else:
+        vec_candidates = ["vec_normalize.pkl", "vecnormalize.pkl"]
+
+    vec_path = None
+    for candidate in vec_candidates:
+        candidate_path = ckpt_path.parent / candidate
+        if candidate_path.exists():
+            vec_path = candidate_path
+            break
+
+    if vec_path is not None:
         c.test_env = VecNormalize.load(str(vec_path), c.test_env)
         c.test_env.training    = False
         c.test_env.norm_reward = False
         log.info("VecNormalize stats loaded", path=str(vec_path))
     else:
-        log.warning("vec_normalize.pkl not found — observations will not be correctly scaled!", path=str(vec_path))
+        log.warning(
+            "No VecNormalize stats file found — observations will not be correctly scaled!",
+            searched=[str(ckpt_path.parent / f) for f in vec_candidates],
+        )
 
     agent = PPOAgent.from_checkpoint(
         args.checkpoint,

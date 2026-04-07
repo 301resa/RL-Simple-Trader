@@ -21,6 +21,7 @@ Compliant with gymnasium.Env API (stable-baselines3 compatible).
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -304,9 +305,11 @@ class TradingEnv(gym.Env):
                 liquidity_state=liq_s,
                 trend_snapshot=None,
             )
-            self._precomputed_states.append({
+            # deepcopy freezes the state at this bar — prevents future bars
+            # from retroactively mutating zone.is_valid references (lookahead bug)
+            self._precomputed_states.append(copy.deepcopy({
                 "atr": atr_s, "zone": zone_s, "liq": liq_s, "oz": oz_s
-            })
+            }))
 
         # Build initial observation
         obs, info = self._build_obs_and_info()
@@ -407,15 +410,33 @@ class TradingEnv(gym.Env):
         terminated = False
         truncated = False
 
-        # Max drawdown breach
+        # Max drawdown breach — close position first, then combine trade P&L + penalty
         if self.position_manager.is_max_drawdown_breached(current_price):
             dd_reward = self.reward_calculator.violation_reward("max_drawdown_breach")
-            reward_breakdown = RewardBreakdown(
-                total=reward_breakdown.total + dd_reward.total,
-                violation_penalty=dd_reward.total,
-                shaping_note="max_drawdown_breach",
+            closed_trade_dd = self.position_manager.force_close(
+                current_price, self._current_step, ExitReason.MAX_DRAWDOWN
             )
-            self.position_manager.force_close(current_price, self._current_step, ExitReason.MAX_DRAWDOWN)
+            if closed_trade_dd is not None:
+                trade_reward_dd = self.reward_calculator.trade_close_reward(
+                    trade=closed_trade_dd,
+                    order_zone_state=self._entry_order_zone_state or self._get_current_order_zone_state(),
+                    atr_state=self._entry_atr_state or atr_state,
+                    was_trailing=False,
+                    peak_unrealised_r=self._peak_unrealised_r,
+                )
+                reward_breakdown = RewardBreakdown(
+                    total=reward_breakdown.total + dd_reward.total + trade_reward_dd.total,
+                    violation_penalty=dd_reward.total,
+                    core_trade_r=trade_reward_dd.core_trade_r,
+                    shaping_note="max_drawdown_breach",
+                )
+                self._peak_unrealised_r = 0.0
+            else:
+                reward_breakdown = RewardBreakdown(
+                    total=reward_breakdown.total + dd_reward.total,
+                    violation_penalty=dd_reward.total,
+                    shaping_note="max_drawdown_breach",
+                )
             if self.early_terminate_on_max_dd:
                 terminated = True
 
