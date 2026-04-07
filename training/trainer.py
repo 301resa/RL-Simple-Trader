@@ -1,0 +1,315 @@
+"""
+training/trainer.py
+====================
+Main training orchestration loop.
+
+Handles:
+  - Multi-stage curriculum (trending → mixed → full market)
+  - Evaluation callbacks
+  - Checkpoint saving
+  - TensorBoard metric logging
+  - Early stopping on validation performance
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+from stable_baselines3.common.callbacks import (
+    BaseCallback,
+    CallbackList,
+    CheckpointCallback,
+)
+from training.trading_eval_callback import TradingEvalCallback
+from training.metrics_logger_callback import MetricsPrinterCallback
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+
+from agent.ppo_agent import PPOAgent
+from training.checkpoint_manager import CheckpointManager
+from training.curriculum import CurriculumScheduler
+from utils.logger import get_logger
+
+log = get_logger(__name__)
+
+
+# ── Custom Callbacks ──────────────────────────────────────────────────────────
+
+class TradingMetricsCallback(BaseCallback):
+    """
+    Logs trading-specific metrics to TensorBoard after each episode.
+
+    Tracks:
+      - Win rate
+      - Average R:R achieved
+      - Trades per episode
+      - Profit factor
+      - % trades in Order Zone
+      - % trades trend-aligned
+      - Max drawdown per episode
+    """
+
+    def __init__(self, verbose: int = 0) -> None:
+        super().__init__(verbose)
+        self._episode_metrics: List[dict] = []
+
+    def _on_step(self) -> bool:
+        # SB3 passes episode info in self.locals["infos"]
+        infos = self.locals.get("infos", [])
+        for info in infos:
+            if "total_pnl_r" in info:  # Episode summary info
+                self._episode_metrics.append(info)
+                self._log_episode_metrics(info)
+        return True
+
+    def _log_episode_metrics(self, info: dict) -> None:
+        step = self.num_timesteps
+        self.logger.record("trading/win_rate", info.get("win_rate", 0.0))
+        self.logger.record("trading/total_pnl_r", info.get("total_pnl_r", 0.0))
+        self.logger.record("trading/n_trades", info.get("n_trades", 0))
+        self.logger.record("trading/profit_factor", info.get("profit_factor", 0.0))
+        self.logger.record("trading/avg_win_r", info.get("avg_win_r", 0.0))
+        self.logger.record("trading/avg_loss_r", info.get("avg_loss_r", 0.0))
+
+
+class CurriculumCallback(BaseCallback):
+    """
+    Updates the curriculum stage based on training progress.
+    Injects curriculum filter functions into all envs when stage advances.
+    """
+
+    def __init__(self, scheduler: CurriculumScheduler, verbose: int = 0) -> None:
+        super().__init__(verbose)
+        self._scheduler = scheduler
+        self._last_stage: Optional[str] = None
+
+    def _on_step(self) -> bool:
+        stage = self._scheduler.current_stage(self.num_timesteps)
+        if stage and stage.name != self._last_stage:
+            log.info(
+                "Curriculum stage advanced",
+                stage=stage.name,
+                description=stage.description,
+                at_step=self.num_timesteps,
+            )
+            self._last_stage = stage.name
+            # Update filter function in all envs
+            filter_fn = self._scheduler.build_filter_fn(stage)
+            self._update_env_filter(filter_fn)
+        return True
+
+    def _update_env_filter(self, filter_fn: Any) -> None:
+        """Push curriculum filter to all vectorised envs."""
+        try:
+            for env in self.training_env.envs:  # DummyVecEnv
+                if hasattr(env, "curriculum_filter_fn"):
+                    env.curriculum_filter_fn = filter_fn
+                elif hasattr(env, "env"):
+                    env.env.curriculum_filter_fn = filter_fn
+        except AttributeError:
+            pass  # SubprocVecEnv — more complex; skip for now
+
+
+class EntropyAnnealingCallback(BaseCallback):
+    """
+    Linearly anneals the entropy coefficient during training.
+    Encourages more exploration early, exploitation later.
+    """
+
+    def __init__(
+        self,
+        ent_coef_start: float = 0.05,
+        ent_coef_end: float = 0.005,
+        decay_steps: int = 1_000_000,
+        verbose: int = 0,
+    ) -> None:
+        super().__init__(verbose)
+        self.ent_coef_start = ent_coef_start
+        self.ent_coef_end = ent_coef_end
+        self.decay_steps = decay_steps
+
+    def _on_step(self) -> bool:
+        progress = min(self.num_timesteps / self.decay_steps, 1.0)
+        new_ent_coef = self.ent_coef_start + progress * (self.ent_coef_end - self.ent_coef_start)
+        self.model.ent_coef = new_ent_coef
+        if self.num_timesteps % 10_000 == 0:
+            self.logger.record("train/ent_coef", new_ent_coef)
+        return True
+
+
+# ── Trainer ───────────────────────────────────────────────────────────────────
+
+class Trainer:
+    """
+    Orchestrates the full training pipeline.
+
+    Parameters
+    ----------
+    agent : PPOAgent
+    train_env : gymnasium.Env or VecEnv
+        Training environment (possibly vectorised).
+    eval_env : gymnasium.Env
+        Single evaluation environment (non-vectorised).
+    checkpoint_manager : CheckpointManager
+    curriculum_scheduler : Optional[CurriculumScheduler]
+    total_timesteps : int
+    eval_freq : int
+        How often (in timesteps) to run evaluation.
+    n_eval_episodes : int
+        Number of episodes per evaluation run.
+    ent_coef_start : float
+    ent_coef_end : float
+    ent_coef_decay_steps : int
+    log_dir : str | Path
+    """
+
+    def __init__(
+        self,
+        agent: PPOAgent,
+        train_env: Any,
+        eval_env: Any,
+        checkpoint_manager: CheckpointManager,
+        curriculum_scheduler: Optional[CurriculumScheduler] = None,
+        total_timesteps: int = 2_000_000,
+        eval_freq: int = 50_000,
+        n_eval_episodes: int = 20,
+        warmup_steps: int = 400_000,
+        patience_steps: int = 550_000,
+        print_train_episodes: bool = True,
+        rl_diag_every: int = 1,
+        # Composite score weights
+        w_sharpe: float = 0.30,
+        w_pnl:    float = 0.25,
+        w_wl:     float = 0.25,
+        w_dd:     float = 0.20,
+        ent_coef_start: float = 0.05,
+        ent_coef_end: float = 0.005,
+        ent_coef_decay_steps: int = 1_000_000,
+        log_dir: str = "logs",
+        models_dir: str = "logs/models",
+        train_date_range: str = "",
+    ) -> None:
+        self.agent = agent
+        self.train_env = train_env
+        self.eval_env = eval_env
+        self.checkpoint_manager = checkpoint_manager
+        self.curriculum_scheduler = curriculum_scheduler
+        self.total_timesteps = total_timesteps
+        self.eval_freq = eval_freq
+        self.n_eval_episodes = n_eval_episodes
+        self.warmup_steps = warmup_steps
+        self.patience_steps = patience_steps
+        self.w_sharpe = w_sharpe
+        self.w_pnl    = w_pnl
+        self.w_wl     = w_wl
+        self.w_dd     = w_dd
+        self.ent_coef_start = ent_coef_start
+        self.ent_coef_end = ent_coef_end
+        self.ent_coef_decay_steps = ent_coef_decay_steps
+        self.print_train_episodes = print_train_episodes
+        self.rl_diag_every = rl_diag_every
+        self.log_dir        = Path(log_dir)
+        self.models_dir     = Path(models_dir)
+        self.train_date_range = train_date_range
+
+    def run(self) -> PPOAgent:
+        """
+        Execute the full training run.
+
+        Returns
+        -------
+        PPOAgent
+            The trained agent.
+        """
+        callbacks = self._build_callbacks()
+
+        log.info(
+            "Training run started",
+            total_timesteps=self.total_timesteps,
+            eval_freq=self.eval_freq,
+            log_dir=str(self.log_dir),
+        )
+
+        start_time = time.time()
+
+        self.agent.train(
+            total_timesteps=self.total_timesteps,
+            callback=callbacks,
+            progress_bar=True,
+            reset_num_timesteps=True,
+        )
+
+        elapsed = time.time() - start_time
+        log.info(
+            "Training complete",
+            elapsed_seconds=round(elapsed, 1),
+            steps_per_second=round(self.total_timesteps / elapsed, 0),
+        )
+
+        # Save final model into the dedicated models folder
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        final_path = self.models_dir / "final_model"
+        self.agent.save(final_path)
+        log.info("Final model saved", path=str(final_path))
+
+        return self.agent
+
+    # ── Callback assembly ─────────────────────────────────────
+
+    def _build_callbacks(self) -> CallbackList:
+        cbs = []
+
+        # 1. Pretty-printed tables: training episodes + RL diagnostics
+        cbs.append(
+            MetricsPrinterCallback(
+                print_train_episodes=self.print_train_episodes,
+                rl_diag_every=self.rl_diag_every,
+                train_date_range=self.train_date_range,
+                verbose=0,
+            )
+        )
+
+        # 2. TensorBoard trading metrics logger (raw scalars, no tables)
+        cbs.append(TradingMetricsCallback(verbose=0))
+
+        # 2. Trading-metrics evaluation + composite best-model saving + early stop
+        eval_cb = TradingEvalCallback(
+            eval_env=self.eval_env,
+            save_path=self.models_dir,
+            eval_freq=self.eval_freq,
+            n_eval_episodes=self.n_eval_episodes,
+            warmup_steps=self.warmup_steps,
+            patience_steps=self.patience_steps,
+            w_sharpe=self.w_sharpe,
+            w_pnl=self.w_pnl,
+            w_wl=self.w_wl,
+            w_dd=self.w_dd,
+            verbose=1,
+        )
+        cbs.append(eval_cb)
+
+        # 3. Periodic checkpoint saving
+        checkpoint_cb = CheckpointCallback(
+            save_freq=self.checkpoint_manager.save_freq,
+            save_path=str(self.log_dir / "checkpoints"),
+            name_prefix="rl_trading",
+            verbose=0,
+        )
+        cbs.append(checkpoint_cb)
+
+        # 4. Entropy annealing
+        cbs.append(
+            EntropyAnnealingCallback(
+                ent_coef_start=self.ent_coef_start,
+                ent_coef_end=self.ent_coef_end,
+                decay_steps=self.ent_coef_decay_steps,
+            )
+        )
+
+        # 5. Curriculum (optional)
+        if self.curriculum_scheduler is not None:
+            cbs.append(CurriculumCallback(self.curriculum_scheduler))
+
+        return CallbackList(cbs)

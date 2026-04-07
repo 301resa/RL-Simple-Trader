@@ -1,0 +1,35 @@
+# risk_config.yaml
+# =================
+# Position sizing, stop loss, take profit, and risk guardrail settings.
+
+sizing:
+  risk_per_trade_pct: 0.01       # risk 1% of account per trade
+  min_contracts: 1
+  max_contracts: 3
+
+stop_loss:
+  method: zone_based             # stop placed just beyond zone boundary
+  zone_buffer_atr_pct: 0.03     # buffer beyond zone top/bottom (3% of ATR)
+  allow_stop_widening: false     # HARD RULE: never widen a stop once placed
+
+take_profit:
+  method: atr_remaining          # target = fraction of ATR remaining
+  atr_remaining_pct: 0.75        # use 75% of remaining ATR as target distance
+  min_rr_ratio: 1.5              # minimum 1.5:1 R:R required to enter
+
+trailing:
+  activate_at_r: 2.0             # activate trailing stop at 2R unrealised profit
+  trail_aggressively_at_r: 4.0   # tighten trail at 4R
+  lock_in_r_at_trail: 2.0        # lock in at least 2R when trailing activates
+
+atr_gate:
+  block_entries_above_pct: 0.95  # block new entries if session used >= 95% of ATR
+
+daily_limits:
+  max_daily_loss_r: 3.0          # stop trading after -3R on the day
+  max_trades_per_day: 10         # maximum entries per session
+  max_consecutive_losses_before_pause: 3
+  pause_bars_after_loss_streak: 6  # bars to sit out after loss streak
+
+session:
+  no_entry_last_n_bars: 3        # no new entries in last 3 bars of RTH

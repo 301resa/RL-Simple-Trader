@@ -1,0 +1,184 @@
+"""
+features/observation_builder.py
+=================================
+Assembles the neural network observation vector from all feature states.
+
+The observation is a flat float32 numpy array containing:
+  1. Recent OHLCV price history (price normalised by ATR, volume by avg)
+  2. ATR features (exhaustion, remaining room)
+  3. Zone features (distance to supply/demand, in-zone flags)
+  4. Liquidity features (sweep presence, direction)
+  5. Trend features (state one-hots, strength, swing counts)
+  6. Order zone / confluence features (score, R:R, rejection candle)
+  7. Portfolio state (position, P&L, drawdown, trade counts)
+  8. Session timing (fraction of session elapsed / remaining)
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+
+from features.atr_calculator import ATRState
+from features.zone_detector import ZoneState
+from features.liquidity_detector import LiquidityState
+from features.order_zone_engine import OrderZoneState
+
+
+class ObservationBuilder:
+    """
+    Assembles the flat observation vector fed to the policy network.
+
+    Parameters
+    ----------
+    normalize_observations : bool
+        Reserved for future running-normalisation integration.
+    clip_value : float
+        All observation components are clipped to [-clip_value, clip_value].
+        Also used by TradingEnv as the observation_space bound.
+    price_history_len : int
+        Number of most recent bars to include as OHLCV price features.
+    """
+
+    def __init__(
+        self,
+        normalize_observations: bool = False,
+        clip_value: float = 10.0,
+        lookback_bars: int = 8,
+    ) -> None:
+        self.normalize_observations = normalize_observations
+        self.clip_value = clip_value
+        self.price_history_len = lookback_bars  # internal alias
+
+    @property
+    def obs_dim(self) -> int:
+        """Total length of the observation vector (deterministic from config).
+
+        Fixed features (33):
+          ATR(4) + Zone(4) + Liquidity(5) + OrderZone(10) + Portfolio(8) + Session(2)
+        Trend features removed — LSTM carries directional memory across candles.
+        """
+        return self.price_history_len * 5 + 33
+
+    def build(
+        self,
+        bars: pd.DataFrame,
+        current_bar_idx: int,
+        atr_state: ATRState,
+        zone_state: ZoneState,
+        liquidity_state: LiquidityState,
+        order_zone_state: OrderZoneState,
+        portfolio_state: dict,
+        session_info: dict,
+    ) -> np.ndarray:
+        """
+        Build and return the observation vector for the current bar.
+
+        All values are finite float32, clipped to [-clip_value, clip_value].
+
+        Returns
+        -------
+        np.ndarray, dtype=float32
+        """
+        cv   = self.clip_value
+        atr  = max(atr_state.atr_daily, 1.0)
+        current_bar  = bars.iloc[current_bar_idx]
+        current_close = float(current_bar["close"])
+        features: list = []
+
+        # ── 1. Recent price history (normalised by ATR) ───────
+        for i in range(self.price_history_len):
+            idx = current_bar_idx - (self.price_history_len - 1 - i)
+            if idx < 0:
+                features.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+                continue
+            b = bars.iloc[idx]
+            ref = current_close
+            features.append(float(np.clip((float(b["open"])  - ref) / atr, -cv, cv)))
+            features.append(float(np.clip((float(b["high"])  - ref) / atr, -cv, cv)))
+            features.append(float(np.clip((float(b["low"])   - ref) / atr, -cv, cv)))
+            features.append(float(np.clip((float(b["close"]) - ref) / atr, -cv, cv)))
+            # Volume ratio (current vs rolling 20-bar average)
+            vol = float(b["volume"]) if "volume" in b.index else 0.0
+            # Normalise against the 20 bars BEFORE this bar (exclude current
+            # bar from its own denominator — avoids self-referencing).
+            vol_window = bars.iloc[max(0, idx - 20): idx]
+            if "volume" in bars.columns and len(vol_window) > 0:
+                avg_vol = float(vol_window["volume"].mean())
+            else:
+                avg_vol = max(vol, 1.0)  # fallback for first bar
+            features.append(float(np.clip(vol / max(avg_vol, 1.0), 0.0, 5.0)))
+
+        # ── 2. ATR features ───────────────────────────────────
+        atr_dict = atr_state.as_feature_dict()
+        features.extend([
+            atr_dict["atr_pct_used"],
+            atr_dict["atr_remaining_norm"],
+            atr_dict["atr_exhausted"],
+            atr_dict["atr_warning"],
+        ])
+
+        # ── 3. Zone features ──────────────────────────────────
+        zone_dict = zone_state.as_feature_dict(current_close, atr)
+        features.extend([
+            zone_dict["supply_zone_dist_norm"],
+            zone_dict["demand_zone_dist_norm"],
+            zone_dict["in_supply_zone"],
+            zone_dict["in_demand_zone"],
+        ])
+
+        # ── 4. Liquidity features ─────────────────────────────
+        liq_dict = liquidity_state.as_feature_dict()
+        features.extend([
+            liq_dict["has_recent_sweep"],
+            liq_dict["sweep_up"],
+            liq_dict["sweep_down"],
+            liq_dict["n_swing_highs"],
+            liq_dict["n_swing_lows"],
+        ])
+
+        # ── 5. Order zone / confluence features ──────────────
+        # (Trend features removed — LSTM builds directional memory across candles.)
+        rc = order_zone_state.rejection_candle
+        # Map direction {-1, 0, 1} → {0.0, 0.5, 1.0} for the network
+        rc_dir_norm = float((rc.direction + 1) / 2.0)
+        features.extend([
+            float(np.clip(order_zone_state.confluence_score, 0.0, 1.0)),
+            float(order_zone_state.in_bearish_order_zone),
+            float(order_zone_state.in_bullish_order_zone),
+            float(order_zone_state.zone_type.value == "bearish"),
+            float(order_zone_state.zone_type.value == "bullish"),
+            float(np.clip(order_zone_state.rr_ratio / 10.0, 0.0, 1.0)),
+            float(order_zone_state.trade_worthwhile),
+            float(rc.detected),
+            float(np.clip(rc.strength, 0.0, 1.0)),
+            rc_dir_norm,
+        ])
+
+        # ── 6. Portfolio state ────────────────────────────────
+        pos_dir = portfolio_state.get("position_direction", "FLAT")
+        features.extend([
+            float(portfolio_state.get("position_open", False)),
+            float(pos_dir == "LONG"),
+            float(pos_dir == "SHORT"),
+            float(np.clip(portfolio_state.get("current_pnl_r", 0.0)        /  5.0, -1.0, 1.0)),
+            float(np.clip(portfolio_state.get("daily_pnl_r", 0.0)          / 10.0, -1.0, 1.0)),
+            float(np.clip(portfolio_state.get("max_drawdown_remaining", 1.0) / 5.0,  0.0, 1.0)),
+            float(np.clip(portfolio_state.get("trades_today", 0)            /  5.0,  0.0, 1.0)),
+            float(np.clip(portfolio_state.get("consecutive_losses", 0)      /  3.0,  0.0, 1.0)),
+        ])
+
+        # ── 7. Session timing ─────────────────────────────────
+        features.extend([
+            float(np.clip(session_info.get("session_time_pct",    0.5), 0.0, 1.0)),
+            float(np.clip(session_info.get("bars_remaining_pct",  0.5), 0.0, 1.0)),
+        ])
+
+        # ── Assemble and sanitise ─────────────────────────────
+        obs = np.array(features, dtype=np.float32)
+        obs = np.clip(obs, -cv, cv)
+        obs = np.nan_to_num(obs, nan=0.0, posinf=cv, neginf=-cv)
+
+        return obs

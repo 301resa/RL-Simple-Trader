@@ -1,0 +1,745 @@
+"""
+environment/trading_env.py
+===========================
+Core Gymnasium trading environment implementing the full MDP.
+
+Episode structure:
+  - 1 episode = 1 RTH trading session (e.g. 09:30–16:00 EST)
+  - 1 timestep = 1 intraday bar (e.g. 5-minute bar)
+  - ~78 steps per episode for NQ/ES futures
+
+At each step:
+  1. Build observation from all feature modules
+  2. Compute action mask (invalid actions zeroed)
+  3. Agent selects action from masked distribution
+  4. Execute action via PositionManager
+  5. Compute reward via RewardCalculator
+  6. Advance bar; check termination conditions
+
+Compliant with gymnasium.Env API (stable-baselines3 compatible).
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import gymnasium as gym
+from gymnasium import spaces
+
+from data.data_augmentor import OHLCVAugmentor
+from data.data_loader import DataLoader
+from environment.action_space import Action, ActionMasker
+from environment.position_manager import ExitReason, PositionDirection, PositionManager
+from environment.reward_calculator import RewardCalculator, RewardBreakdown
+from features.atr_calculator import ATRCalculator, ATRState
+from features.liquidity_detector import LiquidityDetector
+from features.observation_builder import ObservationBuilder
+from features.order_zone_engine import OrderZoneEngine, OrderZoneState
+from features.trend_classifier import TrendClassifier
+from features.zone_detector import ZoneDetector
+from utils.logger import get_logger
+
+log = get_logger(__name__)
+
+
+class TradingEnv(gym.Env):
+    """
+    Gymnasium environment for the Order Zone RL trading agent.
+
+    Parameters
+    ----------
+    data_loader : DataLoader
+        Loaded data source (intraday + daily OHLCV).
+    trading_days : List[str]
+        List of date strings to sample episodes from.
+    position_manager : PositionManager
+        Pre-configured risk/position handler.
+    reward_calculator : RewardCalculator
+        Pre-configured reward function.
+    observation_builder : ObservationBuilder
+        Pre-configured observation assembler.
+    atr_calculator : ATRCalculator
+        Pre-configured ATR feature engine.
+    zone_detector : ZoneDetector
+        Pre-configured S/D zone detector.
+    liquidity_detector : LiquidityDetector
+        Pre-configured liquidity detector.
+    trend_classifier : TrendClassifier
+        Pre-configured trend engine.
+    order_zone_engine : OrderZoneEngine
+        Pre-configured confluence scoring engine.
+    action_masker : ActionMasker
+        Pre-configured action masking logic.
+    rth_start : str
+        Session start time string, e.g. "09:30".
+    rth_end : str
+        Session end time string, e.g. "16:00".
+    no_entry_last_n_bars : int
+        Block entries in last N bars of session.
+    early_terminate_on_max_dd : bool
+        End episode immediately on max drawdown breach.
+    point_value : float
+        Dollar value per point per micro contract.
+    curriculum_filter_fn : Optional[callable]
+        If provided, called with (date, daily_bar) → bool.
+        Returns True if this day should be included in the current
+        curriculum stage.
+    augmentor : OHLCVAugmentor, optional
+        If provided, applied to session bars on every reset() call.
+        Intended for training envs only — pass None for eval/test envs.
+    session_type : str
+        "RTH"    → Regular Trading Hours only  (rth_start – rth_end)
+        "GLOBEX" → bars outside RTH in the day file (pre + post market)
+        "FULL"   → all bars in the day file (no time filter)
+    random_start : bool
+        If True (default for training) the episode begins at a randomly
+        sampled bar rather than the first bar.  The start is drawn from
+        the env's seeded RNG so it is reproducible and consistent within
+        a given env worker, but differs across workers.
+    seed : Optional[int]
+    """
+
+    metadata = {"render_modes": ["human"]}
+
+    def __init__(
+        self,
+        data_loader: DataLoader,
+        trading_days: List[str],
+        position_manager: PositionManager,
+        reward_calculator: RewardCalculator,
+        observation_builder: ObservationBuilder,
+        atr_calculator: ATRCalculator,
+        zone_detector: ZoneDetector,
+        liquidity_detector: LiquidityDetector,
+        trend_classifier: TrendClassifier,
+        order_zone_engine: OrderZoneEngine,
+        action_masker: ActionMasker,
+        rth_start: str = "09:30",
+        rth_end: str = "16:00",
+        no_entry_last_n_bars: int = 3,
+        early_terminate_on_max_dd: bool = True,
+        point_value: float = 2.0,
+        bar_minutes: int = 5,
+        curriculum_filter_fn: Optional[Any] = None,
+        augmentor: Optional[OHLCVAugmentor] = None,
+        session_type: str = "RTH",
+        random_start: bool = False,
+        seed: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+
+        self.data_loader = data_loader
+        self.trading_days = trading_days
+        self.position_manager = position_manager
+        self.reward_calculator = reward_calculator
+        self.observation_builder = observation_builder
+        self.atr_calculator = atr_calculator
+        self.zone_detector = zone_detector
+        self.liquidity_detector = LiquidityDetector(
+            swing_lookback=liquidity_detector.swing_lookback,
+            proximity_atr_pct=liquidity_detector.proximity_atr_pct,
+            sweep_wick_min_atr_pct=liquidity_detector.sweep_wick_min_atr_pct,
+            sweep_lookback_bars=liquidity_detector.sweep_lookback_bars,
+        )
+        self.trend_classifier = trend_classifier
+        self.order_zone_engine = order_zone_engine
+        self.action_masker = action_masker
+        self.rth_start = rth_start
+        self.rth_end = rth_end
+        self.no_entry_last_n_bars = no_entry_last_n_bars
+        self.early_terminate_on_max_dd = early_terminate_on_max_dd
+        self.point_value = point_value
+        self.bar_minutes = bar_minutes
+        self.curriculum_filter_fn = curriculum_filter_fn
+        self.augmentor = augmentor
+        self.session_type = session_type.upper()
+        self.random_start = random_start
+
+        # State variables (initialised in reset())
+        self._current_day: Optional[str] = None
+        self._session_bars: Optional[pd.DataFrame] = None
+        self._atr_series: Optional[pd.Series] = None
+        self._current_step: int = 0
+        self._n_steps: int = 0
+        self._episode_rewards: List[float] = []
+        self._current_atr_state: Optional[ATRState] = None
+        self._entry_order_zone_state: Optional[OrderZoneState] = None
+        self._entry_atr_state: Optional[ATRState] = None
+        self._peak_unrealised_r: float = 0.0
+
+        # Define observation space eagerly using builder's known dimension
+        self._obs_dim: int = observation_builder.obs_dim
+        self._observation_space = spaces.Box(
+            low=-observation_builder.clip_value,
+            high=observation_builder.clip_value,
+            shape=(self._obs_dim,),
+            dtype=np.float32,
+        )
+        self._spaces_defined: bool = True
+
+        # RNG
+        self._rng = np.random.default_rng(seed)
+
+        # Build filtered day list for curriculum
+        self._available_days: List[str] = list(trading_days)
+
+    # ── Gymnasium API ─────────────────────────────────────────
+
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        options: Optional[dict] = None,
+    ) -> Tuple[np.ndarray, dict]:
+        """
+        Reset the environment for a new episode.
+
+        Randomly selects a trading day from the available pool.
+        """
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
+
+        # Select episode day
+        self._current_day = self._sample_episode_day()
+
+        # Load session bars
+        self._session_bars = self.data_loader.get_day_bars(self._current_day)
+        if self._session_bars.empty:
+            # Skip empty days — try another
+            log.warning("Empty session, resampling", date=self._current_day)
+            return self.reset(seed=seed, options=options)
+
+        # Filter to the configured session window
+        if self.session_type == "RTH":
+            self._session_bars = self._filter_rth(self._session_bars)
+        elif self.session_type == "GLOBEX":
+            self._session_bars = self._filter_globex(self._session_bars)
+        # FULL: no time filter — use all bars in the day file
+
+        if len(self._session_bars) < 5:
+            log.warning(
+                "Too few session bars, resampling",
+                date=self._current_day,
+                session=self.session_type,
+                bars=len(self._session_bars),
+            )
+            return self.reset(seed=seed, options=options)
+
+        # Apply per-episode OHLCV jitter (training envs only)
+        if self.augmentor is not None:
+            self._session_bars = self.augmentor.apply(self._session_bars)
+
+        # Precompute intraday ATR series (using daily ATR for this date)
+        daily_atr = self.atr_calculator.get_atr_for_date(self._current_day)
+        if daily_atr is None:
+            log.warning("No ATR for date, resampling", date=self._current_day)
+            return self.reset(seed=seed, options=options)
+
+        # Build a constant ATR series for this session (all bars = daily ATR value)
+        self._atr_series = pd.Series(
+            [daily_atr] * len(self._session_bars),
+            index=self._session_bars.index,
+        )
+
+        # Reset sub-components
+        self.position_manager.reset()
+        self.zone_detector.reset()
+
+        # Random start: agent begins at a random bar within the session.
+        # Drawn from the env's seeded RNG so it is deterministic and
+        # consistent for a given worker, but differs across workers.
+        n_bars = len(self._session_bars)
+        if self.random_start and n_bars > 5:
+            # Allow start anywhere in the first 75% of the session so
+            # there are always enough bars for a meaningful episode.
+            max_offset = max(1, int(n_bars * 0.75))
+            start_offset = int(self._rng.integers(0, max_offset))
+            self._session_bars = self._session_bars.iloc[start_offset:].reset_index(drop=False)
+            self._atr_series   = self._atr_series.iloc[start_offset:].reset_index(drop=True)
+
+        self._current_step = 0
+        self._n_steps = len(self._session_bars)
+        self._episode_rewards = []
+        self._entry_order_zone_state = None
+        self._entry_atr_state = None
+        self._peak_unrealised_r = 0.0
+
+        # Build initial observation
+        obs, info = self._build_obs_and_info()
+
+        # Lazily define spaces after first observation is built
+        if not self._spaces_defined:
+            self._define_spaces(obs)
+
+        log.debug("Episode reset", date=self._current_day, n_bars=self._n_steps)
+        return obs, info
+
+    def step(
+        self, action: int
+    ) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        """
+        Execute one timestep.
+
+        Parameters
+        ----------
+        action : int
+            Selected action (will be validated against mask).
+
+        Returns
+        -------
+        observation, reward, terminated, truncated, info
+        """
+        assert self._session_bars is not None, "Call reset() before step()."
+
+        current_bar = self._session_bars.iloc[self._current_step]
+        current_price = float(current_bar["close"])
+        current_high = float(current_bar["high"])
+        current_low = float(current_bar["low"])
+        atr_state = self._current_atr_state
+
+        # ── Validate action against mask ──────────────────────
+        mask = self._compute_action_mask(atr_state)
+        if mask[action] == 0.0:
+            # Agent chose a masked action — treat as HOLD
+            log.debug("Masked action overridden to HOLD", action=Action(action).name)
+            action = Action.HOLD
+
+        portfolio_state = self.position_manager.get_portfolio_state(current_price)
+        is_open = self.position_manager.state.is_open
+
+        # ── Execute action ────────────────────────────────────
+        reward_breakdown = RewardBreakdown(total=0.0)
+        trade_closed_this_step = False
+
+        # Update peak unrealised R tracking
+        unrealised_r = portfolio_state.get("current_pnl_r", 0.0)
+        if is_open and unrealised_r > self._peak_unrealised_r:
+            self._peak_unrealised_r = unrealised_r
+
+        if action == Action.ENTER_SHORT:
+            self._execute_entry(direction=-1, current_price=current_price, atr_state=atr_state)
+        elif action == Action.ENTER_LONG:
+            self._execute_entry(direction=1, current_price=current_price, atr_state=atr_state)
+        elif action == Action.EXIT:
+            pass  # Handled in position_manager.update below
+
+        # ── Update position (check stops, targets, trail) ─────
+        agent_wants_exit = (action == Action.EXIT)
+        agent_wants_trail = (action == Action.TRAIL_STOP)
+
+        pos_closed, exit_reason, closed_trade = self.position_manager.update(
+            current_price=current_price,
+            current_bar_high=current_high,
+            current_bar_low=current_low,
+            current_bar_idx=self._current_step,
+            atr=float(self._atr_series.iloc[self._current_step]),
+            agent_wants_exit=agent_wants_exit,
+            agent_wants_trail=agent_wants_trail,
+        )
+
+        if pos_closed and closed_trade is not None:
+            trade_closed_this_step = True
+            reward_breakdown = self.reward_calculator.trade_close_reward(
+                trade=closed_trade,
+                order_zone_state=self._entry_order_zone_state or self._get_current_order_zone_state(),
+                atr_state=self._entry_atr_state or atr_state,
+                was_trailing=self.position_manager.state.trailing_active,
+                peak_unrealised_r=self._peak_unrealised_r,
+            )
+            self._peak_unrealised_r = 0.0  # Reset for next trade
+        else:
+            # Step-level reward (entry quality shaping, etc.)
+            order_zone_state = self._get_current_order_zone_state()
+            reward_breakdown = self.reward_calculator.step_reward(
+                action=action,
+                is_position_open=self.position_manager.state.is_open,
+                atr_state=atr_state,
+                order_zone_state=order_zone_state,
+                trend_snapshot=None,   # trend removed
+                portfolio_state=portfolio_state,
+            )
+
+        # ── Check termination conditions ──────────────────────
+        terminated = False
+        truncated = False
+
+        # Max drawdown breach
+        if self.position_manager.is_max_drawdown_breached(current_price):
+            dd_reward = self.reward_calculator.violation_reward("max_drawdown_breach")
+            reward_breakdown = RewardBreakdown(
+                total=reward_breakdown.total + dd_reward.total,
+                violation_penalty=dd_reward.total,
+                shaping_note="max_drawdown_breach",
+            )
+            self.position_manager.force_close(current_price, self._current_step, ExitReason.MAX_DRAWDOWN)
+            if self.early_terminate_on_max_dd:
+                terminated = True
+
+        # End of session
+        self._current_step += 1
+        if self._current_step >= self._n_steps:
+            # Force close any open position at session end
+            if self.position_manager.state.is_open:
+                close_price = float(self._session_bars.iloc[-1]["close"])
+                self.position_manager.force_close(close_price, self._current_step - 1, ExitReason.SESSION_END)
+            truncated = True
+
+        # ── Build next observation ────────────────────────────
+        if not (terminated or truncated):
+            obs, info = self._build_obs_and_info()
+        else:
+            obs = self._last_obs if hasattr(self, "_last_obs") else np.zeros(self._obs_dim or 1, dtype=np.float32)
+            info = self._episode_summary()
+
+        self._episode_rewards.append(reward_breakdown.total)
+
+        return obs, float(reward_breakdown.total), terminated, truncated, info
+
+    def action_masks(self) -> np.ndarray:
+        """
+        Return the current action mask.
+        Required by MaskablePPO from sb3-contrib.
+        """
+        if self._current_atr_state is None:
+            return np.ones(Action.n_actions(), dtype=np.float32)
+        return self._compute_action_mask(self._current_atr_state)
+
+    def render(self, mode: str = "human") -> None:
+        if mode == "human":
+            ps = self.position_manager.state
+            print(
+                f"Day: {self._current_day} | Bar: {self._current_step}/{self._n_steps} | "
+                f"Position: {ps.direction.name} | "
+                f"Daily PnL R: {ps.realised_pnl_r:.2f} | "
+                f"Trades: {ps.trades_today}"
+            )
+
+    @property
+    def observation_space(self) -> spaces.Box:
+        if not self._spaces_defined:
+            raise RuntimeError("Call reset() at least once to define observation_space.")
+        return self._observation_space
+
+    @property
+    def action_space(self) -> spaces.Discrete:
+        return spaces.Discrete(Action.n_actions())
+
+    # ── Private helpers ───────────────────────────────────────
+
+    def _define_spaces(self, sample_obs: np.ndarray) -> None:
+        self._obs_dim = len(sample_obs)
+        self._observation_space = spaces.Box(
+            low=-self.observation_builder.clip_value,
+            high=self.observation_builder.clip_value,
+            shape=(self._obs_dim,),
+            dtype=np.float32,
+        )
+        self._spaces_defined = True
+        log.info("Spaces defined", obs_dim=self._obs_dim, n_actions=Action.n_actions())
+
+    def _build_obs_and_info(self) -> Tuple[np.ndarray, dict]:
+        """Build the observation vector and info dict for the current step."""
+        step = min(self._current_step, self._n_steps - 1)
+        current_price = float(self._session_bars.iloc[step]["close"])
+
+        # ── Compute all features ──────────────────────────────
+        atr_state = self.atr_calculator.compute_session_state(
+            date=self._current_day,
+            session_bars=self._session_bars,
+            current_bar_idx=step,
+        )
+        if atr_state is None:
+            # Fallback with a rough ATR estimate
+            from features.atr_calculator import ATRState
+            atr_state = ATRState(
+                atr_daily=100.0, prior_day_high=current_price + 50,
+                prior_day_low=current_price - 50, prior_day_range=100.0,
+                session_high=current_price, session_low=current_price,
+                current_daily_range=0.0, atr_pct_used=0.0,
+                atr_remaining_pts=100.0, atr_exhausted=False, atr_warning=False,
+            )
+
+        self._current_atr_state = atr_state
+
+        zone_state = self.zone_detector.scan_and_update(
+            bars=self._session_bars,
+            atr_series=self._atr_series,
+            current_bar_idx=step,
+        )
+
+        liquidity_state = self.liquidity_detector.compute_state(
+            bars=self._session_bars,
+            atr_series=self._atr_series,
+            current_bar_idx=step,
+        )
+
+        order_zone_state = self.order_zone_engine.compute(
+            bars=self._session_bars,
+            current_bar_idx=step,
+            atr_state=atr_state,
+            zone_state=zone_state,
+            liquidity_state=liquidity_state,
+            trend_snapshot=None,   # trend removed — LSTM carries directional memory
+        )
+
+        portfolio_state = self.position_manager.get_portfolio_state(current_price)
+
+        session_info = {
+            "session_time_pct": step / max(self._n_steps - 1, 1),
+            "bars_remaining_pct": (self._n_steps - 1 - step) / max(self._n_steps - 1, 1),
+        }
+
+        obs = self.observation_builder.build(
+            bars=self._session_bars,
+            current_bar_idx=step,
+            atr_state=atr_state,
+            zone_state=zone_state,
+            liquidity_state=liquidity_state,
+            order_zone_state=order_zone_state,
+            portfolio_state=portfolio_state,
+            session_info=session_info,
+        )
+
+        self._last_obs = obs
+        self._last_zone_state = zone_state
+        self._last_liquidity_state = liquidity_state
+        self._last_order_zone_state = order_zone_state
+
+        info = {
+            "date": self._current_day,
+            "step": step,
+            "confluence_score": order_zone_state.confluence_score,
+            "in_order_zone": order_zone_state.in_bearish_order_zone or order_zone_state.in_bullish_order_zone,
+            "atr_pct_used": atr_state.atr_pct_used,
+            "trades_today": portfolio_state.get("trades_today", 0),
+            "daily_pnl_r": portfolio_state.get("daily_pnl_r", 0.0),
+            "action_mask": self._compute_action_mask(atr_state).tolist(),
+        }
+        return obs, info
+
+    def _get_current_order_zone_state(self) -> OrderZoneState:
+        return self._last_order_zone_state if hasattr(self, "_last_order_zone_state") else \
+            self.order_zone_engine.compute(
+                bars=self._session_bars,
+                current_bar_idx=min(self._current_step, self._n_steps - 1),
+                atr_state=self._current_atr_state,
+                zone_state=self._last_zone_state if hasattr(self, "_last_zone_state") else None,
+                liquidity_state=self._last_liquidity_state if hasattr(self, "_last_liquidity_state") else None,
+                trend_snapshot=None,
+            )
+
+    def _compute_action_mask(self, atr_state: ATRState) -> np.ndarray:
+        portfolio_state = self.position_manager.get_portfolio_state(
+            float(self._session_bars.iloc[min(self._current_step, self._n_steps - 1)]["close"])
+        )
+        order_zone_state = self._last_order_zone_state if hasattr(self, "_last_order_zone_state") else \
+            self._get_current_order_zone_state()
+
+        bars_remaining = self._n_steps - 1 - self._current_step
+
+        return self.action_masker.compute_mask(
+            is_position_open=portfolio_state["position_open"],
+            position_direction=portfolio_state["position_direction"],
+            unrealised_r=portfolio_state.get("current_pnl_r", 0.0),
+            atr_state=atr_state,
+            order_zone_state=order_zone_state,
+            trades_today=portfolio_state.get("trades_today", 0),
+            in_loss_streak_pause=self.position_manager.state.in_loss_streak_pause,
+            bars_remaining_in_session=bars_remaining,
+            max_drawdown_breached=self.position_manager.is_max_drawdown_breached(
+                float(self._session_bars.iloc[min(self._current_step, self._n_steps - 1)]["close"])
+            ),
+        )
+
+    def _execute_entry(
+        self, direction: int, current_price: float, atr_state: ATRState
+    ) -> None:
+        """Compute stop/target and open position."""
+        zone_state = self._last_zone_state if hasattr(self, "_last_zone_state") else None
+        atr = atr_state.atr_daily
+
+        # Stop loss: just beyond the zone boundary
+        buffer = atr * 0.03
+        if direction == -1 and zone_state and zone_state.nearest_supply:
+            stop_price = zone_state.nearest_supply.top + buffer
+        elif direction == 1 and zone_state and zone_state.nearest_demand:
+            stop_price = zone_state.nearest_demand.bottom - buffer
+        else:
+            # Fallback: ATR-based stop
+            stop_price = current_price + (atr * 0.15 * direction * -1)
+
+        # Target: ATR remaining level
+        from features.atr_calculator import ATRCalculator
+        target_price = ATRCalculator.compute_atr_target_price(current_price, direction, atr_state)
+
+        success, reason = self.position_manager.enter(
+            direction=direction,
+            current_price=current_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            current_bar_idx=self._current_step,
+            atr=atr,
+        )
+
+        if success:
+            # Capture entry-time state for trade close reward
+            self._entry_order_zone_state = self._last_order_zone_state if hasattr(self, "_last_order_zone_state") else None
+            self._entry_atr_state = atr_state
+            self._peak_unrealised_r = 0.0
+        else:
+            log.debug("Entry rejected by PositionManager", reason=reason)
+
+    def _sample_episode_day(self) -> str:
+        """Sample a trading day, applying curriculum filter if set."""
+        candidates = self._available_days
+        if self.curriculum_filter_fn is not None:
+            filtered = []
+            for d in candidates:
+                daily_bar = self.data_loader.get_daily_bar(d)
+                if daily_bar is not None and self.curriculum_filter_fn(d, daily_bar):
+                    filtered.append(d)
+            candidates = filtered if filtered else self._available_days
+
+        idx = int(self._rng.integers(0, len(candidates)))
+        return candidates[idx]
+
+    def _filter_rth(self, bars: pd.DataFrame) -> pd.DataFrame:
+        """Keep only Regular Trading Hours bars."""
+        tz = bars.index.tz
+        start = pd.Timestamp(f"{self._current_day} {self.rth_start}").tz_localize(tz)
+        end   = pd.Timestamp(f"{self._current_day} {self.rth_end}").tz_localize(tz)
+        return bars.loc[(bars.index >= start) & (bars.index <= end)]
+
+    def _filter_globex(self, bars: pd.DataFrame) -> pd.DataFrame:
+        """
+        Keep bars outside RTH (pre-market 00:00→rth_start and
+        post-settlement rth_end→23:59).  These together constitute
+        the Globex overnight window within a single calendar day's file.
+        """
+        tz = bars.index.tz
+        rth_start = pd.Timestamp(f"{self._current_day} {self.rth_start}").tz_localize(tz)
+        rth_end   = pd.Timestamp(f"{self._current_day} {self.rth_end}").tz_localize(tz)
+        return bars.loc[(bars.index < rth_start) | (bars.index > rth_end)]
+
+    def _episode_summary(self) -> dict:
+        """Build full episode summary info dict used by callbacks and eval."""
+        trades  = self.position_manager.completed_trades
+        wins    = [t for t in trades if t.is_win]
+        losses  = [t for t in trades if not t.is_win]
+
+        n_trades = len(trades)
+        n_wins   = len(wins)
+        n_losses = len(losses)
+
+        # ── P&L ───────────────────────────────────────────────
+        total_r       = sum(t.pnl_r      for t in trades)
+        total_dollars = sum(t.pnl_dollars for t in trades)
+        win_rate      = n_wins / n_trades if n_trades else 0.0
+
+        avg_win_r       = float(np.mean([t.pnl_r      for t in wins]))   if wins   else 0.0
+        avg_loss_r      = float(abs(np.mean([t.pnl_r  for t in losses]))) if losses else 1.0
+        avg_win_dollars = float(np.mean([t.pnl_dollars for t in wins]))   if wins   else 0.0
+        avg_loss_dollars= float(np.mean([t.pnl_dollars for t in losses])) if losses else 0.0
+
+        profit_factor = min(
+            (sum(t.pnl_r for t in wins) / max(abs(sum(t.pnl_r for t in losses)), 1e-6))
+            if trades else 0.0,
+            99.99,
+        )
+
+        # ── Risk/reward & expected return ─────────────────────
+        avg_rr          = avg_win_r / max(avg_loss_r, 1e-6)
+        win_loss_ratio  = avg_win_r / max(avg_loss_r, 1e-6)
+        expected_return = win_rate * avg_win_r - (1.0 - win_rate) * avg_loss_r
+
+        # ── Sharpe (from per-trade returns) ───────────────────
+        if n_trades >= 2:
+            tr = np.array([t.pnl_r for t in trades], dtype=np.float32)
+            sharpe_ratio = float(np.mean(tr) / max(float(np.std(tr)), 1e-6))
+        else:
+            sharpe_ratio = 0.0
+
+        # ── Max drawdown (peak-to-trough of equity curve) ─────
+        if trades:
+            equity    = np.cumsum([t.pnl_r for t in trades])
+            peak      = np.maximum.accumulate(equity)
+            max_drawdown_r = float(np.max(peak - equity))
+            max_drawdown_pct = max_drawdown_r * self.position_manager.risk_per_trade_pct * 100.0
+        else:
+            max_drawdown_r   = 0.0
+            max_drawdown_pct = 0.0
+
+        # ── Duration ──────────────────────────────────────────
+        if trades:
+            dur_bars              = [t.duration_bars for t in trades]
+            avg_trade_duration    = float(np.mean(dur_bars))
+            avg_duration_minutes  = avg_trade_duration * self.bar_minutes
+            min_duration_minutes  = int(min(dur_bars)) * self.bar_minutes
+            max_duration_minutes  = int(max(dur_bars)) * self.bar_minutes
+        else:
+            avg_trade_duration   = 0.0
+            avg_duration_minutes = 0.0
+            min_duration_minutes = 0
+            max_duration_minutes = 0
+
+        # ── Max win / loss dollars ────────────────────────────
+        max_win_dollars  = float(max((t.pnl_dollars for t in wins),   default=0.0))
+        max_loss_dollars = float(min((t.pnl_dollars for t in losses), default=0.0))
+
+        # ── RTH vs ETH split ──────────────────────────────────
+        rth_trades_n = rth_wins_n = eth_trades_n = eth_wins_n = 0
+        if self._session_bars is not None and trades:
+            try:
+                rth_s = pd.Timestamp(f"2000-01-01 {self.rth_start}").time()
+                rth_e = pd.Timestamp(f"2000-01-01 {self.rth_end}").time()
+                for t in trades:
+                    idx = min(t.entry_bar_idx, len(self._session_bars) - 1)
+                    bar_time = self._session_bars.index[idx].time()
+                    if rth_s <= bar_time <= rth_e:
+                        rth_trades_n += 1
+                        rth_wins_n   += int(t.is_win)
+                    else:
+                        eth_trades_n += 1
+                        eth_wins_n   += int(t.is_win)
+            except Exception:
+                rth_trades_n = n_trades  # fallback: all RTH
+
+        return {
+            "date":                    self._current_day,
+            "total_reward":            sum(self._episode_rewards),
+            # P&L
+            "total_pnl_r":             total_r,
+            "total_pnl_dollars":       total_dollars,
+            # Counts
+            "n_trades":                n_trades,
+            "n_wins":                  n_wins,
+            "n_losses":                n_losses,
+            "win_rate":                win_rate,
+            # Per-trade averages
+            "avg_win_r":               avg_win_r,
+            "avg_loss_r":              avg_loss_r,
+            "avg_win_dollars":         avg_win_dollars,
+            "avg_loss_dollars":        avg_loss_dollars,
+            "max_win_dollars":         max_win_dollars,
+            "max_loss_dollars":        max_loss_dollars,
+            # Ratios
+            "profit_factor":           profit_factor,
+            "avg_rr":                  avg_rr,
+            "win_loss_ratio":          win_loss_ratio,
+            "expected_return":         expected_return,
+            "sharpe_ratio":            sharpe_ratio,
+            # Drawdown
+            "max_drawdown_r":          max_drawdown_r,
+            "max_drawdown_pct":        max_drawdown_pct,
+            # Duration
+            "avg_trade_duration":      avg_trade_duration,
+            "avg_duration_minutes":    avg_duration_minutes,
+            "min_duration_minutes":    min_duration_minutes,
+            "max_duration_minutes":    max_duration_minutes,
+            # Session split
+            "rth_trades":              rth_trades_n,
+            "rth_wins":                rth_wins_n,
+            "eth_trades":              eth_trades_n,
+            "eth_wins":                eth_wins_n,
+        }

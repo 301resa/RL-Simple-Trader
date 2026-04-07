@@ -1,0 +1,15 @@
+# logging_config.yaml
+# ====================
+# Logging output configuration.
+
+level: INFO           # DEBUG, INFO, WARNING, ERROR
+
+format: console       # "console" (human-readable) or "json" (structured)
+
+outputs:
+  console:
+    rich_formatting: true    # coloured output in terminal (requires Rich)
+
+  file:
+    enabled: true
+    path: logs/metrics.log   # all table output also saved here

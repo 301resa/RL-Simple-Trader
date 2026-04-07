@@ -1,0 +1,46 @@
+# features_config.yaml
+# =====================
+# Feature engineering parameters for all signal modules.
+
+atr:
+  period: 1                       # Wilder's ATR period (days)
+  exhaustion_threshold: 0.95       # session range >= 95% of ATR → exhausted
+  danger_threshold: 0.85           # session range >= 85% of ATR → warning
+  profit_target_pct: 0.75          # target = 75% of remaining ATR
+
+swing:
+  lookback_bars: 5                 # bars each side required to confirm a swing
+
+zones:
+  consolidation_min_bars: 2        # minimum bars in consolidation base
+  consolidation_max_bars: 8        # maximum bars in consolidation base
+  consolidation_range_atr_pct: 0.30  # max consolidation range (30% of ATR)
+  impulse_min_body_atr_pct: 0.15   # min impulse body size (15% of ATR)
+  max_zone_touches: 3              # invalidate zone after N price touches
+  max_zone_age_bars: 200           # invalidate zone after N bars
+  zone_buffer_atr_pct: 0.02        # proximity buffer for zone membership check
+
+liquidity:
+  proximity_atr_pct: 0.05          # within 5% of ATR = "near" a level
+  sweep_wick_min_atr_pct: 0.03     # minimum wick beyond level to count as sweep
+  sweep_lookback_bars: 5           # bars back to search for sweep events
+
+# trend: section retained only so existing code that reads it doesn't break,
+# but TrendClassifier output is NOT included in the observation or action mask.
+# The LSTM carries directional memory across candles instead.
+trend:
+  min_hh_hl_for_uptrend: 2
+  min_ll_lh_for_downtrend: 2
+  reversal_requires_breaks: 2
+  strength_lookback_bars: 40
+
+order_zone:
+  min_confluence_score: 0.60       # minimum score for trade_worthwhile = True
+  weights:                         # must sum to 1.0 — trend weight redistributed
+    zone: 0.35                     # supply/demand zone membership
+    sweep: 0.30                    # liquidity sweep recency
+    rejection: 0.25                # rejection candle pattern
+    atr: 0.10                      # ATR room remaining
+  rejection:
+    pin_bar_wick_ratio: 2.0        # dominant wick must be N× the opposite wick
+    engulfing_body_ratio: 0.70     # body > 70% of full range = displacement bar

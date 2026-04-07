@@ -1,0 +1,43 @@
+# reward_config.yaml
+# ===================
+# Shaped reward function configuration.
+# All values are R-multiples (multiples of initial risk).
+
+core:
+  scale: 1.0                            # global reward scaling factor
+
+step:
+  hold_flat_penalty: -0.005             # per-bar cost of doing nothing flat (5x larger to push agent to trade)
+
+entry_bonuses:
+  full_order_zone_confluence: 0.50      # all three pillars present
+  in_supply_demand_zone: 0.20          # price is inside a valid zone
+  liquidity_sweep_present: 0.15        # recent sweep detected
+  rejection_candle_present: 0.10       # rejection candle confirmed
+  atr_has_room: 0.15                   # ATR not yet in warning territory
+  high_rr_ratio: 0.20                  # R:R >= minimum
+
+entry_penalties:
+  entry_cost: -0.02                    # reduced transaction cost proxy
+  no_zone_present: -0.10              # mild penalty — don't over-discourage exploration
+  atr_exhausted: -0.50                 # halved — agent already masked from entering when exhausted
+  rr_below_minimum: -0.15             # mild — R:R mask already blocks worst cases
+  no_liquidity_confluence: -0.10      # mild — let agent explore setups without sweep
+  overtrading: -0.20                   # keep this firm to prevent overtrading
+
+exit_rewards:
+  trailing_stop_correctly: 0.30       # used trail stop before exit
+  aggressive_trail_at_4r: 0.20        # trailed aggressively at 4R profit
+  exit_at_atr_target: 0.20            # hit the ATR-based profit target
+
+exit_penalties:
+  held_past_4r_no_trail: -0.50        # held past 4R without trailing
+  gave_back_profit_pct: 0.30          # weight applied to R given back from peak
+
+violations:
+  max_drawdown_breach: -2.00          # hard guardrail breach
+  daily_loss_limit_breach: -1.00      # daily loss limit hit
+
+discipline:
+  re_entry_after_loss_streak_penalty: -0.20
+  loss_streak_threshold: 3

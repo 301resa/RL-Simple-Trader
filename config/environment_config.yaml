@@ -1,0 +1,57 @@
+# environment_config.yaml
+# ========================
+# Trading environment, session, and account settings.
+
+instruments:
+  allowed: [ES, MES, NQ, MNQ]
+  default: ES
+
+session:
+  bar_timeframe_minutes: 5
+  daily_timeframe: "1D"
+  timezone: "America/Chicago"   # CME exchange timezone
+
+  # session_type controls which bars are used for each episode:
+  #   RTH    → 08:30–15:00 CT  (Regular Trading Hours)
+  #   GLOBEX → bars outside RTH in the same day file (pre/post market)
+  #   FULL   → all bars in the day file (23-hour session)
+  session_type: "FULL"
+
+  rth_start_utc: "08:30"        # RTH open  (America/Chicago local)
+  rth_end_utc:   "15:00"        # RTH close (America/Chicago local)
+  globex_start:  "17:00"        # Globex re-open after settlement break
+  globex_end:    "08:15"        # Globex close before RTH open
+
+contracts:
+  ES:
+    micro_point_value: 50.0     # ES = $50 per point
+    tick_size: 0.25
+    tick_value: 12.50
+  MES:
+    micro_point_value: 5.0      # MES = $5 per point (micro)
+    tick_size: 0.25
+    tick_value: 1.25
+  NQ:
+    micro_point_value: 20.0
+    tick_size: 0.25
+    tick_value: 5.0
+  MNQ:
+    micro_point_value: 2.0
+    tick_size: 0.25
+    tick_value: 0.50
+
+account:
+  initial_balance: 50000.0      # starting account equity ($)
+  max_drawdown_limit: 1500.0    # hard daily drawdown limit ($) for guardrail check
+
+observation:
+  clip_observations: 10.0       # clip obs vector to [-N, N]
+  normalize_observations: false # running normalisation (enable for production)
+  lookback_bars: 1              # 1 = one candle at a time; LSTM carries session memory
+
+episode:
+  early_termination_on_max_drawdown: true
+
+curriculum:
+  enabled: false
+  stages: []

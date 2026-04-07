@@ -1,0 +1,70 @@
+# agent_config.yaml
+# ==================
+# PPO agent and neural network configuration.
+
+# RecurrentPPO uses an LSTM hidden state so the agent builds memory across
+# candles without needing a multi-bar lookback window in the observation.
+# Set lookback_bars: 1 in environment_config.yaml → one candle per step.
+algorithm: RecurrentPPO
+seed: 42
+device: auto          # "auto", "cpu", or "cuda"
+
+ppo:
+  learning_rate: 3.0e-4
+  learning_rate_schedule: linear   # "linear", "cosine", or "constant"
+  n_steps: 2048                    # rollout buffer size (steps before update)
+  batch_size: 256                  # mini-batch size (must be <= n_steps)
+  n_epochs: 10                     # gradient update epochs per rollout
+  gamma: 0.99                      # discount factor
+  gae_lambda: 0.95                 # GAE lambda
+  clip_range: 0.2                  # PPO clip range
+  ent_coef: 0.01                   # entropy coefficient (initial)
+  vf_coef: 0.5                     # value function coefficient
+  max_grad_norm: 0.5               # gradient clipping
+  total_timesteps: 2_000_000       # total training steps
+  eval_freq: 50_000                # evaluate every N steps
+  n_eval_episodes: 20              # episodes per evaluation
+
+network:
+  net_arch:
+    pi: [256, 128]                 # policy MLP layers after LSTM
+    vf: [256, 128]                 # value  MLP layers after LSTM
+  use_layer_norm: true
+  use_lstm: true                   # RecurrentPPO requires true
+  lstm_hidden_size: 256            # LSTM units — holds session memory
+  n_lstm_layers: 1
+  activation_fn: ReLU              # "ReLU", "Tanh", "ELU"
+  ortho_init: true                 # orthogonal weight initialisation
+
+exploration:
+  ent_coef_start: 0.05             # entropy at start of training
+  ent_coef_end: 0.005              # entropy at end of annealing
+  ent_coef_decay_steps: 1_000_000  # steps over which to anneal
+
+checkpointing:
+  save_freq: 100_000               # periodic checkpoint every N steps
+  keep_n_checkpoints: 5            # keep only the N most recent rolling checkpoints
+
+evaluation:
+  eval_freq: 50_000                # run val metrics every N training steps
+  n_eval_episodes: 20              # val episodes per evaluation run
+  # Early stopping — warmup must complete before patience can trigger
+  warmup_steps:   400_000          # no early stopping before this step
+  patience_steps: 550_000          # stop if no composite improvement for N steps
+  # Composite save score weights (auto-normalised to sum = 1)
+  w_sharpe: 0.30                   # Sharpe ratio        (most important)
+  w_pnl:    0.25                   # Total P&L in R
+  w_wl:     0.25                   # Win / Loss ratio
+  w_dd:     0.20                   # Max drawdown (penalises risk)
+
+multiprocessing:
+  n_envs: 16                       # parallel training environments
+  use_subprocess: true             # SubprocVecEnv (true) or DummyVecEnv (false)
+
+augmentation:
+  # Per-episode OHLCV jitter applied to training envs only (eval/test unaffected)
+  close_jitter:   0.50             # close  +/- 0.5 uniform
+  open_jitter:    0.25             # open   +/- 0.25 uniform
+  high_jitter:    0.50             # high   + U(0, 0.5)  — widened upward only
+  low_jitter:     0.50             # low    - U(0, 0.5)  — widened downward only
+  volume_jitter:  10.0             # volume +/- 10 uniform, clipped to [0, inf)
