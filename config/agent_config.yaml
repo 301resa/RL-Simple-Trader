@@ -27,11 +27,11 @@ ppo:
 
 network:
   net_arch:
-    pi: [256, 128]                 # policy MLP layers after LSTM
-    vf: [256, 128]                 # value  MLP layers after LSTM
+    pi: [256, 256]                 # policy MLP layers after LSTM
+    vf: [256, 256]                 # value  MLP layers after LSTM
   use_layer_norm: true
   use_lstm: true                   # RecurrentPPO requires true
-  lstm_hidden_size: 256            # LSTM units — holds session memory
+  lstm_hidden_size: 512            # LSTM units — holds session memory
   n_lstm_layers: 1
   activation_fn: ReLU              # "ReLU", "Tanh", "ELU"
   ortho_init: true                 # orthogonal weight initialisation
@@ -61,10 +61,3 @@ multiprocessing:
   n_envs: 16                       # parallel training environments
   use_subprocess: true             # SubprocVecEnv (true) or DummyVecEnv (false)
 
-augmentation:
-  # Per-episode OHLCV jitter applied to training envs only (eval/test unaffected)
-  close_jitter:   0.50             # close  +/- 0.5 uniform
-  open_jitter:    0.25             # open   +/- 0.25 uniform
-  high_jitter:    0.50             # high   + U(0, 0.5)  — widened upward only
-  low_jitter:     0.50             # low    - U(0, 0.5)  — widened downward only
-  volume_jitter:  10.0             # volume +/- 10 uniform, clipped to [0, inf)
