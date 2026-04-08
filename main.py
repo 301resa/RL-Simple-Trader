@@ -8,8 +8,7 @@ Usage:
     python main.py --mode train --config config/ --data data/raw/
 
     # Continue training from checkpoint
-    python main.py --mode train --config config/ --data data/raw/ \\
-                   --checkpoint logs/checkpoints/best_model.zip
+    python main.py --mode train --config config/ --data data/ --checkpoint logs/checkpoints/best_model.zip
 
     # Evaluate (backtest) a trained model
     python main.py --mode evaluate --config config/ --data data/raw/ \\
@@ -299,6 +298,7 @@ def build_components(configs: dict, data_dir: str):
             session_type=session_type,
             random_start=not is_eval,
             seed=agent_cfg.get("seed", 42) + worker_seed_offset + (100 if is_eval else 0),
+            zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
         )
 
     # ── Vectorised training env (multiprocessing) ─────────────

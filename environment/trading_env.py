@@ -128,6 +128,7 @@ class TradingEnv(gym.Env):
         session_type: str = "RTH",
         random_start: bool = False,
         seed: Optional[int] = None,
+        zone_lookback_bars: int = 500,
     ) -> None:
         super().__init__()
 
@@ -157,11 +158,16 @@ class TradingEnv(gym.Env):
         self.augmentor = augmentor
         self.session_type = session_type.upper()
         self.random_start = random_start
+        self.zone_lookback_bars = zone_lookback_bars
 
         # State variables (initialised in reset())
         self._current_day: Optional[str] = None
         self._session_bars: Optional[pd.DataFrame] = None
         self._atr_series: Optional[pd.Series] = None
+        # Combined history+session frames used by zone/liquidity detectors
+        self._combined_bars: Optional[pd.DataFrame] = None
+        self._combined_atr_series: Optional[pd.Series] = None
+        self._combined_session_offset: int = 0  # index of first session bar in _combined_bars
         self._current_step: int = 0
         self._n_steps: int = 0
         self._episode_rewards: List[float] = []
@@ -243,6 +249,31 @@ class TradingEnv(gym.Env):
             index=self._session_bars.index,
         )
 
+        # ── Build history-extended context for zone/liquidity detection ─────────
+        # Pull up to zone_lookback_bars of prior-session bars so the detectors
+        # see meaningful supply/demand structure before the current session opens.
+        history_bars = self.data_loader.get_bars_before(
+            self._current_day, self.zone_lookback_bars
+        )
+        if not history_bars.empty:
+            # Per-date daily ATR for history bars (falls back to today's ATR)
+            history_atr_vals = []
+            for ts in history_bars.index:
+                d = ts.strftime("%Y-%m-%d")
+                v = self.atr_calculator.get_atr_for_date(d)
+                history_atr_vals.append(float(v) if v is not None else daily_atr)
+            history_atr = pd.Series(history_atr_vals, index=history_bars.index)
+            combined_raw   = pd.concat([history_bars, self._session_bars])
+            combined_atr_raw = pd.concat([history_atr, self._atr_series])
+        else:
+            combined_raw     = self._session_bars.copy()
+            combined_atr_raw = self._atr_series.copy()
+
+        # Integer-indexed views — all detectors use .iloc internally
+        self._combined_bars       = combined_raw.reset_index(drop=True)
+        self._combined_atr_series = combined_atr_raw.reset_index(drop=True)
+        history_len = len(history_bars)  # 0 when no prior data
+
         # Reset sub-components
         self.position_manager.reset()
         self.zone_detector.reset()
@@ -252,6 +283,7 @@ class TradingEnv(gym.Env):
         # Drawn from the env's seeded RNG so it is deterministic and
         # consistent for a given worker, but differs across workers.
         n_bars = len(self._session_bars)
+        start_offset = 0
         if self.random_start and n_bars > 5:
             # Allow start anywhere in the first 75% of the session so
             # there are always enough bars for a meaningful episode.
@@ -259,6 +291,9 @@ class TradingEnv(gym.Env):
             start_offset = int(self._rng.integers(0, max_offset))
             self._session_bars = self._session_bars.iloc[start_offset:].reset_index(drop=False)
             self._atr_series   = self._atr_series.iloc[start_offset:].reset_index(drop=True)
+
+        # Offset into _combined_bars where the agent's episode begins
+        self._combined_session_offset = history_len + start_offset
 
         self._current_step = 0
         self._n_steps = len(self._session_bars)
@@ -273,6 +308,7 @@ class TradingEnv(gym.Env):
         self._precomputed_states: list = []
 
         for bar_idx in range(self._n_steps):
+            # ATR state uses session-only bars (daily ATR lookup, no history needed)
             atr_s = self.atr_calculator.compute_session_state(
                 date=self._current_day,
                 session_bars=self._session_bars,
@@ -288,19 +324,23 @@ class TradingEnv(gym.Env):
                     current_daily_range=0.0, atr_pct_used=0.0,
                     atr_remaining_pts=100.0, atr_exhausted=False, atr_warning=False,
                 )
+
+            # Zone + liquidity detectors use the full history-extended context
+            # so they can see supply/demand structure from prior sessions.
+            combined_idx = self._combined_session_offset + bar_idx
             zone_s = self.zone_detector.scan_and_update(
-                bars=self._session_bars,
-                atr_series=self._atr_series,
-                current_bar_idx=bar_idx,
+                bars=self._combined_bars,
+                atr_series=self._combined_atr_series,
+                current_bar_idx=combined_idx,
             )
             liq_s = self.liquidity_detector.compute_state(
-                bars=self._session_bars,
-                atr_series=self._atr_series,
-                current_bar_idx=bar_idx,
+                bars=self._combined_bars,
+                atr_series=self._combined_atr_series,
+                current_bar_idx=combined_idx,
             )
             oz_s = self.order_zone_engine.compute(
-                bars=self._session_bars,
-                current_bar_idx=bar_idx,
+                bars=self._combined_bars,
+                current_bar_idx=combined_idx,
                 atr_state=atr_s,
                 zone_state=zone_s,
                 liquidity_state=liq_s,

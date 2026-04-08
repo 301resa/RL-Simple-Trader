@@ -11,6 +11,11 @@ atr:
 swing:
   lookback_bars: 5                 # bars each side required to confirm a swing
 
+# Number of prior-session bars fed to zone/liquidity detectors on each reset.
+# At 5-min bars: 500 bars ≈ 40 hours ≈ 3–4 prior trading sessions.
+# Increase for more structural context; decrease to speed up reset.
+zone_lookback_bars: 500
+
 zones:
   consolidation_min_bars: 2        # minimum bars in consolidation base
   consolidation_max_bars: 8        # maximum bars in consolidation base

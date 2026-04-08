@@ -118,6 +118,32 @@ class DataLoader:
         self._assert_loaded()
         return self._day_index.get(date, pd.DataFrame())
 
+    def get_bars_before(self, date: str, n_bars: int) -> pd.DataFrame:
+        """
+        Return the last ``n_bars`` intraday bars that are strictly before
+        ``date`` (i.e. from prior trading sessions).
+
+        Parameters
+        ----------
+        date : str
+            Cutoff date in YYYY-MM-DD format.  All returned bars are from
+            days *earlier* than this date.
+        n_bars : int
+            Maximum number of bars to return.  Fewer bars are returned when
+            there is not enough prior history in the dataset.
+
+        Returns
+        -------
+        pd.DataFrame with the same columns as the intraday frame, sorted
+        chronologically.  Empty DataFrame when no prior data exists.
+        """
+        self._assert_loaded()
+        cutoff = pd.Timestamp(date).date()
+        prior = self._intraday[self._intraday.index.date < cutoff]
+        if prior.empty:
+            return pd.DataFrame(columns=self._intraday.columns)
+        return prior.iloc[-n_bars:]
+
     def get_daily_bar(self, date: str) -> Optional[pd.Series]:
         """
         Return the single daily OHLCV bar for a given date.
