@@ -846,4 +846,27 @@ class TradingEnv(gym.Env):
             "rth_wins":                rth_wins_n,
             "eth_trades":              eth_trades_n,
             "eth_wins":                eth_wins_n,
+            # Individual trade records (plain dicts — safe across SubprocVecEnv)
+            "trades_list": [
+                {
+                    "date":           self._current_day,
+                    "direction":      t.direction.name,
+                    "entry_price":    round(t.entry_price,    2),
+                    "stop_price":     round(t.stop_price,     2),
+                    "initial_target": round(t.initial_target, 2),
+                    "exit_price":     round(t.exit_price,     2),
+                    "pnl_r":          round(t.pnl_r,          4),
+                    "pnl_dollars":    round(t.pnl_dollars,    2),
+                    "pnl_points":     round(t.pnl_points,     2),
+                    "n_contracts":    t.n_contracts,
+                    "entry_bar_idx":  t.entry_bar_idx,
+                    "exit_bar_idx":   t.exit_bar_idx,
+                    "duration_bars":  t.duration_bars,
+                    "duration_min":   t.duration_bars * self.bar_minutes,
+                    "exit_reason":    t.exit_reason.value,
+                    "is_win":         t.is_win,
+                    "mae_r":          round(t.max_adverse_excursion, 4),
+                }
+                for t in trades
+            ],
         }

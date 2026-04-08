@@ -26,6 +26,7 @@ from stable_baselines3.common.callbacks import (
 from training.trading_eval_callback import TradingEvalCallback
 from training.metrics_logger_callback import MetricsPrinterCallback
 from training.shaping_decay_callback import ShapingDecayCallback
+from training.training_journal_callback import TrainingJournalCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from agent.ppo_agent import PPOAgent
@@ -326,7 +327,16 @@ class Trainer:
             )
         )
 
-        # 6. Curriculum (optional)
+        # 6. Training journal — Excel + Plotly HTML saved every 50k steps
+        cbs.append(
+            TrainingJournalCallback(
+                journal_dir=self.log_dir / "journal",
+                save_every_steps=50_000,
+                verbose=1,
+            )
+        )
+
+        # 7. Curriculum (optional)
         if self.curriculum_scheduler is not None:
             cbs.append(CurriculumCallback(self.curriculum_scheduler))
 
