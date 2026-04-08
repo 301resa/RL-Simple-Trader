@@ -742,17 +742,33 @@ class TradingEnv(gym.Env):
         expected_return = win_rate * avg_win_r - (1.0 - win_rate) * avg_loss_r
 
         # ── Sharpe (from per-trade returns) ───────────────────
-        if n_trades >= 2:
-            tr = np.array([t.pnl_r for t in trades], dtype=np.float32)
-            sharpe_ratio = float(np.mean(tr) / max(float(np.std(tr)), 1e-6))
+        # Require ≥5 trades and non-trivial std before computing;
+        # clamp to [-9.99, 9.99] to prevent column overflow.
+        if n_trades >= 5:
+            tr  = np.array([t.pnl_r for t in trades], dtype=np.float32)
+            std = float(np.std(tr))
+            sharpe_ratio = float(np.clip(
+                np.mean(tr) / std if std > 0.01 else 0.0,
+                -9.99, 9.99,
+            ))
         else:
             sharpe_ratio = 0.0
 
-        # ── Max drawdown (peak-to-trough of equity curve) ─────
+        # ── Conservative max drawdown ─────────────────────────
+        # For each trade the equity dipped to (equity_before - mae_r)
+        # before recovering to (equity_before + pnl_r).
+        # Using candle low (LONG) / candle high (SHORT) via the pre-recorded
+        # max_adverse_excursion field gives the worst realistic intra-trade
+        # equity trough — not just the closed-trade outcome.
         if trades:
-            equity    = np.cumsum([t.pnl_r for t in trades])
-            peak      = np.maximum.accumulate(equity)
-            max_drawdown_r = float(np.max(peak - equity))
+            equity_before  = 0.0
+            running_peak   = 0.0
+            max_drawdown_r = 0.0
+            for t in trades:
+                worst = equity_before - t.max_adverse_excursion
+                max_drawdown_r = max(max_drawdown_r, running_peak - worst)
+                equity_before += t.pnl_r
+                running_peak   = max(running_peak, equity_before)
             max_drawdown_pct = max_drawdown_r * self.position_manager.risk_per_trade_pct * 100.0
         else:
             max_drawdown_r   = 0.0
