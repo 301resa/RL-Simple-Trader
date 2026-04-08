@@ -799,7 +799,20 @@ class TradingEnv(gym.Env):
                 rth_e = pd.Timestamp(f"2000-01-01 {self.rth_end}").time()
                 for t in trades:
                     idx = min(t.entry_bar_idx, len(self._session_bars) - 1)
-                    bar_time = self._session_bars.index[idx].time()
+                    row = self._session_bars.iloc[idx]
+                    # After random_start reset_index(drop=False) the DatetimeIndex
+                    # becomes integers and the timestamp moves to a "datetime" column.
+                    if hasattr(self._session_bars.index, "hour"):
+                        bar_ts = self._session_bars.index[idx]
+                    elif "datetime" in self._session_bars.columns:
+                        bar_ts = pd.Timestamp(row["datetime"])
+                    else:
+                        bar_ts = None
+                    if bar_ts is None:
+                        rth_trades_n += 1
+                        rth_wins_n   += int(t.is_win)
+                        continue
+                    bar_time = bar_ts.time()
                     if rth_s <= bar_time <= rth_e:
                         rth_trades_n += 1
                         rth_wins_n   += int(t.is_win)

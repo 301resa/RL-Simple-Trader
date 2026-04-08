@@ -160,9 +160,10 @@ class ActionMasker:
         elif bars_remaining_in_session <= self.no_entry_last_n_bars:
             entry_blocked = True
             block_reason = "end_of_session"
-        elif atr_state.atr_pct_used >= self.atr_exhaustion_threshold:
-            entry_blocked = True
-            block_reason = "atr_exhausted"
+        # ATR exhaustion is NOT a hard mask — after a volatile RTH session the
+        # cumulative range exceeds the threshold, which would permanently block
+        # all ETH/globex entries for the rest of the day.  The reward function
+        # already penalises exhausted-ATR entries via entry_penalties["atr_exhausted"].
 
         if entry_blocked:
             mask[Action.ENTER_SHORT] = 0.0
