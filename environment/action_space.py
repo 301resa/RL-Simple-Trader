@@ -77,13 +77,12 @@ class ActionMasker:
 
     def __init__(
         self,
-        min_rr_ratio: float = 4.0,
+        min_rr_ratio: float = 4.0,   # kept for API compatibility, no longer used in mask
         atr_exhaustion_threshold: float = 0.95,
         trail_min_r: float = 2.0,
         max_trades_per_day: int = 5,
         no_entry_last_n_bars: int = 3,
     ) -> None:
-        self.min_rr_ratio = min_rr_ratio
         self.atr_exhaustion_threshold = atr_exhaustion_threshold
         self.trail_min_r = trail_min_r
         self.max_trades_per_day = max_trades_per_day
@@ -172,14 +171,10 @@ class ActionMasker:
                 log.debug("Entry masked", reason=block_reason)
             return mask
 
-        # ── R:R masking — only block if no zone at all ────────
-        # If R:R is below minimum AND there's no zone present for that
-        # direction, mask that entry. If inside a zone, allow the agent
-        # to decide — the reward penalty will discourage poor R:R entries.
-        if order_zone_state.rr_ratio < self.min_rr_ratio:
-            if not order_zone_state.in_bearish_order_zone and not order_zone_state.in_bullish_order_zone:
-                mask[Action.ENTER_SHORT] = 0.0
-                mask[Action.ENTER_LONG] = 0.0
+        # R:R and zone-presence checks are handled by the reward function
+        # (entry penalties), not the mask.  Hard-masking R:R collapses to
+        # zero valid entries whenever no zone is detected, which prevents
+        # the agent from ever exploring trade entries during early training.
 
         return mask
 
