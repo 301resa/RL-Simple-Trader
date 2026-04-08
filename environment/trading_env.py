@@ -246,6 +246,7 @@ class TradingEnv(gym.Env):
         # Reset sub-components
         self.position_manager.reset()
         self.zone_detector.reset()
+        self.reward_calculator.reset_episode_stats()
 
         # Random start: agent begins at a random bar within the session.
         # Drawn from the env's seeded RNG so it is deterministic and

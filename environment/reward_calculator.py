@@ -3,12 +3,16 @@ environment/reward_calculator.py
 ==================================
 Reward Function — the complete signal that shapes agent behaviour.
 
-All rewards are denominated in R-multiples (multiples of initial risk),
-NOT raw dollar PnL. This makes the reward scale-invariant across
-different position sizes and instruments.
+All rewards are denominated in R-multiples (multiples of initial risk)
+scaled by the episode's rolling win rate:
+
+    core_reward = pnl_r × win_rate
+
+  where win_rate is the smoothed episode win rate (Laplace prior → starts at
+  0.5 before any trades, updates after each closed trade).
 
 Design philosophy:
-  - Core reward = actual trade outcome in R
+  - Core reward = pnl_r × win_rate  (outcome × consistency)
   - Shaping rewards = bonuses/penalties for PROCESS quality (following rules)
   - Violations = hard penalties for breaking risk guardrails
 
@@ -113,8 +117,14 @@ class RewardCalculator:
         self.gave_back_profit_weight = gave_back_profit_weight
 
         # Shaping scale: 1.0 = full shaping, 0.0 = pure P&L only.
-        # Decayed externally by ShaingDecayCallback during training.
+        # Decayed externally by ShapingDecayCallback during training.
         self.shaping_scale: float = 1.0
+
+        # Episode win-rate tracking.  Reset each episode via reset_episode_stats().
+        # win_rate = (wins + 1) / (trades + 2)  — Laplace smoothing gives a 0.5
+        # prior before the first trade so the first reward is never zero.
+        self._ep_wins:   int = 0
+        self._ep_trades: int = 0
 
         # Default reward values (overridden by config)
         self.entry_bonuses = entry_bonuses or {
@@ -148,6 +158,18 @@ class RewardCalculator:
             "re_entry_after_loss_streak_penalty": -0.20,
             "loss_streak_threshold": 3,
         }
+
+    # ── Episode stats ─────────────────────────────────────────
+
+    def reset_episode_stats(self) -> None:
+        """Reset win-rate counters at the start of each episode."""
+        self._ep_wins   = 0
+        self._ep_trades = 0
+
+    @property
+    def _win_rate(self) -> float:
+        """Smoothed episode win rate with Laplace prior (range ~0.1–0.9)."""
+        return (self._ep_wins + 1) / (self._ep_trades + 2)
 
     # ── Step-level reward (called every bar) ─────────────────
 
@@ -298,8 +320,14 @@ class RewardCalculator:
         peak_unrealised_r : float
             Maximum unrealised R reached during the trade (MFE in R).
         """
-        # ── Core reward: actual R outcome ─────────────────────
-        core_r = trade.pnl_r
+        # ── Core reward: pnl_r × win_rate ────────────────────
+        # Update episode win-rate counters before computing the multiplier
+        # so the current trade's outcome immediately influences its own reward.
+        self._ep_trades += 1
+        if trade.pnl_r > 0:
+            self._ep_wins += 1
+
+        core_r = trade.pnl_r * self._win_rate
 
         exit_bonus = 0.0
         exit_penalty = 0.0
