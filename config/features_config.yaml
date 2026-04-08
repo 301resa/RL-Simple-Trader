@@ -19,8 +19,8 @@ zone_lookback_bars: 500
 zones:
   consolidation_min_bars: 2        # minimum bars in consolidation base
   consolidation_max_bars: 8        # maximum bars in consolidation base
-  consolidation_range_atr_pct: 0.30  # max consolidation range (30% of ATR)
-  impulse_min_body_atr_pct: 0.15   # min impulse body size (15% of ATR)
+  consolidation_range_atr_pct: 0.035  # max consolidation range (3.5% of ATR) — tight coil
+  impulse_min_body_atr_pct: 0.12     # min impulse body size (12% of ATR) — must exceed coil range
   max_zone_touches: 3              # invalidate zone after N price touches
   max_zone_age_bars: 200           # invalidate zone after N bars
   zone_buffer_atr_pct: 0.02        # proximity buffer for zone membership check
