@@ -21,9 +21,7 @@ logs/
 *.pkl
 
 # ── Data (large CSV — share separately) ──────────────────────
-data/ES_5min_Data.csv
-data/NQ_5min_Data.csv
-data/*.csv
+
 
 # ── Jupyter ───────────────────────────────────────────────────
 .ipynb_checkpoints/
