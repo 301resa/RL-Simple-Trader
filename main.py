@@ -5,7 +5,7 @@ Entry point for the RL Trading Agent.
 
 Usage:
     # Train from scratch
-    python main.py --mode train --config config/ --data data/raw/
+    python main.py --mode train --config config/ --data data
 
     # Continue training from checkpoint
     python main.py --mode train --config config/ --data data/ --checkpoint logs/checkpoints/best_model.zip
@@ -16,6 +16,9 @@ Usage:
 
     # Print journal analysis for a completed backtest
     python main.py --mode analyse --journal logs/journal/
+
+    # Walk-forward analysis (rolling 12-month train / 5-week val folds)
+    python main.py --mode walk_forward --config config/ --data data/
 
 All parameters are loaded from YAML config files — no command-line
 parameter overrides for model hyperparameters (edit the YAML instead).
@@ -577,6 +580,382 @@ def run_evaluate(args: argparse.Namespace, configs: dict) -> None:
     })
 
 
+def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
+    """
+    Walk-forward analysis.
+
+    For each fold:
+      1. Build train/val environments from the fold's date ranges.
+      2. Train a fresh agent on the training window.
+      3. Save fold journal (Excel + HTML) to <output_dir>/fold_<N>/.
+
+    Config keys (agent_config.yaml → walk_forward):
+      n_folds      : int  — folds to run (-1 = all possible, default 1)
+      train_months : int  — training window in calendar months (default 12)
+      val_weeks    : int  — validation window in weeks (default 5)
+      output_dir   : str  — root output dir (default logs/walk_forward)
+    """
+    import numpy as np
+    import pandas as _pd
+    from datetime import datetime
+
+    from agent.ppo_agent import PPOAgent
+    from data.data_augmentor import OHLCVAugmentor
+    from data.data_loader import DataLoader
+    from data.data_splitter import DataSplitter
+    from environment.action_space import ActionMasker
+    from environment.position_manager import PositionManager
+    from environment.reward_calculator import RewardCalculator
+    from environment.trading_env import TradingEnv
+    from features.atr_calculator import ATRCalculator
+    from features.liquidity_detector import LiquidityDetector
+    from features.observation_builder import ObservationBuilder
+    from features.order_zone_engine import OrderZoneEngine
+    from features.trend_classifier import TrendClassifier
+    from features.zone_detector import ZoneDetector
+    from training.checkpoint_manager import CheckpointManager
+    from training.fold_journal_callback import FoldJournalCallback
+    from training.trainer import Trainer
+
+    log.info("Mode: WALK_FORWARD")
+
+    agent_cfg   = configs["agent"]
+    env_cfg     = configs["environment"]
+    feat_cfg    = configs["features"]
+    risk_cfg    = configs["risk"]
+    reward_cfg  = configs["reward"]
+    ppo_cfg     = agent_cfg.get("ppo", {})
+    net_cfg     = agent_cfg.get("network", {})
+    exp_cfg     = agent_cfg.get("exploration", {})
+    mp_cfg      = agent_cfg.get("multiprocessing", {})
+    wf_cfg      = agent_cfg.get("walk_forward", {})
+    eval_cfg    = agent_cfg.get("evaluation", {})
+    ckpt_cfg    = agent_cfg.get("checkpointing", {})
+
+    # ── Walk-forward parameters ───────────────────────────────
+    n_folds_cfg    = int(wf_cfg.get("n_folds", 1))
+    train_months   = int(wf_cfg.get("train_months", 12))
+    val_weeks      = int(wf_cfg.get("val_weeks", 5))
+    n_train_days   = train_months * 21      # approx trading days per month
+    n_val_days     = val_weeks * 5          # approx trading days per week
+    output_root    = Path(wf_cfg.get("output_dir", "logs/walk_forward"))
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    # ── Common infrastructure (shared across folds) ────────────
+    instrument   = env_cfg.get("instruments", {}).get("default", "NQ")
+    session_cfg  = env_cfg.get("session", {})
+    atr_cfg      = feat_cfg.get("atr", {})
+    zones_cfg    = feat_cfg.get("zones", {})
+    liq_cfg      = feat_cfg.get("liquidity", {})
+    swing_cfg    = feat_cfg.get("swing", {})
+    trend_cfg    = feat_cfg.get("trend", {})
+    oz_cfg       = feat_cfg.get("order_zone", {})
+    obs_cfg      = env_cfg.get("observation", {})
+    atr_gate_cfg = risk_cfg.get("atr_gate", {})
+    daily_lim_cfg= risk_cfg.get("daily_limits", {})
+    session_risk = risk_cfg.get("session", {})
+    account_cfg  = env_cfg.get("account", {})
+    sizing_cfg   = risk_cfg.get("sizing", {})
+    trail_cfg    = risk_cfg.get("trailing", {})
+    contracts_cfg= env_cfg.get("contracts", {}).get(instrument, {})
+
+    data_loader = DataLoader(
+        data_dir=args.data,
+        instrument=instrument,
+        intraday_tf=f"{session_cfg.get('bar_timeframe_minutes', 5)}min",
+        daily_tf=session_cfg.get("daily_timeframe", "1D"),
+        tz=session_cfg.get("timezone", "America/New_York"),
+    )
+    data_loader.load()
+
+    atr_calculator = ATRCalculator(
+        atr_period=atr_cfg.get("period", 14),
+        exhaustion_threshold=atr_cfg.get("exhaustion_threshold", 0.95),
+        warning_threshold=atr_cfg.get("danger_threshold", 0.85),
+    )
+    atr_calculator.fit(data_loader.daily)
+
+    all_days = data_loader.get_trading_days()
+    trading_days = [
+        d for d in all_days
+        if _pd.Timestamp(d).weekday() < 5
+        and atr_calculator.get_atr_for_date(d) is not None
+    ]
+    log.info("Valid trading days", total=len(trading_days))
+
+    # ── Build walk-forward folds ──────────────────────────────
+    folds = DataSplitter.walk_forward_splits(
+        trading_days,
+        n_train_days=n_train_days,
+        n_val_days=n_val_days,
+        n_folds=n_folds_cfg,
+    )
+    log.info(
+        "Walk-forward folds",
+        n_folds=len(folds),
+        n_train_days=n_train_days,
+        n_val_days=n_val_days,
+    )
+
+    # ── Shared component factories ────────────────────────────
+    real_capital = float(account_cfg.get("initial_balance", 2500))
+    point_value  = float(contracts_cfg.get("micro_point_value", 2.0))
+    session_start= session_cfg.get("rth_start_utc", "08:30")
+    session_end  = session_cfg.get("rth_end_utc",   "15:00")
+    session_type = session_cfg.get("session_type", "RTH").upper()
+    bar_minutes  = int(session_cfg.get("bar_timeframe_minutes", 5))
+    n_envs       = int(mp_cfg.get("n_envs", 4))
+    use_subproc  = mp_cfg.get("use_subprocess", True)
+
+    zone_detector_defaults = {
+        "consolidation_min_bars": 2, "consolidation_max_bars": 8,
+        "consolidation_range_atr_pct": 0.20, "impulse_min_body_atr_pct": 0.15,
+        "max_zone_age_bars": 200, "max_zone_touches": 3, "zone_buffer_atr_pct": 0.02,
+    }
+
+    liquidity_detector = LiquidityDetector(
+        swing_lookback=swing_cfg.get("lookback_bars", 5),
+        proximity_atr_pct=liq_cfg.get("proximity_atr_pct", 0.05),
+        sweep_wick_min_atr_pct=liq_cfg.get("sweep_wick_min_atr_pct", 0.03),
+        sweep_lookback_bars=liq_cfg.get("sweep_lookback_bars", 5),
+    )
+    trend_classifier = TrendClassifier(
+        swing_lookback=swing_cfg.get("lookback_bars", 5),
+        min_hh_hl_for_uptrend=trend_cfg.get("min_hh_hl_for_uptrend", 2),
+        min_ll_lh_for_downtrend=trend_cfg.get("min_ll_lh_for_downtrend", 2),
+        reversal_requires_breaks=trend_cfg.get("reversal_requires_breaks", 2),
+        strength_lookback_bars=trend_cfg.get("strength_lookback_bars", 40),
+    )
+    order_zone_engine = OrderZoneEngine(
+        weights=oz_cfg.get("weights"),
+        min_confluence_score=oz_cfg.get("min_confluence_score", 0.60),
+        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 4.0),
+        pin_bar_wick_ratio=oz_cfg.get("rejection", {}).get("pin_bar_wick_ratio", 2.0),
+        engulfing_body_ratio=oz_cfg.get("rejection", {}).get("engulfing_body_ratio", 1.1),
+    )
+    observation_builder = ObservationBuilder(
+        clip_value=obs_cfg.get("clip_observations", 10.0),
+        normalize_observations=obs_cfg.get("normalize_observations", True),
+        lookback_bars=obs_cfg.get("lookback_bars", 20),
+    )
+    action_masker = ActionMasker(
+        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 4.0),
+        atr_exhaustion_threshold=atr_gate_cfg.get("block_entries_above_pct", 0.95),
+        trail_min_r=trail_cfg.get("activate_at_r", 2.0),
+        max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
+        no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
+    )
+    reward_calculator = RewardCalculator.from_config(reward_cfg)
+    train_augmentor   = OHLCVAugmentor(rng=np.random.default_rng(agent_cfg.get("seed", 42)))
+
+    def make_position_manager():
+        return PositionManager(
+            real_capital=real_capital,
+            risk_per_trade_pct=sizing_cfg.get("risk_per_trade_pct", 0.01),
+            min_contracts=sizing_cfg.get("min_contracts", 1),
+            max_contracts=sizing_cfg.get("max_contracts", 3),
+            point_value=point_value,
+            max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
+            trail_activate_r=trail_cfg.get("activate_at_r", 2.0),
+            trail_aggressive_r=trail_cfg.get("trail_aggressively_at_r", 4.0),
+            trail_lock_in_r=trail_cfg.get("lock_in_r_at_trail", 2.0),
+            max_daily_loss_r=daily_lim_cfg.get("max_daily_loss_r", 3.0),
+            max_drawdown_r=5.0,
+            pause_bars_after_loss_streak=daily_lim_cfg.get("pause_bars_after_loss_streak", 6),
+            loss_streak_threshold=daily_lim_cfg.get("max_consecutive_losses_before_pause", 3),
+            zone_buffer_atr_pct=risk_cfg.get("stop_loss", {}).get("zone_buffer_atr_pct", 0.03),
+        )
+
+    def make_env(day_list, is_eval=False, worker_seed_offset=0):
+        return TradingEnv(
+            data_loader=data_loader,
+            trading_days=day_list,
+            position_manager=make_position_manager(),
+            reward_calculator=reward_calculator,
+            observation_builder=observation_builder,
+            atr_calculator=atr_calculator,
+            zone_detector=ZoneDetector(**{
+                k: zones_cfg.get(k, v) for k, v in zone_detector_defaults.items()
+            }),
+            liquidity_detector=liquidity_detector,
+            trend_classifier=trend_classifier,
+            order_zone_engine=order_zone_engine,
+            action_masker=action_masker,
+            rth_start=session_start,
+            rth_end=session_end,
+            no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
+            early_terminate_on_max_dd=env_cfg.get("episode", {}).get("early_termination_on_max_drawdown", True),
+            point_value=point_value,
+            bar_minutes=bar_minutes,
+            curriculum_filter_fn=None,
+            augmentor=None if is_eval else train_augmentor,
+            session_type=session_type,
+            random_start=not is_eval,
+            seed=agent_cfg.get("seed", 42) + worker_seed_offset + (100 if is_eval else 0),
+            zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
+        )
+
+    from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
+
+    fold_results = []
+
+    # ── Per-fold training loop ─────────────────────────────────
+    for fold_id, (train_days, val_days) in enumerate(folds):
+        fold_dir = output_root / f"fold_{fold_id:02d}"
+        fold_dir.mkdir(parents=True, exist_ok=True)
+        models_dir      = fold_dir / "models"
+        checkpoints_dir = models_dir / "checkpoints"
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        (fold_dir / "tensorboard").mkdir(parents=True, exist_ok=True)
+
+        log.info(
+            "Fold starting",
+            fold=fold_id,
+            train=f"{train_days[0]} → {train_days[-1]}",
+            val=f"{val_days[0]} → {val_days[-1]}",
+            train_days=len(train_days),
+            val_days=len(val_days),
+        )
+
+        # ── Build envs ─────────────────────────────────────────
+        def _make_train_fn(offset: int, td=train_days):
+            def _fn():
+                return make_env(td, is_eval=False, worker_seed_offset=offset)
+            return _fn
+
+        train_env_fns = [_make_train_fn(i) for i in range(n_envs)]
+
+        if use_subproc and n_envs > 1:
+            try:
+                from stable_baselines3.common.vec_env import SubprocVecEnv
+                raw_train_env = SubprocVecEnv(train_env_fns, start_method="spawn")
+            except Exception:
+                raw_train_env = DummyVecEnv(train_env_fns)
+        else:
+            raw_train_env = DummyVecEnv(train_env_fns)
+
+        train_vec_env = VecNormalize(
+            raw_train_env,
+            norm_obs=True, norm_reward=False, clip_obs=10.0, training=True,
+        )
+        eval_vec_env = VecNormalize(
+            DummyVecEnv([lambda vd=val_days: make_env(vd, is_eval=True)]),
+            norm_obs=True, norm_reward=False, clip_obs=10.0, training=False,
+        )
+
+        # ── Fresh agent per fold ───────────────────────────────
+        agent = PPOAgent(
+            env=train_vec_env,
+            algorithm=agent_cfg.get("algorithm", "RecurrentPPO"),
+            learning_rate=ppo_cfg.get("learning_rate", 3e-4),
+            learning_rate_schedule=ppo_cfg.get("learning_rate_schedule", "linear"),
+            n_steps=ppo_cfg.get("n_steps", 2048),
+            batch_size=ppo_cfg.get("batch_size", 256),
+            n_epochs=ppo_cfg.get("n_epochs", 10),
+            gamma=ppo_cfg.get("gamma", 0.99),
+            gae_lambda=ppo_cfg.get("gae_lambda", 0.95),
+            clip_range=ppo_cfg.get("clip_range", 0.2),
+            ent_coef=ppo_cfg.get("ent_coef", 0.01),
+            vf_coef=ppo_cfg.get("vf_coef", 0.5),
+            max_grad_norm=ppo_cfg.get("max_grad_norm", 0.5),
+            hidden_dims=net_cfg.get("net_arch", {}).get("pi", [256, 128]),
+            use_layer_norm=net_cfg.get("use_layer_norm", True),
+            use_lstm=net_cfg.get("use_lstm", True),
+            lstm_hidden_size=net_cfg.get("lstm_hidden_size", 256),
+            n_lstm_layers=net_cfg.get("n_lstm_layers", 1),
+            activation_fn_name=net_cfg.get("activation_fn", "ReLU"),
+            ortho_init=net_cfg.get("ortho_init", True),
+            device=agent_cfg.get("device", "auto"),
+            seed=agent_cfg.get("seed", 42) + fold_id,
+            tensorboard_log=str(fold_dir / "tensorboard"),
+        )
+
+        # ── Fold journal callback ──────────────────────────────
+        fold_journal_cb = FoldJournalCallback(n_envs=n_envs, verbose=1)
+
+        checkpoint_manager = CheckpointManager(
+            checkpoint_dir=checkpoints_dir,
+            save_freq=ckpt_cfg.get("save_freq", 100_000),
+            keep_n_checkpoints=ckpt_cfg.get("keep_n_checkpoints", 5),
+        )
+
+        trainer = Trainer(
+            agent=agent,
+            train_env=train_vec_env,
+            eval_env=eval_vec_env,
+            checkpoint_manager=checkpoint_manager,
+            curriculum_scheduler=None,
+            total_timesteps=ppo_cfg.get("total_timesteps", 2_000_000),
+            eval_freq=eval_cfg.get("eval_freq", 50_000),
+            n_eval_episodes=eval_cfg.get("n_eval_episodes", 20),
+            warmup_steps=eval_cfg.get("warmup_steps", 400_000),
+            patience_steps=eval_cfg.get("patience_steps", 550_000),
+            w_sharpe=eval_cfg.get("w_sharpe", 0.30),
+            w_pnl=eval_cfg.get("w_pnl",    0.25),
+            w_wl=eval_cfg.get("w_wl",     0.25),
+            w_dd=eval_cfg.get("w_dd",     0.20),
+            ent_coef_start=exp_cfg.get("ent_coef_start",        0.05),
+            ent_coef_end=exp_cfg.get("ent_coef_end",          0.005),
+            ent_coef_decay_steps=exp_cfg.get("ent_coef_decay_steps", 1_000_000),
+            log_dir=str(fold_dir),
+            models_dir=str(models_dir),
+            train_date_range=f"{train_days[0]}→{train_days[-1]}",
+            vec_normalize=train_vec_env,
+            resume=False,
+        )
+
+        # Inject fold_journal_cb into Trainer callbacks
+        from stable_baselines3.common.callbacks import CallbackList
+        base_callbacks = trainer._build_callbacks()
+        all_callbacks  = CallbackList([base_callbacks, fold_journal_cb])
+
+        log.info("Training fold", fold=fold_id, timesteps=ppo_cfg.get("total_timesteps", 2_000_000))
+        agent.train(
+            total_timesteps=ppo_cfg.get("total_timesteps", 2_000_000),
+            callback=all_callbacks,
+            progress_bar=True,
+            reset_num_timesteps=True,
+        )
+
+        # ── Save fold journal ──────────────────────────────────
+        fold_journal_cb.save(fold_id=fold_id, fold_dir=fold_dir)
+
+        # ── Save final model ───────────────────────────────────
+        final_path = models_dir / "final_model"
+        agent.save(final_path)
+        vn_path = str(models_dir / "vecnormalize.pkl")
+        train_vec_env.save(vn_path)
+        log.info("Fold complete", fold=fold_id, model=str(final_path))
+
+        fold_results.append({
+            "fold": fold_id,
+            "train": f"{train_days[0]} → {train_days[-1]}",
+            "val":   f"{val_days[0]} → {val_days[-1]}",
+            "train_days": len(train_days),
+            "val_days": len(val_days),
+        })
+
+        # Cleanup envs before next fold
+        try:
+            train_vec_env.close()
+            eval_vec_env.close()
+        except Exception:
+            pass
+
+    # ── Print fold summary ────────────────────────────────────
+    print("\n" + "=" * 70)
+    print(f"  WALK-FORWARD COMPLETE — {len(fold_results)} fold(s)")
+    print("=" * 70)
+    for r in fold_results:
+        print(
+            f"  Fold {r['fold']:02d} | "
+            f"Train: {r['train']} ({r['train_days']}d) | "
+            f"Val: {r['val']} ({r['val_days']}d)"
+        )
+    print(f"\n  Results saved to: {output_root}")
+    print("=" * 70)
+
+
 def run_analyse(args: argparse.Namespace) -> None:
     from evaluation.trade_journal import TradeJournal
     import glob
@@ -614,7 +993,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["train", "evaluate", "analyse"],
+        choices=["train", "evaluate", "analyse", "walk_forward"],
         required=True,
         help="Operation mode.",
     )
@@ -683,6 +1062,8 @@ def main() -> None:
         run_evaluate(args, configs)
     elif args.mode == "analyse":
         run_analyse(args)
+    elif args.mode == "walk_forward":
+        run_walk_forward(args, configs)
 
 
 if __name__ == "__main__":

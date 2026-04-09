@@ -105,7 +105,7 @@ class ZoneDetector:
         self,
         consolidation_min_bars: int = 2,
         consolidation_max_bars: int = 8,
-        consolidation_range_atr_pct: float = 0.035,
+        consolidation_range_atr_pct: float = 0.05,
         impulse_min_body_atr_pct: float = 0.12,
         max_zone_touches: int = 3,
         max_zones_per_side: int = 5,

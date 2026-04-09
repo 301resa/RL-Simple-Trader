@@ -61,3 +61,9 @@ multiprocessing:
   n_envs: 16                       # parallel training environments
   use_subprocess: true             # SubprocVecEnv (true) or DummyVecEnv (false)
 
+walk_forward:
+  n_folds: 1                       # folds to train (-1 = all possible)
+  train_months: 12                 # training window (~252 trading days)
+  val_weeks: 5                     # validation window (~25 trading days)
+  output_dir: logs/walk_forward    # root directory for all fold outputs
+
