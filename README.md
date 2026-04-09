@@ -13,7 +13,7 @@ Usage:
     python main.py --mode train --config config/ --data data/ --checkpoint logs/checkpoints/best_model.zip
 
     # Evaluate (backtest) a trained model
-    python main.py --mode evaluate --config config/ --data data/raw/ \\
+    python main.py --mode evaluate --config config/ --data data/ \\
                    --checkpoint logs/checkpoints/best_model.zip
 
     # Print journal analysis for a completed backtest
