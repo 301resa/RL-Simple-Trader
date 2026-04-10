@@ -47,7 +47,7 @@ account:
 observation:
   clip_observations: 10.0       # clip obs vector to [-N, N]
   normalize_observations: false # running normalisation (enable for production)
-  lookback_bars: 1              # 1 = one candle at a time; LSTM carries session memory
+  lookback_bars: 500            # sliding window of last 500 candles fed as raw OHLCV log-returns
 
 episode:
   early_termination_on_max_drawdown: true

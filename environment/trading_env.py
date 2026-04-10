@@ -550,9 +550,13 @@ class TradingEnv(gym.Env):
             "bars_remaining_pct": (self._n_steps - 1 - step) / max(self._n_steps - 1, 1),
         }
 
+        # Use the history-extended bar context for the price lookback window.
+        # This ensures the last N candles at bar 0 of a session contain real
+        # prior-session price data rather than zero-padding.
+        combined_idx = self._combined_session_offset + step
         obs = self.observation_builder.build(
-            bars=self._session_bars,
-            current_bar_idx=step,
+            bars=self._combined_bars,
+            current_bar_idx=combined_idx,
             atr_state=atr_state,
             zone_state=zone_state,
             order_zone_state=order_zone_state,

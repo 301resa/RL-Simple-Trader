@@ -251,9 +251,12 @@ metrics and log results without writing any model files (useful for exploration 
 
 ## Key Design Decisions
 
-- **LSTM over multi-bar lookback**: `lookback_bars: 1` — one candle per step. The LSTM
-  hidden state (512 units) carries session memory. This avoids large observation vectors
-  and lets the agent learn temporal patterns at the architecture level.
+- **500-candle sliding window**: `lookback_bars: 500` — the last 500 bars of OHLCV
+  (log-returns + volume ratio) are included in every observation. The window shifts
+  forward one bar at each step. Prior-session bars fill the window from the start of
+  each episode so bar 0 never has zero-padding — the same 500-bar history context
+  used by the zone detector. The LSTM (512 units) additionally carries within-session
+  state across steps. Observation vector size: `500 × 5 + 28 = 2,528` features.
 
 - **Annualised Sharpe**: All Sharpe calculations use `mean(pnl_r) / std(pnl_r) × √252`
   consistently across training table, eval callback, and test_fold.

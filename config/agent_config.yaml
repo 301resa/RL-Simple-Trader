@@ -2,9 +2,9 @@
 # ==================
 # PPO agent and neural network configuration.
 
-# RecurrentPPO uses an LSTM hidden state so the agent builds memory across
-# candles without needing a multi-bar lookback window in the observation.
-# Set lookback_bars: 1 in environment_config.yaml → one candle per step.
+# RecurrentPPO uses an LSTM hidden state that carries within-session memory.
+# The observation also includes a 500-candle sliding price window (set via
+# lookback_bars in environment_config.yaml). Obs size: 500×5 + 28 = 2,528.
 algorithm: RecurrentPPO
 seed: 42
 device: auto          # "auto", "cpu", or "cuda"
