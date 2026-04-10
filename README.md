@@ -1,7 +1,7 @@
 # RL Simple Trader — R1
 
-A Reinforcement Learning trading agent trained on ES/NQ futures using a two-pillar
-Order Zone entry strategy (Supply/Demand Zone confluence + Liquidity Sweep).
+A Reinforcement Learning trading agent trained on ES/NQ futures using a single-pillar
+Order Zone entry strategy (Supply/Demand Zone confluence + ATR room filter).
 
 Built on **RecurrentPPO** (LSTM) via SB3/sb3_contrib. The agent processes one 5-minute
 bar at a time — the LSTM hidden state carries session memory across bars without needing
@@ -55,9 +55,9 @@ R1/
 │   └── action_space.py              # Action masker (entry conditions, session gates)
 │
 ├── features/
-│   ├── order_zone_engine.py         # Two-pillar Order Zone: zone + sweep confluence score
+│   ├── order_zone_engine.py         # Order Zone confluence score: zone (90%) + ATR room (10%)
 │   ├── zone_detector.py             # Supply/Demand zone detection (consolidation + impulse)
-│   ├── liquidity_detector.py        # Liquidity sweep detection (swing high/low sweeps)
+│   ├── liquidity_detector.py        # Retained file — sweep logic no longer used in pipeline
 │   ├── trend_classifier.py          # HH/HL/LH/LL trend structure
 │   ├── atr_calculator.py            # ATR (daily) — gates entries and sizes stops
 │   └── observation_builder.py       # Builds flat observation vector for the LSTM
@@ -100,15 +100,17 @@ R1/
 
 ## Trading Strategy
 
-### Entry — Two-Pillar Order Zone System
+### Entry — Order Zone System
 
-A trade is only entered when **two pillars** are present. Each pillar has a weight:
+A trade is only entered when the **zone pillar** is present. Weighted factors:
 
-| Pillar | Weight | Condition |
+| Factor | Weight | Condition |
 |--------|--------|-----------|
-| Supply/Demand Zone | 55% | Price is inside a valid consolidation-then-impulse zone |
-| Liquidity Sweep | 35% | A recent swing high/low sweep has occurred |
+| Supply/Demand Zone | 90% | Price is inside a valid consolidation-then-impulse zone |
 | ATR Room | 10% | Directional ATR move < 85% of daily ATR in the entry direction |
+
+The liquidity sweep pillar has been removed. The LSTM learns sweep context
+directly from raw price observations.
 
 - Minimum confluence score: **0.35** (configurable in `features_config.yaml`)
 - Minimum R:R ratio: **1.5:1** before an entry is allowed
@@ -240,7 +242,7 @@ metrics and log results without writing any model files (useful for exploration 
 |------|----------|
 | `agent_config.yaml` | PPO hyperparameters, LSTM size, eval schedule, walk-forward settings |
 | `environment_config.yaml` | Instrument (ES/NQ), session type (RTH/GLOBEX/FULL), account size |
-| `features_config.yaml` | Zone detection thresholds, ATR settings, liquidity sweep parameters |
+| `features_config.yaml` | Zone detection thresholds, ATR settings, order zone weights |
 | `risk_config.yaml` | Stop placement, take profit, position sizing, daily loss limits |
 | `reward_config.yaml` | Shaped reward weights — hold penalty, entry bonuses/penalties, exit rewards |
 | `logging_config.yaml` | Log verbosity and output paths |
