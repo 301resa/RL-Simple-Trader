@@ -384,6 +384,40 @@ def build_components(configs: dict, data_dir: str):
     return c
 
 
+# ── Clean-slate helper ────────────────────────────────────────────────────────
+
+def clean_run_dirs(log_dir: Path) -> None:
+    """
+    Delete all generated output under log_dir so each run starts fresh.
+    Skipped automatically when --no-clean is passed or --checkpoint is set.
+    """
+    import shutil
+
+    subdirs = [
+        log_dir / "models",
+        log_dir / "checkpoints",
+        log_dir / "tensorboard",
+        log_dir / "journal",
+        log_dir / "walk_forward",
+        log_dir / "hotsaves",
+    ]
+    log_file = log_dir / "metrics.log"
+
+    removed = []
+    for d in subdirs:
+        if d.exists():
+            shutil.rmtree(d)
+            removed.append(str(d))
+    if log_file.exists():
+        log_file.unlink()
+        removed.append(str(log_file))
+
+    if removed:
+        print(f"[clean] Removed {len(removed)} output paths under {log_dir}/")
+    else:
+        print(f"[clean] Nothing to remove under {log_dir}/ — already clean.")
+
+
 # ── Mode handlers ─────────────────────────────────────────────────────────────
 
 def run_train(args: argparse.Namespace, configs: dict) -> None:
@@ -392,6 +426,11 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
     from training.trainer import Trainer
 
     log.info("Mode: TRAIN")
+
+    # Clean previous outputs unless resuming from a checkpoint or --no-clean passed
+    if not args.checkpoint and not getattr(args, "no_clean", False):
+        clean_run_dirs(Path(args.log_dir))
+
     c = build_components(configs, args.data)
 
     agent_cfg = configs["agent"]
@@ -618,6 +657,10 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     from training.trainer import Trainer
 
     log.info("Mode: WALK_FORWARD")
+
+    # Clean previous outputs unless --no-clean passed
+    if not getattr(args, "no_clean", False):
+        clean_run_dirs(Path(args.log_dir))
 
     agent_cfg   = configs["agent"]
     env_cfg     = configs["environment"]
@@ -1021,6 +1064,12 @@ def parse_args() -> argparse.Namespace:
         "--journal",
         default=None,
         help="Path to journal directory for analyse mode.",
+    )
+    parser.add_argument(
+        "--no-clean",
+        action="store_true",
+        dest="no_clean",
+        help="Skip wiping output dirs at run start (use when resuming from --checkpoint).",
     )
     return parser.parse_args()
 
