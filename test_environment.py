@@ -37,12 +37,12 @@ def make_dummy_atr_state(pct_used: float = 0.5, atr: float = 500.0) -> ATRState:
     return ATRState(
         atr_daily=atr,
         prior_day_high=15500, prior_day_low=15000, prior_day_range=500,
-        session_high=15500, session_low=15250,
+        session_open=15250, session_high=15500, session_low=15250,
         current_daily_range=atr * pct_used,
         atr_pct_used=pct_used,
         atr_remaining_pts=atr * (1 - pct_used),
-        atr_exhausted=pct_used >= 0.95,
-        atr_warning=pct_used >= 0.85,
+        atr_short_exhausted=pct_used >= 0.85,
+        atr_long_exhausted=pct_used >= 0.85,
     )
 
 

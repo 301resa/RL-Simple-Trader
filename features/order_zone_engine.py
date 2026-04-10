@@ -175,21 +175,22 @@ class OrderZoneEngine:
             elif liquidity_state.sweep_direction == SweepDirection.DOWN_SWEEP:
                 sweep_score_bullish = recency
 
-        # ── 3. ATR room ───────────────────────────────────────────────────────
-        atr_score = 0.0
-        if not atr_state.atr_exhausted:
-            atr_score = max(0.0, 1.0 - atr_state.atr_pct_used)
+        # ── 3. ATR room (directional) ─────────────────────────────────────────
+        # ATR score reflects remaining room; zeroed if that direction is exhausted.
+        atr_base = max(0.0, 1.0 - atr_state.atr_pct_used)
+        atr_score_bearish = 0.0 if atr_state.atr_short_exhausted else atr_base
+        atr_score_bullish = 0.0 if atr_state.atr_long_exhausted  else atr_base
 
         # ── 4. Weighted confluence scores ─────────────────────────────────────
         raw_bearish = (
             zone_score_bearish  * self.zone_weight
             + sweep_score_bearish * self.sweep_weight
-            + atr_score           * self.atr_weight
+            + atr_score_bearish   * self.atr_weight
         )
         raw_bullish = (
             zone_score_bullish  * self.zone_weight
             + sweep_score_bullish * self.sweep_weight
-            + atr_score           * self.atr_weight
+            + atr_score_bullish   * self.atr_weight
         )
 
         bearish_score = float(np.clip(raw_bearish / self._total_weight, 0.0, 1.0))
@@ -216,8 +217,15 @@ class OrderZoneEngine:
             zone_type = OrderZoneType.NONE
             confluence_score = max(bearish_score, bullish_score)
 
+        # Block trade if ATR exhausted in the identified direction
+        dir_atr_ok = True
+        if zone_type == OrderZoneType.BEARISH and atr_state.atr_short_exhausted:
+            dir_atr_ok = False
+        elif zone_type == OrderZoneType.BULLISH and atr_state.atr_long_exhausted:
+            dir_atr_ok = False
+
         trade_worthwhile = (
-            not atr_state.atr_exhausted
+            dir_atr_ok
             and confluence_score >= self.min_confluence_score
             and rr_ratio >= self.min_rr_ratio
         )

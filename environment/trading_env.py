@@ -320,9 +320,10 @@ class TradingEnv(gym.Env):
                 atr_s = _ATRState(
                     atr_daily=100.0, prior_day_high=cp + 50,
                     prior_day_low=cp - 50, prior_day_range=100.0,
-                    session_high=cp, session_low=cp,
+                    session_open=cp, session_high=cp, session_low=cp,
                     current_daily_range=0.0, atr_pct_used=0.0,
-                    atr_remaining_pts=100.0, atr_exhausted=False, atr_warning=False,
+                    atr_remaining_pts=100.0,
+                    atr_short_exhausted=False, atr_long_exhausted=False,
                 )
 
             # Zone + liquidity detectors use the full history-extended context

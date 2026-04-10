@@ -14,7 +14,7 @@ Usage (from code):
 
 Columns exported per bar:
   datetime, date, open, high, low, close, volume,
-  atr, atr_pct, atr_exhausted, atr_warning,
+  atr, atr_pct, atr_short_exhausted, atr_long_exhausted,
   n_supply_zones, n_demand_zones, nearest_supply, nearest_demand,
   sweep_up, sweep_down, near_sweep_level, sweep_strength,
   in_bullish_oz, in_bearish_oz, confluence_score, rr_ratio,
@@ -127,8 +127,8 @@ def export_features(
                 "atr":               round(atr_state.atr_daily, 4),
                 "atr_remaining_pts": round(atr_state.atr_remaining_pts, 4),
                 "atr_pct_used":      round(atr_state.atr_pct_used, 4),
-                "atr_exhausted":     int(atr_state.atr_exhausted),
-                "atr_warning":       int(atr_state.atr_warning),
+                "atr_short_exhausted": int(atr_state.atr_short_exhausted),
+                "atr_long_exhausted":  int(atr_state.atr_long_exhausted),
                 # Zones
                 "has_supply_zone":   int(zone_state.nearest_supply is not None and zone_state.nearest_supply.is_valid) if zone_state else 0,
                 "has_demand_zone":   int(zone_state.nearest_demand is not None and zone_state.nearest_demand.is_valid) if zone_state else 0,

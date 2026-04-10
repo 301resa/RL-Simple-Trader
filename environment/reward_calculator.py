@@ -223,13 +223,17 @@ class RewardCalculator:
                 entry_penalty += self.entry_penalties["overtrading"]
                 note += "overtrading "
 
-            # ATR gate violation
-            if atr_state.atr_exhausted:
-                entry_penalty += self.entry_penalties["atr_exhausted"]
-                note += "atr_exhausted "
-
             is_bearish_action = direction == -1
             is_bullish_action = direction == 1
+
+            # ATR gate violation — directional: penalise only if entering in the exhausted direction
+            dir_exhausted = (
+                (is_bearish_action and atr_state.atr_short_exhausted)
+                or (is_bullish_action and atr_state.atr_long_exhausted)
+            )
+            if dir_exhausted:
+                entry_penalty += self.entry_penalties["atr_exhausted"]
+                note += "atr_exhausted "
 
             # R:R check (shaping penalty — scaled)
             if order_zone_state.rr_ratio < min_rr_ratio:
@@ -259,7 +263,9 @@ class RewardCalculator:
                         entry_bonus += self.entry_bonuses["in_supply_demand_zone"] * self.shaping_scale
                     # Pillar 3 (rejection candle) removed
 
-                if not atr_state.atr_warning:
+                # ATR room bonus: neither direction exhausted = still has room
+                atr_has_room = not atr_state.atr_short_exhausted and not atr_state.atr_long_exhausted
+                if atr_has_room:
                     entry_bonus += self.entry_bonuses["atr_has_room"] * self.shaping_scale
 
                 if order_zone_state.rr_ratio >= min_rr_ratio:

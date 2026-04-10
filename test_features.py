@@ -103,7 +103,7 @@ class TestATRCalculator:
         state = calc.compute_session_state(date_str, session, 0)
         assert state is not None
         assert state.atr_pct_used > 0.9
-        assert state.atr_warning  # Warning should trigger
+        assert state.atr_short_exhausted or state.atr_long_exhausted  # Warning should trigger
 
     def test_atr_state_feature_dict_keys(self):
         daily = make_daily_bars(30)
@@ -114,7 +114,7 @@ class TestATRCalculator:
         state = calc.compute_session_state(date_str, session, 1)
         if state:
             fd = state.as_feature_dict()
-            required_keys = {"atr_pct_used", "atr_remaining_norm", "atr_exhausted", "atr_warning"}
+            required_keys = {"atr_pct_used", "atr_remaining_norm", "atr_short_exhausted", "atr_long_exhausted"}
             assert required_keys.issubset(fd.keys())
 
 
@@ -289,12 +289,12 @@ class TestOrderZoneEngine:
         return ATRState(
             atr_daily=atr,
             prior_day_high=15500, prior_day_low=15000, prior_day_range=500,
-            session_high=15500, session_low=15250,
+            session_open=15250, session_high=15500, session_low=15250,
             current_daily_range=atr * pct_used,
             atr_pct_used=pct_used,
             atr_remaining_pts=atr * (1 - pct_used),
-            atr_exhausted=pct_used >= 0.95,
-            atr_warning=pct_used >= 0.85,
+            atr_short_exhausted=pct_used >= 0.85,
+            atr_long_exhausted=pct_used >= 0.85,
         )
 
     def test_no_zone_gives_low_score(self):
@@ -370,9 +370,9 @@ class TestObservationBuilder:
         bars = make_bars([15000 + i * 2 for i in range(30)])
         atr_state = ATRState(
             atr_daily=500, prior_day_high=15100, prior_day_low=14900, prior_day_range=200,
-            session_high=15060, session_low=14980, current_daily_range=80,
+            session_open=15020, session_high=15060, session_low=14980, current_daily_range=80,
             atr_pct_used=0.16, atr_remaining_pts=420,
-            atr_exhausted=False, atr_warning=False,
+            atr_short_exhausted=False, atr_long_exhausted=False,
         )
         zone_state = ZoneState()
         liq_state = LiquidityState([], [], None, None, None, SweepDirection.NONE)
