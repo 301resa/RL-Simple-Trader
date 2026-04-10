@@ -3,8 +3,9 @@
 # PPO agent and neural network configuration.
 
 # RecurrentPPO uses an LSTM hidden state that carries within-session memory.
-# The observation also includes a 500-candle sliding price window (set via
+# The observation includes a 500-candle sliding price window (set via
 # lookback_bars in environment_config.yaml). Obs size: 500×5 + 28 = 2,528.
+# n_steps=512 and batch_size=64 keep rollout buffer memory at ~80 MB for 2,528-dim obs.
 algorithm: RecurrentPPO
 seed: 42
 device: auto          # "auto", "cpu", or "cuda"
@@ -12,8 +13,8 @@ device: auto          # "auto", "cpu", or "cuda"
 ppo:
   learning_rate: 3.0e-4
   learning_rate_schedule: linear   # "linear", "cosine", or "constant"
-  n_steps: 2048                    # rollout buffer size (steps before update)
-  batch_size: 256                  # mini-batch size (must be <= n_steps)
+  n_steps: 512                     # rollout buffer size — 512×16 envs×2528 obs ≈ 80 MB
+  batch_size: 64                   # mini-batch size (must be <= n_steps); stable LSTM steps
   n_epochs: 10                     # gradient update epochs per rollout
   gamma: 0.99                      # discount factor
   gae_lambda: 0.95                 # GAE lambda
@@ -21,17 +22,16 @@ ppo:
   ent_coef: 0.01                   # entropy coefficient (initial)
   vf_coef: 0.5                     # value function coefficient
   max_grad_norm: 0.5               # gradient clipping
-  total_timesteps: 2_000_000       # total training steps
-  eval_freq: 100_000                # evaluate every N steps (was 50k — too infrequent)
-  n_eval_episodes: 100_000              # episodes per evaluation
+  total_timesteps: 5_000_000       # 5M steps — scaled for 2,528-dim observation
+  eval_freq: 100_000               # evaluate every N steps
 
 network:
   net_arch:
-    pi: [256, 256]                 # policy MLP layers after LSTM
-    vf: [256, 256]                 # value  MLP layers after LSTM
+    pi: [128, 128]                 # policy MLP layers after LSTM — scaled for 256-unit LSTM
+    vf: [128, 128]                 # value  MLP layers after LSTM — scaled for 256-unit LSTM
   use_layer_norm: true
   use_lstm: true                   # RecurrentPPO requires true
-  lstm_hidden_size: 512            # LSTM units — holds session memory
+  lstm_hidden_size: 256            # LSTM units — 256 keeps params at 2.6M vs 6.2M for 512
   n_lstm_layers: 1
   activation_fn: ReLU              # "ReLU", "Tanh", "ELU"
   ortho_init: true                 # orthogonal weight initialisation
@@ -39,7 +39,7 @@ network:
 exploration:
   ent_coef_start: 0.05             # entropy at start of training
   ent_coef_end: 0.005              # entropy at end of annealing
-  ent_coef_decay_steps: 1_000_000  # steps over which to anneal
+  ent_coef_decay_steps: 2_000_000  # steps over which to anneal (40% of 5M total)
 
 checkpointing:
   save_freq: 100_000               # periodic checkpoint every N steps

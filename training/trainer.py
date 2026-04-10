@@ -347,8 +347,8 @@ class Trainer:
         # 5. Reward shaping decay (Stage 1 → 2 → 3)
         cbs.append(
             ShapingDecayCallback(
-                stage1_end=600_000,
-                stage2_end=1_200_000,
+                stage1_end=1_500_000,
+                stage2_end=3_000_000,
                 verbose=0,
             )
         )
