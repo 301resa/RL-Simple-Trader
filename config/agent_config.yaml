@@ -22,7 +22,7 @@ ppo:
   vf_coef: 0.5                     # value function coefficient
   max_grad_norm: 0.5               # gradient clipping
   total_timesteps: 2_000_000       # total training steps
-  eval_freq: 20_000                # evaluate every N steps (was 50k — too infrequent)
+  eval_freq: 100_000                # evaluate every N steps (was 50k — too infrequent)
   n_eval_episodes: 100_000              # episodes per evaluation
 
 network:

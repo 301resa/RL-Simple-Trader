@@ -747,8 +747,8 @@ class TradingEnv(gym.Env):
         # ── Sharpe (annualised, from per-trade returns) ───────
         # Formula: (mean_r / std_r) × √252  — same annualisation
         # used by the eval callback and V7 reference code.
-        # Require ≥2 trades; clamp to [-9.99, 9.99] for column display.
-        if n_trades >= 2:
+        # Require ≥5 trades; clamp to [-9.99, 9.99] for column display.
+        if n_trades >= 5:
             tr  = np.array([t.pnl_r for t in trades], dtype=np.float32)
             std = float(np.std(tr))
             raw = np.mean(tr) / std if std > 0.01 else 0.0
