@@ -42,7 +42,7 @@ contracts:
 
 account:
   initial_balance: 50000.0      # starting account equity ($)
-  max_drawdown_limit: 1500.0    # hard daily drawdown limit ($) for guardrail check
+  max_drawdown_limit: 2000.0    # hard daily drawdown limit ($) for guardrail check
 
 observation:
   clip_observations: 10.0       # clip obs vector to [-N, N]

@@ -35,7 +35,6 @@ from environment.action_space import Action, ActionMasker
 from environment.position_manager import ExitReason, PositionDirection, PositionManager
 from environment.reward_calculator import RewardCalculator, RewardBreakdown
 from features.atr_calculator import ATRCalculator, ATRState
-from features.liquidity_detector import LiquidityDetector
 from features.observation_builder import ObservationBuilder
 from features.order_zone_engine import OrderZoneEngine, OrderZoneState
 from features.trend_classifier import TrendClassifier
@@ -65,8 +64,6 @@ class TradingEnv(gym.Env):
         Pre-configured ATR feature engine.
     zone_detector : ZoneDetector
         Pre-configured S/D zone detector.
-    liquidity_detector : LiquidityDetector
-        Pre-configured liquidity detector.
     trend_classifier : TrendClassifier
         Pre-configured trend engine.
     order_zone_engine : OrderZoneEngine
@@ -113,7 +110,6 @@ class TradingEnv(gym.Env):
         observation_builder: ObservationBuilder,
         atr_calculator: ATRCalculator,
         zone_detector: ZoneDetector,
-        liquidity_detector: LiquidityDetector,
         trend_classifier: TrendClassifier,
         order_zone_engine: OrderZoneEngine,
         action_masker: ActionMasker,
@@ -139,12 +135,6 @@ class TradingEnv(gym.Env):
         self.observation_builder = observation_builder
         self.atr_calculator = atr_calculator
         self.zone_detector = zone_detector
-        self.liquidity_detector = LiquidityDetector(
-            swing_lookback=liquidity_detector.swing_lookback,
-            proximity_atr_pct=liquidity_detector.proximity_atr_pct,
-            sweep_wick_min_atr_pct=liquidity_detector.sweep_wick_min_atr_pct,
-            sweep_lookback_bars=liquidity_detector.sweep_lookback_bars,
-        )
         self.trend_classifier = trend_classifier
         self.order_zone_engine = order_zone_engine
         self.action_masker = action_masker
@@ -334,23 +324,17 @@ class TradingEnv(gym.Env):
                 atr_series=self._combined_atr_series,
                 current_bar_idx=combined_idx,
             )
-            liq_s = self.liquidity_detector.compute_state(
-                bars=self._combined_bars,
-                atr_series=self._combined_atr_series,
-                current_bar_idx=combined_idx,
-            )
             oz_s = self.order_zone_engine.compute(
                 bars=self._combined_bars,
                 current_bar_idx=combined_idx,
                 atr_state=atr_s,
                 zone_state=zone_s,
-                liquidity_state=liq_s,
                 trend_snapshot=None,
             )
             # deepcopy freezes the state at this bar — prevents future bars
             # from retroactively mutating zone.is_valid references (lookahead bug)
             self._precomputed_states.append(copy.deepcopy({
-                "atr": atr_s, "zone": zone_s, "liq": liq_s, "oz": oz_s
+                "atr": atr_s, "zone": zone_s, "oz": oz_s
             }))
 
         # Build initial observation
@@ -550,16 +534,14 @@ class TradingEnv(gym.Env):
         current_price = float(self._session_bars.iloc[step]["close"])
 
         # ── O(1) lookup from pre-computed states ─────────────────────────────
-        states          = self._precomputed_states[step]
-        atr_state       = states["atr"]
-        zone_state      = states["zone"]
-        liquidity_state = states["liq"]
+        states           = self._precomputed_states[step]
+        atr_state        = states["atr"]
+        zone_state       = states["zone"]
         order_zone_state = states["oz"]
 
-        self._current_atr_state      = atr_state
-        self._last_zone_state        = zone_state
-        self._last_liquidity_state   = liquidity_state
-        self._last_order_zone_state  = order_zone_state
+        self._current_atr_state     = atr_state
+        self._last_zone_state       = zone_state
+        self._last_order_zone_state = order_zone_state
 
         portfolio_state = self.position_manager.get_portfolio_state(current_price)
 
@@ -573,7 +555,6 @@ class TradingEnv(gym.Env):
             current_bar_idx=step,
             atr_state=atr_state,
             zone_state=zone_state,
-            liquidity_state=liquidity_state,
             order_zone_state=order_zone_state,
             portfolio_state=portfolio_state,
             session_info=session_info,
@@ -581,7 +562,6 @@ class TradingEnv(gym.Env):
 
         self._last_obs = obs
         self._last_zone_state = zone_state
-        self._last_liquidity_state = liquidity_state
         self._last_order_zone_state = order_zone_state
 
         info = {
@@ -606,7 +586,6 @@ class TradingEnv(gym.Env):
                 current_bar_idx=step,
                 atr_state=self._current_atr_state,
                 zone_state=None,
-                liquidity_state=None,
                 trend_snapshot=None,
             )
 

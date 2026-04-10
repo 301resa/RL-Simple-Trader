@@ -130,16 +130,14 @@ class RewardCalculator:
         self.entry_bonuses = entry_bonuses or {
             "full_order_zone_confluence": 0.50,
             "in_supply_demand_zone": 0.25,
-            "liquidity_sweep_present": 0.20,
             "atr_has_room": 0.15,
             "high_rr_ratio": 0.20,
         }
         self.entry_penalties = entry_penalties or {
-            "no_zone_present": -0.30,
-            "atr_exhausted": -1.00,
-            "rr_below_minimum": -0.50,
-            "no_liquidity_confluence": -0.20,
-            "overtrading": -0.10,
+            "no_zone_present": -0.05,
+            "atr_exhausted": -0.40,
+            "rr_below_minimum": -0.08,
+            "overtrading": 0.0,
         }
         self.exit_bonuses = exit_bonuses or {
             "trailing_stop_correctly": 0.30,
@@ -249,8 +247,6 @@ class RewardCalculator:
                 if not order_zone_state.in_bearish_order_zone and not order_zone_state.in_bullish_order_zone:
                     entry_penalty += self.entry_penalties["no_zone_present"] * self.shaping_scale
                     note += "no_zone "
-                entry_penalty += self.entry_penalties["no_liquidity_confluence"] * self.shaping_scale
-                note += "no_liq "
             else:
                 # Bonuses for quality setup (all shaping — scaled to zero over time)
                 score = order_zone_state.confluence_score

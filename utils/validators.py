@@ -122,7 +122,7 @@ def validate_risk_config(cfg: dict) -> None:
 
 def validate_features_config(cfg: dict) -> None:
     """Validate features_config.yaml structure."""
-    _require_keys(cfg, ["atr", "swing", "zones", "liquidity", "order_zone", "trend"], section="features_config")
+    _require_keys(cfg, ["atr", "zones", "order_zone", "trend"], section="features_config")
 
     atr = cfg["atr"]
     _assert_range(atr["exhaustion_threshold"], 0.7, 1.5, "atr.exhaustion_threshold")

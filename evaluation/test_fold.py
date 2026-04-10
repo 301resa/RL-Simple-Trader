@@ -568,7 +568,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     from environment.reward_calculator  import RewardCalculator
     from environment.trading_env        import TradingEnv
     from features.atr_calculator        import ATRCalculator
-    from features.liquidity_detector    import LiquidityDetector
     from features.observation_builder   import ObservationBuilder
     from features.order_zone_engine     import OrderZoneEngine
     from features.trend_classifier      import TrendClassifier
@@ -621,7 +620,6 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     # ── Build component factories ─────────────────────────────────────────────
     zones_cfg   = feat_cfg.get("zones", {})
-    liq_cfg     = feat_cfg.get("liquidity", {})
     swing_cfg   = feat_cfg.get("swing", {})
     trend_cfg   = feat_cfg.get("trend", {})
     oz_cfg      = feat_cfg.get("order_zone", {})
@@ -637,12 +635,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     real_capital = float(account_cfg.get("initial_balance", 2500))
     point_value  = float(contracts_cfg.get("micro_point_value", 2.0))
 
-    liquidity_detector = LiquidityDetector(
-        swing_lookback=swing_cfg.get("lookback_bars", 5),
-        proximity_atr_pct=liq_cfg.get("proximity_atr_pct", 0.05),
-        sweep_wick_min_atr_pct=liq_cfg.get("sweep_wick_min_atr_pct", 0.03),
-        sweep_lookback_bars=liq_cfg.get("sweep_lookback_bars", 5),
-    )
     trend_classifier = TrendClassifier(
         swing_lookback=swing_cfg.get("lookback_bars", 5),
         min_hh_hl_for_uptrend=trend_cfg.get("min_hh_hl_for_uptrend", 2),
@@ -715,7 +707,6 @@ def main(argv: Optional[List[str]] = None) -> None:
                 k: zones_cfg.get(k, v)
                 for k, v in zone_detector_defaults.items()
             }),
-            liquidity_detector=liquidity_detector,
             trend_classifier=trend_classifier,
             order_zone_engine=order_zone_engine,
             action_masker=action_masker,

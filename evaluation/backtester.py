@@ -119,8 +119,7 @@ class Backtester:
                             in_supply_demand_zone=oz_state.in_bearish_order_zone or oz_state.in_bullish_order_zone if oz_state else False,
                             in_order_zone=oz_state.trade_worthwhile if oz_state else False,
                             confluence_score=oz_state.confluence_score if oz_state else 0.0,
-                            liquidity_sweep_present=bool(getattr(self.env, "_last_liquidity_state", None) and
-                                                         self.env._last_liquidity_state.recent_sweep is not None),
+                            liquidity_sweep_present=False,    # sweep pillar removed
                             rejection_candle_present=False,  # Pillar 3 removed
                             atr_pct_used_at_entry=atr_state.atr_pct_used if atr_state else 0.0,
                             rr_ratio_at_entry=oz_state.rr_ratio if oz_state else 0.0,

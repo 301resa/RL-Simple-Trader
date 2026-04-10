@@ -21,7 +21,6 @@ import pandas as pd
 import pytest
 
 from features.atr_calculator import ATRCalculator, ATRState
-from features.liquidity_detector import LiquidityDetector, SweepDirection
 from features.order_zone_engine import OrderZoneEngine, OrderZoneType
 from features.trend_classifier import TrendClassifier, TrendState
 from features.zone_detector import ZoneDetector, ZoneType
@@ -178,43 +177,6 @@ class TestZoneDetector:
             assert not supply.is_valid
 
 
-# ── Liquidity Detector Tests ──────────────────────────────────────────────────
-
-class TestLiquidityDetector:
-
-    def test_swing_high_detected(self):
-        # Create a clear swing high: bar[10] has highest high
-        closes = [100] * 5 + [105, 110, 120, 110, 105, 100] + [100] * 10
-        bars = make_bars(closes)
-        detector = LiquidityDetector(swing_lookback=3)
-        atr_s = pd.Series([20.0] * len(bars), index=bars.index)
-        state = detector.compute_state(bars, atr_s, len(bars) - 1)
-        # Swing highs should have been detected
-        assert len(state.swing_highs) >= 1
-
-    def test_sweep_detection(self):
-        """
-        Create a bar that wicks above a prior swing high and closes back below it.
-        This should register as an UP_SWEEP (bearish signal).
-        """
-        # Build bars with a clear swing high then a sweep bar
-        closes = [100, 102, 108, 105, 100, 98, 96, 97, 99, 103, 99, 95]
-        rows = []
-        for i, c in enumerate(closes):
-            if i == 9:  # Sweep bar: wick above swing high
-                rows.append({"open": 100, "high": 115, "low": 98, "close": 99, "volume": 1000})
-            else:
-                rows.append({"open": c - 1, "high": c + 3, "low": c - 3, "close": c, "volume": 500})
-
-        df = pd.DataFrame(rows)
-        df.index = pd.date_range("2023-01-01", periods=len(df), freq="5min", tz="America/New_York")
-        detector = LiquidityDetector(swing_lookback=2, sweep_wick_min_atr_pct=0.01)
-        atr_s = pd.Series([10.0] * len(df), index=df.index)
-        state = detector.compute_state(df, atr_s, len(df) - 1)
-        # Should detect some swing highs/lows
-        assert isinstance(state.swing_highs, list)
-
-
 # ── Trend Classifier Tests ────────────────────────────────────────────────────
 
 class TestTrendClassifier:
@@ -299,58 +261,37 @@ class TestOrderZoneEngine:
 
     def test_no_zone_gives_low_score(self):
         from features.zone_detector import ZoneState
-        from features.liquidity_detector import LiquidityState, SweepDirection
-        from features.trend_classifier import TrendSnapshot, TrendState
 
         bars = make_bars([15000] * 10)
         engine = OrderZoneEngine(min_confluence_score=0.60, min_rr_ratio=4.0)
 
         atr_state = self._make_atr_state(0.5)
         zone_state = ZoneState()  # No zones
-        liq_state = LiquidityState([], [], None, None, None, SweepDirection.NONE)
-        trend_snap = TrendSnapshot(
-            state=TrendState.RANGING, last_swing_high=None, last_swing_low=None,
-            hh_count=0, hl_count=0, ll_count=0, lh_count=0, trend_strength=0.0
-        )
 
-        state = engine.compute(bars, 9, atr_state, zone_state, liq_state, trend_snap)
+        state = engine.compute(bars, 9, atr_state, zone_state)
         assert state.zone_type == OrderZoneType.NONE
         assert not state.trade_worthwhile
 
     def test_confluence_score_between_0_and_1(self):
         from features.zone_detector import ZoneState
-        from features.liquidity_detector import LiquidityState, SweepDirection
-        from features.trend_classifier import TrendSnapshot, TrendState
 
         bars = make_bars([15000] * 10)
         engine = OrderZoneEngine()
         atr_state = self._make_atr_state(0.5)
         zone_state = ZoneState()
-        liq_state = LiquidityState([], [], None, None, None, SweepDirection.NONE)
-        trend_snap = TrendSnapshot(
-            state=TrendState.DOWNTREND, last_swing_high=15100, last_swing_low=14900,
-            hh_count=0, hl_count=0, ll_count=2, lh_count=2, trend_strength=0.7
-        )
 
-        state = engine.compute(bars, 9, atr_state, zone_state, liq_state, trend_snap)
+        state = engine.compute(bars, 9, atr_state, zone_state)
         assert 0.0 <= state.confluence_score <= 1.0
 
     def test_atr_exhausted_blocks_trade(self):
         from features.zone_detector import ZoneState
-        from features.liquidity_detector import LiquidityState, SweepDirection
-        from features.trend_classifier import TrendSnapshot, TrendState
 
         bars = make_bars([15000] * 10)
         engine = OrderZoneEngine()
         atr_state = self._make_atr_state(pct_used=1.05)  # ATR exceeded
         zone_state = ZoneState()
-        liq_state = LiquidityState([], [], None, None, None, SweepDirection.NONE)
-        trend_snap = TrendSnapshot(
-            state=TrendState.DOWNTREND, last_swing_high=15100, last_swing_low=14900,
-            hh_count=0, hl_count=0, ll_count=2, lh_count=2, trend_strength=0.8
-        )
 
-        state = engine.compute(bars, 9, atr_state, zone_state, liq_state, trend_snap)
+        state = engine.compute(bars, 9, atr_state, zone_state)
         # Even with decent setup, ATR exhausted means no trade
         assert not state.trade_worthwhile
 
@@ -363,9 +304,7 @@ class TestObservationBuilder:
         """Observation vector must not contain NaN or Inf."""
         from features.observation_builder import ObservationBuilder
         from features.zone_detector import ZoneState
-        from features.liquidity_detector import LiquidityState, SweepDirection
         from features.order_zone_engine import OrderZoneState, OrderZoneType
-        from features.trend_classifier import TrendSnapshot, TrendState
 
         bars = make_bars([15000 + i * 2 for i in range(30)])
         atr_state = ATRState(
@@ -375,11 +314,6 @@ class TestObservationBuilder:
             atr_short_exhausted=False, atr_long_exhausted=False,
         )
         zone_state = ZoneState()
-        liq_state = LiquidityState([], [], None, None, None, SweepDirection.NONE)
-        trend_snap = TrendSnapshot(
-            state=TrendState.UPTREND, last_swing_high=15050, last_swing_low=14950,
-            hh_count=2, hl_count=2, ll_count=0, lh_count=0, trend_strength=0.65
-        )
         oz_state = OrderZoneState(
             zone_type=OrderZoneType.NONE, confluence_score=0.0,
             in_bearish_order_zone=False, in_bullish_order_zone=False,
@@ -398,7 +332,6 @@ class TestObservationBuilder:
         obs = builder.build(
             bars=bars, current_bar_idx=20,
             atr_state=atr_state, zone_state=zone_state,
-            liquidity_state=liq_state, trend_snapshot=trend_snap,
             order_zone_state=oz_state, portfolio_state=portfolio_state,
             session_info=session_info,
         )

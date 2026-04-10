@@ -96,7 +96,6 @@ def build_components(configs: dict, data_dir: str):
     from environment.reward_calculator import RewardCalculator
     from environment.trading_env import TradingEnv
     from features.atr_calculator import ATRCalculator
-    from features.liquidity_detector import LiquidityDetector
     from features.observation_builder import ObservationBuilder
     from features.order_zone_engine import OrderZoneEngine
     from features.trend_classifier import TrendClassifier
@@ -169,18 +168,9 @@ def build_components(configs: dict, data_dir: str):
         zone_buffer_atr_pct=zones_cfg.get("zone_buffer_atr_pct", 0.02),
     )
 
-    # ── Liquidity Detector ────────────────────────────────────
-    liq_cfg = feat_cfg.get("liquidity", {})
-    swing_cfg = feat_cfg.get("swing", {})
-    liquidity_detector = LiquidityDetector(
-        swing_lookback=swing_cfg.get("lookback_bars", 5),
-        proximity_atr_pct=liq_cfg.get("proximity_atr_pct", 0.05),
-        sweep_wick_min_atr_pct=liq_cfg.get("sweep_wick_min_atr_pct", 0.03),
-        sweep_lookback_bars=liq_cfg.get("sweep_lookback_bars", 5),
-    )
-
     # ── Trend Classifier ──────────────────────────────────────
     trend_cfg = feat_cfg.get("trend", {})
+    swing_cfg = feat_cfg.get("swing", {})
     trend_classifier = TrendClassifier(
         swing_lookback=swing_cfg.get("lookback_bars", 5),
         min_hh_hl_for_uptrend=trend_cfg.get("min_hh_hl_for_uptrend", 2),
@@ -286,7 +276,6 @@ def build_components(configs: dict, data_dir: str):
                 k: zones_cfg.get(k, v)
                 for k, v in zone_detector_defaults.items()
             }),
-            liquidity_detector=liquidity_detector,
             trend_classifier=trend_classifier,
             order_zone_engine=order_zone_engine,
             action_masker=action_masker,
@@ -662,12 +651,12 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     from environment.reward_calculator import RewardCalculator
     from environment.trading_env import TradingEnv
     from features.atr_calculator import ATRCalculator
-    from features.liquidity_detector import LiquidityDetector
     from features.observation_builder import ObservationBuilder
     from features.order_zone_engine import OrderZoneEngine
     from features.trend_classifier import TrendClassifier
     from features.zone_detector import ZoneDetector
     from training.checkpoint_manager import CheckpointManager
+
     from training.fold_journal_callback import FoldJournalCallback
     from training.trainer import Trainer
 
@@ -700,7 +689,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     session_cfg  = env_cfg.get("session", {})
     atr_cfg      = feat_cfg.get("atr", {})
     zones_cfg    = feat_cfg.get("zones", {})
-    liq_cfg      = feat_cfg.get("liquidity", {})
     swing_cfg    = feat_cfg.get("swing", {})
     trend_cfg    = feat_cfg.get("trend", {})
     oz_cfg       = feat_cfg.get("order_zone", {})
@@ -767,12 +755,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         "max_zone_age_bars": 200, "max_zone_touches": 3, "zone_buffer_atr_pct": 0.02,
     }
 
-    liquidity_detector = LiquidityDetector(
-        swing_lookback=swing_cfg.get("lookback_bars", 5),
-        proximity_atr_pct=liq_cfg.get("proximity_atr_pct", 0.05),
-        sweep_wick_min_atr_pct=liq_cfg.get("sweep_wick_min_atr_pct", 0.03),
-        sweep_lookback_bars=liq_cfg.get("sweep_lookback_bars", 5),
-    )
     trend_classifier = TrendClassifier(
         swing_lookback=swing_cfg.get("lookback_bars", 5),
         min_hh_hl_for_uptrend=trend_cfg.get("min_hh_hl_for_uptrend", 2),
@@ -831,7 +813,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             zone_detector=ZoneDetector(**{
                 k: zones_cfg.get(k, v) for k, v in zone_detector_defaults.items()
             }),
-            liquidity_detector=liquidity_detector,
             trend_classifier=trend_classifier,
             order_zone_engine=order_zone_engine,
             action_masker=action_masker,

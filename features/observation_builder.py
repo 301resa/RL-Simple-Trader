@@ -7,11 +7,9 @@ The observation is a flat float32 numpy array containing:
   1. Recent OHLCV price history (price normalised by ATR, volume by avg)
   2. ATR features (exhaustion, remaining room)
   3. Zone features (distance to supply/demand, in-zone flags)
-  4. Liquidity features (sweep presence, direction)
-  5. Trend features (state one-hots, strength, swing counts)
-  6. Order zone / confluence features (score, R:R, rejection candle)
-  7. Portfolio state (position, P&L, drawdown, trade counts)
-  8. Session timing (fraction of session elapsed / remaining)
+  4. Order zone / confluence features (score, R:R, rejection candle)
+  5. Portfolio state (position, P&L, drawdown, trade counts)
+  6. Session timing (fraction of session elapsed / remaining)
 """
 
 from __future__ import annotations
@@ -23,7 +21,6 @@ import pandas as pd
 
 from features.atr_calculator import ATRState
 from features.zone_detector import ZoneState
-from features.liquidity_detector import LiquidityState
 from features.order_zone_engine import OrderZoneState
 
 
@@ -56,11 +53,12 @@ class ObservationBuilder:
     def obs_dim(self) -> int:
         """Total length of the observation vector (deterministic from config).
 
-        Fixed features (33):
-          ATR(4) + Zone(4) + Liquidity(5) + OrderZone(10) + Portfolio(8) + Session(2)
+        Fixed features (28):
+          ATR(4) + Zone(4) + OrderZone(10) + Portfolio(8) + Session(2)
+        Liquidity/sweep features removed — LSTM learns sweep context from raw price.
         Trend features removed — LSTM carries directional memory across candles.
         """
-        return self.price_history_len * 5 + 33
+        return self.price_history_len * 5 + 28
 
     def build(
         self,
@@ -68,10 +66,10 @@ class ObservationBuilder:
         current_bar_idx: int,
         atr_state: ATRState,
         zone_state: ZoneState,
-        liquidity_state: LiquidityState,
         order_zone_state: OrderZoneState,
         portfolio_state: dict,
         session_info: dict,
+        liquidity_state=None,   # kept for API compatibility — ignored
     ) -> np.ndarray:
         """
         Build and return the observation vector for the current bar.
@@ -138,19 +136,9 @@ class ObservationBuilder:
             zone_dict["in_demand_zone"],
         ])
 
-        # ── 4. Liquidity features ─────────────────────────────
-        liq_dict = liquidity_state.as_feature_dict()
-        features.extend([
-            liq_dict["has_recent_sweep"],
-            liq_dict["sweep_up"],
-            liq_dict["sweep_down"],
-            liq_dict["n_swing_highs"],
-            liq_dict["n_swing_lows"],
-        ])
-
-        # ── 5. Order zone / confluence features ──────────────
-        # Pillar 3 (rejection candle) removed — 3 features replaced with zeros
-        # to keep observation dimension stable during rollout.
+        # ── 4. Order zone / confluence features ──────────────
+        # Pillar 2 (liquidity sweep) removed — LSTM learns sweep context from raw price.
+        # Pillar 3 (rejection candle) removed — 3 features kept as zeros.
         features.extend([
             float(np.clip(order_zone_state.confluence_score, 0.0, 1.0)),
             float(order_zone_state.in_bearish_order_zone),
@@ -164,7 +152,7 @@ class ObservationBuilder:
             0.5,   # rc_dir_norm   — removed (neutral value)
         ])
 
-        # ── 6. Portfolio state ────────────────────────────────
+        # ── 5. Portfolio state ────────────────────────────────
         pos_dir = portfolio_state.get("position_direction", "FLAT")
         features.extend([
             float(portfolio_state.get("position_open", False)),
@@ -177,7 +165,7 @@ class ObservationBuilder:
             float(np.clip(portfolio_state.get("consecutive_losses", 0)      /  3.0,  0.0, 1.0)),
         ])
 
-        # ── 7. Session timing ─────────────────────────────────
+        # ── 6. Session timing ─────────────────────────────────
         features.extend([
             float(np.clip(session_info.get("session_time_pct",    0.5), 0.0, 1.0)),
             float(np.clip(session_info.get("bars_remaining_pct",  0.5), 0.0, 1.0)),

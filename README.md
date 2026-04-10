@@ -21,6 +21,8 @@ a multi-bar lookback window in the observation vector.
 > - Do not replace working implementations with `pass` or `raise NotImplementedError`.
 > - If unsure whether something is used, assume it IS used and leave it alone.
 > - before you change the code read Readme.md and if you change code update the READme.md for the change that made
+
+>- make sure you remove the redunant codes, variables and tidy up the code without losing functionalities or breaking the codes.  make sure codes are clean, readable, professional and comply with highest coding standards.
 ---
 
 ## Project Structure
