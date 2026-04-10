@@ -53,10 +53,10 @@ evaluation:
   warmup_steps:   400_000          # no early stopping before this step
   patience_steps: 550_000          # stop if no composite improvement for N steps
   # Composite save score weights (auto-normalised to sum = 1)
-  w_sharpe: 0.30                   # Sharpe ratio        (most important)
-  w_pnl:    0.25                   # Total P&L in R
-  w_wl:     0.25                   # Win / Loss ratio
-  w_dd:     0.20                   # Max drawdown (penalises risk)
+  w_sharpe: 0.40                   # Sharpe ratio        (risk-adjusted return — primary signal)
+  w_pnl:    0.30                   # Total P&L in R
+  w_wl:     0.15                   # Win / Loss ratio    (weakest signal — reduced)
+  w_dd:     0.15                   # Max drawdown (penalises risk)
 
 multiprocessing:
   n_envs: 16                       # parallel training environments
