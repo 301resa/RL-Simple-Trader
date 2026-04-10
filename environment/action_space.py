@@ -18,7 +18,9 @@ Action Masking:
 
   Masking rules:
   - ENTER_SHORT/LONG masked if: position already open
-  - ENTER_SHORT/LONG masked if: ATR exhausted (atr_pct_used >= threshold)
+  - ENTER_SHORT masked if: downward ATR move >= 85% (already sold down too far)
+  - ENTER_LONG  masked if: upward ATR move >= 85% (already bought up too far)
+  - Opposite direction is always still allowed when one side is exhausted
   - Trend-direction masking removed — LSTM learns direction from price
   - ENTER_SHORT/LONG masked if: R:R < minimum
   - ENTER_SHORT/LONG masked if: max trades per day reached
@@ -78,7 +80,7 @@ class ActionMasker:
     def __init__(
         self,
         min_rr_ratio: float = 4.0,   # kept for API compatibility, no longer used in mask
-        atr_exhaustion_threshold: float = 0.95,
+        atr_exhaustion_threshold: float = 0.85,
         trail_min_r: float = 2.0,
         max_trades_per_day: int = 5,
         no_entry_last_n_bars: int = 3,
@@ -171,6 +173,17 @@ class ActionMasker:
             if block_reason not in ("position_open",):
                 log.debug("Entry masked", reason=block_reason)
             return mask
+
+        # ── Directional ATR exhaustion ────────────────────────
+        # Block only the direction that has already consumed 85% of ATR.
+        # The opposite direction is still allowed — if the market sold off
+        # 85% of ATR, longs are fine; if it rallied 85%, shorts are fine.
+        if atr_state.atr_short_exhausted:
+            mask[Action.ENTER_SHORT] = 0.0
+            log.debug("ENTER_SHORT masked", reason="atr_short_exhausted")
+        if atr_state.atr_long_exhausted:
+            mask[Action.ENTER_LONG] = 0.0
+            log.debug("ENTER_LONG masked", reason="atr_long_exhausted")
 
         # R:R and zone-presence checks are handled by the reward function
         # (entry penalties), not the mask.  Hard-masking R:R collapses to

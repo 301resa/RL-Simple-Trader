@@ -23,7 +23,8 @@ trailing:
   lock_in_r_at_trail: 1.2        # lock in at least 1.2R when trailing activates
 
 atr_gate:
-  block_entries_above_pct: 0.95  # block new entries if session used >= 95% of ATR
+  block_entries_above_pct: 0.85  # block entries in the EXHAUSTED DIRECTION only at 85% ATR
+                                  # e.g. if sold down 85% of ATR → no more shorts, longs ok
 
 daily_limits:
   max_daily_loss_r: 3.0          # stop trading after -3R on the day

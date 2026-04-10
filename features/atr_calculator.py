@@ -30,6 +30,8 @@ class ATRState:
     prior_day_high : float
     prior_day_low : float
     prior_day_range : float
+    session_open : float
+        Opening price of the current session (first bar open).
     session_high : float
         Highest high seen so far in the current session.
     session_low : float
@@ -40,32 +42,43 @@ class ATRState:
         current_daily_range / atr_daily.
     atr_remaining_pts : float
         ATR not yet consumed in price points.
-    atr_exhausted : bool
-        True when atr_pct_used >= exhaustion_threshold.
-    atr_warning : bool
-        True when atr_pct_used >= warning_threshold (e.g. 0.85).
+    atr_short_exhausted : bool
+        True when downward move (session_open - session_low) >= threshold × atr_daily.
+        Blocks new SHORT entries — no point selling into an already-exhausted down move.
+    atr_long_exhausted : bool
+        True when upward move (session_high - session_open) >= threshold × atr_daily.
+        Blocks new LONG entries — no point buying into an already-exhausted up move.
+        The OPPOSITE direction is always still allowed.
     """
     atr_daily: float
     prior_day_high: float
     prior_day_low: float
     prior_day_range: float
+    session_open: float
     session_high: float
     session_low: float
     current_daily_range: float
     atr_pct_used: float
     atr_remaining_pts: float
-    atr_exhausted: bool
-    atr_warning: bool
+    atr_short_exhausted: bool
+    atr_long_exhausted: bool
 
     def as_feature_dict(self) -> dict:
-        """Return normalised feature values for the observation vector."""
+        """Return normalised feature values for the observation vector.
+
+        Four ATR features (obs dimension unchanged):
+          atr_pct_used        — total session range as fraction of daily ATR
+          atr_remaining_norm  — remaining ATR room (0=exhausted, 1=full)
+          atr_short_exhausted — 1.0 if downward move >= 85% of ATR (block SHORTs)
+          atr_long_exhausted  — 1.0 if upward move >= 85% of ATR (block LONGs)
+        """
         return {
             "atr_pct_used": float(np.clip(self.atr_pct_used, 0.0, 2.0)),
             "atr_remaining_norm": float(
                 np.clip(self.atr_remaining_pts / max(self.atr_daily, 1.0), 0.0, 1.0)
             ),
-            "atr_exhausted": float(self.atr_exhausted),
-            "atr_warning": float(self.atr_warning),
+            "atr_short_exhausted": float(self.atr_short_exhausted),
+            "atr_long_exhausted":  float(self.atr_long_exhausted),
         }
 
 
@@ -89,8 +102,8 @@ class ATRCalculator:
     def __init__(
         self,
         atr_period: int = 14,
-        exhaustion_threshold: float = 0.95,
-        warning_threshold: float = 0.85,
+        exhaustion_threshold: float = 0.85,
+        warning_threshold: float = 0.85,  # kept for API compat, same as exhaustion
         profit_target_atr_pct: float = 0.75,
     ) -> None:
         self.atr_period = atr_period
@@ -211,27 +224,35 @@ class ATRCalculator:
         bars_so_far = session_bars.iloc[:current_bar_idx + 1]
         if bars_so_far.empty:
             ref = float(session_bars.iloc[0]["close"])
-            session_high = session_low = ref
+            session_open = session_high = session_low = ref
         else:
+            session_open = float(bars_so_far.iloc[0]["open"])   # first bar's open
             session_high = float(bars_so_far["high"].max())
-            session_low = float(bars_so_far["low"].min())
+            session_low  = float(bars_so_far["low"].min())
 
         current_range = session_high - session_low
-        atr_pct_used = current_range / atr_val
+        atr_pct_used  = current_range / atr_val
         atr_remaining = max(0.0, atr_val - current_range)
+
+        # Directional exhaustion: how much of ATR has been consumed in each direction
+        # from the session open price.
+        move_down = max(0.0, session_open - session_low)   # total downward move
+        move_up   = max(0.0, session_high - session_open)  # total upward move
+        thresh    = self.exhaustion_threshold * atr_val
 
         return ATRState(
             atr_daily=atr_val,
             prior_day_high=prior_high,
             prior_day_low=prior_low,
             prior_day_range=prior_range,
+            session_open=session_open,
             session_high=session_high,
             session_low=session_low,
             current_daily_range=current_range,
             atr_pct_used=atr_pct_used,
             atr_remaining_pts=atr_remaining,
-            atr_exhausted=atr_pct_used >= self.exhaustion_threshold,
-            atr_warning=atr_pct_used >= self.warning_threshold,
+            atr_short_exhausted=move_down >= thresh,  # already moved down 85% of ATR
+            atr_long_exhausted=move_up >= thresh,     # already moved up 85% of ATR
         )
 
     @staticmethod

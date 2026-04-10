@@ -4,8 +4,8 @@
 
 atr:
   period: 1                       # Wilder's ATR period (days)
-  exhaustion_threshold: 0.95       # session range >= 95% of ATR → exhausted
-  danger_threshold: 0.85           # session range >= 85% of ATR → warning
+  exhaustion_threshold: 0.85       # directional move >= 85% ATR → block that direction only
+  danger_threshold: 0.85           # same threshold (warning = exhaustion)
   profit_target_pct: 0.75          # target = 75% of remaining ATR
 
 swing:

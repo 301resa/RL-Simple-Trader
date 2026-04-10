@@ -125,8 +125,8 @@ class ObservationBuilder:
         features.extend([
             atr_dict["atr_pct_used"],
             atr_dict["atr_remaining_norm"],
-            atr_dict["atr_exhausted"],
-            atr_dict["atr_warning"],
+            atr_dict["atr_short_exhausted"],   # 1.0 = down move >= 85% ATR → no shorts
+            atr_dict["atr_long_exhausted"],    # 1.0 = up move >= 85% ATR → no longs
         ])
 
         # ── 3. Zone features ──────────────────────────────────

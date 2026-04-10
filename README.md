@@ -106,7 +106,7 @@ A trade is only entered when **two pillars** are present. Each pillar has a weig
 |--------|--------|-----------|
 | Supply/Demand Zone | 55% | Price is inside a valid consolidation-then-impulse zone |
 | Liquidity Sweep | 35% | A recent swing high/low sweep has occurred |
-| ATR Room | 10% | Session has not used ≥ 95% of daily ATR |
+| ATR Room | 10% | Directional ATR move < 85% of daily ATR in the entry direction |
 
 - Minimum confluence score: **0.35** (configurable in `features_config.yaml`)
 - Minimum R:R ratio: **1.5:1** before an entry is allowed
