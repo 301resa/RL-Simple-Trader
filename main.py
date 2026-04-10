@@ -445,10 +445,6 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
 
     log.info("Mode: TRAIN")
 
-    # Clean previous outputs unless resuming from a checkpoint or --no-clean passed
-    if not args.checkpoint and not getattr(args, "no_clean", False):
-        clean_run_dirs(Path(args.log_dir))
-
     c = build_components(configs, args.data)
 
     agent_cfg = configs["agent"]
@@ -675,10 +671,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     from training.trainer import Trainer
 
     log.info("Mode: WALK_FORWARD")
-
-    # Clean previous outputs unless --no-clean passed
-    if not getattr(args, "no_clean", False):
-        clean_run_dirs(Path(args.log_dir))
 
     agent_cfg   = configs["agent"]
     env_cfg     = configs["environment"]
@@ -1097,6 +1089,12 @@ def main() -> None:
 
     # Load all configs
     configs = load_configs(args.config)
+
+    # ── Clean BEFORE opening any log file handles ─────────────────────────────
+    # Must run here so metrics.log is not yet open when we delete it.
+    if args.mode in ("train", "walk_forward"):
+        if not getattr(args, "no_clean", False) and not getattr(args, "checkpoint", None):
+            clean_run_dirs(Path(args.log_dir))
 
     # Configure logging from config
     log_cfg = configs.get("logging", {})
