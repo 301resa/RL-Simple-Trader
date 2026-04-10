@@ -17,12 +17,12 @@ step:
   hold_flat_penalty: -0.025             # 5× increase: forces agent to seek entries
 
 entry_bonuses:
-  full_order_zone_confluence: 0.50      # all three pillars present
-  in_supply_demand_zone: 0.20          # price is inside a valid zone
-  liquidity_sweep_present: 0.15        # recent sweep detected
-  rejection_candle_present: 0.10       # rejection candle confirmed
+  full_order_zone_confluence: 0.50      # both pillars present: zone + sweep
+  in_supply_demand_zone: 0.25          # price is inside a valid zone (increased from 0.20)
+  liquidity_sweep_present: 0.20        # recent sweep detected (increased from 0.15)
   atr_has_room: 0.15                   # ATR not yet in warning territory
   high_rr_ratio: 0.20                  # R:R >= minimum
+  # rejection_candle_present removed — Pillar 3 no longer used
 
 entry_penalties:
   # ── Entry cost ────────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ entry_penalties:
   atr_exhausted: -0.40                  # slightly reduced; reward already penalises this
   rr_below_minimum: -0.08               # halved from -0.15
   no_liquidity_confluence: -0.05        # halved from -0.10
-  overtrading: -0.20                    # keep firm — hard daily limit guardrail
+  overtrading: 0.0                      # removed — no hard cap; daily loss limit (-3R) is the brake
 
 exit_rewards:
   trailing_stop_correctly: 0.30       # used trail stop before exit

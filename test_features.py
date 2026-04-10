@@ -365,7 +365,6 @@ class TestObservationBuilder:
         from features.zone_detector import ZoneState
         from features.liquidity_detector import LiquidityState, SweepDirection
         from features.order_zone_engine import OrderZoneState, OrderZoneType
-        from features.order_zone_engine import RejectionCandle
         from features.trend_classifier import TrendSnapshot, TrendState
 
         bars = make_bars([15000 + i * 2 for i in range(30)])
@@ -384,7 +383,6 @@ class TestObservationBuilder:
         oz_state = OrderZoneState(
             zone_type=OrderZoneType.NONE, confluence_score=0.0,
             in_bearish_order_zone=False, in_bullish_order_zone=False,
-            rejection_candle=RejectionCandle(False, "none", 0, 0.0),
             rr_ratio=0.0, trade_worthwhile=False, component_scores={}
         )
         portfolio_state = {

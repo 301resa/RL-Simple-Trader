@@ -27,7 +27,7 @@ from environment.position_manager import (
     PositionManager,
 )
 from features.atr_calculator import ATRState
-from features.order_zone_engine import OrderZoneState, OrderZoneType, RejectionCandle
+from features.order_zone_engine import OrderZoneState, OrderZoneType
 from features.trend_classifier import TrendSnapshot, TrendState
 
 
@@ -59,7 +59,6 @@ def make_dummy_oz_state(in_bearish: bool = False, rr: float = 5.0) -> OrderZoneS
         confluence_score=0.8 if in_bearish else 0.1,
         in_bearish_order_zone=in_bearish,
         in_bullish_order_zone=False,
-        rejection_candle=RejectionCandle(detected=False, pattern_name="none", direction=0, strength=0.0),
         rr_ratio=rr,
         trade_worthwhile=in_bearish and rr >= 4.0,
         component_scores={},

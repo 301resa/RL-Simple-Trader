@@ -27,7 +27,7 @@ atr_gate:
 
 daily_limits:
   max_daily_loss_r: 3.0          # stop trading after -3R on the day
-  max_trades_per_day: 10         # maximum entries per session
+  max_trades_per_day: 999        # no hard cap — daily loss limit (-3R) is the natural brake
   max_consecutive_losses_before_pause: 3
   pause_bars_after_loss_streak: 6  # bars to sit out after loss streak
 

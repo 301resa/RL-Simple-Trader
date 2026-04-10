@@ -201,7 +201,7 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
     if len(ep_pnls) >= 2:
         mu = float(np.mean(ep_pnls))
         sd = float(np.std(ep_pnls))
-        sharpe = mu / sd if sd > 1e-9 else 0.0
+        sharpe = (mu / sd) * np.sqrt(252) if sd > 1e-9 else 0.0  # annualised
 
     # Max drawdown
     equity = np.cumsum(pnl)
@@ -234,7 +234,7 @@ def _composite(m: dict,
     wl      = m["win_rate"] * (m["avg_win_r"] / max(m["avg_loss_r"], 1e-6))
     dd      = m["max_dd_r"]
 
-    ref_sharpe = 2.0
+    ref_sharpe = 1.5   # annualised Sharpe (*sqrt(252))
     ref_pnl    = 20.0
     ref_wl     = 3.0
     ref_dd     = 5.0

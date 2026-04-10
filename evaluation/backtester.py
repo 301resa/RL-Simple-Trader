@@ -121,7 +121,7 @@ class Backtester:
                             confluence_score=oz_state.confluence_score if oz_state else 0.0,
                             liquidity_sweep_present=bool(getattr(self.env, "_last_liquidity_state", None) and
                                                          self.env._last_liquidity_state.recent_sweep is not None),
-                            rejection_candle_present=oz_state.rejection_candle.detected if oz_state else False,
+                            rejection_candle_present=False,  # Pillar 3 removed
                             atr_pct_used_at_entry=atr_state.atr_pct_used if atr_state else 0.0,
                             rr_ratio_at_entry=oz_state.rr_ratio if oz_state else 0.0,
                             peak_unrealised_r=self.env._peak_unrealised_r,

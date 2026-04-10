@@ -22,8 +22,8 @@ ppo:
   vf_coef: 0.5                     # value function coefficient
   max_grad_norm: 0.5               # gradient clipping
   total_timesteps: 2_000_000       # total training steps
-  eval_freq: 50_000                # evaluate every N steps
-  n_eval_episodes: 20              # episodes per evaluation
+  eval_freq: 20_000                # evaluate every N steps (was 50k — too infrequent)
+  n_eval_episodes: 100_000              # episodes per evaluation
 
 network:
   net_arch:
@@ -46,7 +46,7 @@ checkpointing:
   keep_n_checkpoints: 5            # keep only the N most recent rolling checkpoints
 
 evaluation:
-  eval_freq: 50_000                # run val metrics every N training steps
+  eval_freq: 20_000                # run val metrics every N training steps (was 50k)
   n_eval_episodes: 20              # val episodes per evaluation run
   # Early stopping — warmup must complete before patience can trigger
   warmup_steps:   400_000          # no early stopping before this step

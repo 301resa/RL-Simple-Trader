@@ -27,6 +27,7 @@ from training.trading_eval_callback import TradingEvalCallback
 from training.metrics_logger_callback import MetricsPrinterCallback
 from training.shaping_decay_callback import ShapingDecayCallback
 from training.training_journal_callback import TrainingJournalCallback
+from training.training_hotsave_callback import TrainingHotSaveCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from agent.ppo_agent import PPOAgent
@@ -194,6 +195,13 @@ class Trainer:
         train_date_range: str = "",
         vec_normalize=None,   # VecNormalize wrapper — stats saved alongside model
         resume: bool = False, # True when continuing from a checkpoint
+        # Training hot-save gate (V7-style)
+        hotsave_pf_avg: float = 1.30,      # Tier-1: mean PF across all envs
+        hotsave_pf_ind: float = 1.80,      # Tier-2: per-env PF threshold
+        hotsave_wr: float = 0.40,          # Tier-2: per-env win-rate threshold
+        hotsave_min_trades: int = 20,      # Tier-2: min trades per env
+        hotsave_min_envs: int = 2,         # Tier-2: envs that must pass
+        hotsave_cooldown: int = 50_000,    # min steps between hot-saves
     ) -> None:
         self.agent = agent
         self.train_env = train_env
@@ -219,6 +227,12 @@ class Trainer:
         self.models_dir     = Path(models_dir)
         self.train_date_range = train_date_range
         self.resume         = resume
+        self.hotsave_pf_avg     = hotsave_pf_avg
+        self.hotsave_pf_ind     = hotsave_pf_ind
+        self.hotsave_wr         = hotsave_wr
+        self.hotsave_min_trades = hotsave_min_trades
+        self.hotsave_min_envs   = hotsave_min_envs
+        self.hotsave_cooldown   = hotsave_cooldown
 
     def run(self) -> PPOAgent:
         """
@@ -340,7 +354,22 @@ class Trainer:
             )
         )
 
-        # 7. Curriculum (optional)
+        # 7. Training hot-save (V7-style two-tier PF/WR gate on live training envs)
+        cbs.append(
+            TrainingHotSaveCallback(
+                models_dir=self.models_dir / "hotsaves",
+                pf_avg_threshold=self.hotsave_pf_avg,
+                pf_ind_threshold=self.hotsave_pf_ind,
+                wr_threshold=self.hotsave_wr,
+                min_trades=self.hotsave_min_trades,
+                min_envs_passing=self.hotsave_min_envs,
+                cooldown_steps=self.hotsave_cooldown,
+                vec_normalize=self.vec_normalize,
+                verbose=1,
+            )
+        )
+
+        # 8. Curriculum (optional)
         if self.curriculum_scheduler is not None:
             cbs.append(CurriculumCallback(self.curriculum_scheduler))
 

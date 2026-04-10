@@ -149,10 +149,8 @@ class ObservationBuilder:
         ])
 
         # ── 5. Order zone / confluence features ──────────────
-        # (Trend features removed — LSTM builds directional memory across candles.)
-        rc = order_zone_state.rejection_candle
-        # Map direction {-1, 0, 1} → {0.0, 0.5, 1.0} for the network
-        rc_dir_norm = float((rc.direction + 1) / 2.0)
+        # Pillar 3 (rejection candle) removed — 3 features replaced with zeros
+        # to keep observation dimension stable during rollout.
         features.extend([
             float(np.clip(order_zone_state.confluence_score, 0.0, 1.0)),
             float(order_zone_state.in_bearish_order_zone),
@@ -161,9 +159,9 @@ class ObservationBuilder:
             float(order_zone_state.zone_type.value == "bullish"),
             float(np.clip(order_zone_state.rr_ratio / 10.0, 0.0, 1.0)),
             float(order_zone_state.trade_worthwhile),
-            float(rc.detected),
-            float(np.clip(rc.strength, 0.0, 1.0)),
-            rc_dir_norm,
+            0.0,   # rc.detected   — removed
+            0.0,   # rc.strength   — removed
+            0.5,   # rc_dir_norm   — removed (neutral value)
         ])
 
         # ── 6. Portfolio state ────────────────────────────────

@@ -145,9 +145,9 @@ def export_features(
                 "in_bearish_oz":     int(oz_state.in_bearish_order_zone),
                 "confluence_score":  round(oz_state.confluence_score, 4),
                 "rr_ratio":          round(oz_state.rr_ratio, 4),
-                "rejection_detected":int(oz_state.rejection_candle.detected),
-                "rejection_strength":round(oz_state.rejection_candle.strength, 4),
-                "rejection_dir":     oz_state.rejection_candle.direction,
+                "rejection_detected": 0,    # Pillar 3 removed
+                "rejection_strength": 0.0,  # Pillar 3 removed
+                "rejection_dir":      0,    # Pillar 3 removed
                 # Component scores
                 "zone_score":        round(getattr(oz_state, "component_scores", {}).get("zone", 0.0), 4),
                 "sweep_score":       round(getattr(oz_state, "component_scores", {}).get("sweep", 0.0), 4),

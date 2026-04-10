@@ -129,9 +129,8 @@ class RewardCalculator:
         # Default reward values (overridden by config)
         self.entry_bonuses = entry_bonuses or {
             "full_order_zone_confluence": 0.50,
-            "in_supply_demand_zone": 0.20,
-            "liquidity_sweep_present": 0.15,
-            "rejection_candle_present": 0.10,
+            "in_supply_demand_zone": 0.25,
+            "liquidity_sweep_present": 0.20,
             "atr_has_room": 0.15,
             "high_rr_ratio": 0.20,
         }
@@ -258,8 +257,7 @@ class RewardCalculator:
                 else:
                     if order_zone_state.in_bearish_order_zone or order_zone_state.in_bullish_order_zone:
                         entry_bonus += self.entry_bonuses["in_supply_demand_zone"] * self.shaping_scale
-                    if order_zone_state.rejection_candle.detected:
-                        entry_bonus += self.entry_bonuses["rejection_candle_present"] * order_zone_state.rejection_candle.strength * self.shaping_scale
+                    # Pillar 3 (rejection candle) removed
 
                 if not atr_state.atr_warning:
                     entry_bonus += self.entry_bonuses["atr_has_room"] * self.shaping_scale

@@ -156,7 +156,7 @@ class TradingEvalCallback(BaseCallback):
         w_wl:     float          = 0.25,
         w_dd:     float          = 0.20,
         # Normalization anchors
-        sharpe_ref: float        = 3.0,
+        sharpe_ref: float        = 1.5,   # annualised Sharpe (*sqrt(252)); 1.5 = excellent
         pnl_ref:    float        = 20.0,
         wl_ref:     float        = 3.0,
         dd_ref:     float        = 8.0,
@@ -427,7 +427,7 @@ class TradingEvalCallback(BaseCallback):
         if len(episode_pnl_r) >= 2:
             mu     = float(np.mean(episode_pnl_r))
             std    = float(np.std(episode_pnl_r, ddof=1))
-            sharpe = mu / max(std, 1e-6)
+            sharpe = (mu / max(std, 1e-6)) * np.sqrt(252)   # annualised
         else:
             sharpe = float(np.mean(episode_pnl_r)) if episode_pnl_r else 0.0
 

@@ -640,17 +640,20 @@ class TradingEnv(gym.Env):
         self, direction: int, current_price: float, atr_state: ATRState
     ) -> None:
         """Compute stop/target and open position."""
+        from features.order_zone_engine import FIXED_STOP_BUFFER_PTS
         zone_state = self._last_zone_state if hasattr(self, "_last_zone_state") else None
         atr = atr_state.atr_daily
 
-        # Stop loss: just beyond the zone boundary
-        buffer = atr * 0.03
+        # Stop loss: fixed 1.5 pts beyond the zone boundary.
+        # Short: stop = zone top + 1.5 pts
+        # Long:  stop = zone bottom - 1.5 pts
+        # Fallback (no zone detected): ATR-based stop
         if direction == -1 and zone_state and zone_state.nearest_supply:
-            stop_price = zone_state.nearest_supply.top + buffer
+            stop_price = zone_state.nearest_supply.top + FIXED_STOP_BUFFER_PTS
         elif direction == 1 and zone_state and zone_state.nearest_demand:
-            stop_price = zone_state.nearest_demand.bottom - buffer
+            stop_price = zone_state.nearest_demand.bottom - FIXED_STOP_BUFFER_PTS
         else:
-            # Fallback: ATR-based stop
+            # Fallback: ATR-based stop (no zone visible)
             stop_price = current_price + (atr * 0.15 * direction * -1)
 
         # Target: ATR remaining level
@@ -741,16 +744,15 @@ class TradingEnv(gym.Env):
         win_loss_ratio  = avg_win_r / max(avg_loss_r, 1e-6)
         expected_return = win_rate * avg_win_r - (1.0 - win_rate) * avg_loss_r
 
-        # ── Sharpe (from per-trade returns) ───────────────────
-        # Require ≥5 trades and non-trivial std before computing;
-        # clamp to [-9.99, 9.99] to prevent column overflow.
-        if n_trades >= 5:
+        # ── Sharpe (annualised, from per-trade returns) ───────
+        # Formula: (mean_r / std_r) × √252  — same annualisation
+        # used by the eval callback and V7 reference code.
+        # Require ≥2 trades; clamp to [-9.99, 9.99] for column display.
+        if n_trades >= 2:
             tr  = np.array([t.pnl_r for t in trades], dtype=np.float32)
             std = float(np.std(tr))
-            sharpe_ratio = float(np.clip(
-                np.mean(tr) / std if std > 0.01 else 0.0,
-                -9.99, 9.99,
-            ))
+            raw = np.mean(tr) / std if std > 0.01 else 0.0
+            sharpe_ratio = float(np.clip(raw * np.sqrt(252), -9.99, 9.99))
         else:
             sharpe_ratio = 0.0
 

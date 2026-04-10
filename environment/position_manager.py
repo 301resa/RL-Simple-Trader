@@ -116,7 +116,7 @@ class PositionManager:
 
     def __init__(
         self,
-        real_capital: float = 25000.0,
+        real_capital: float = 50000.0,
         risk_per_trade_pct: float = 0.01,
         min_contracts: int = 1,
         max_contracts: int = 3,
