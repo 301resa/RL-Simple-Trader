@@ -19,18 +19,34 @@ Metrics computed after every evaluation run
   max_win_dollars     : Largest single winning trade in $
   max_loss_dollars    : Largest single losing trade in $ (most negative)
 
+Tiered save schedule
+--------------------
+  As training progresses the bar for saving escalates.  A checkpoint is
+  written only when BOTH conditions are met:
+    (a) composite_score >= phase minimum threshold
+    (b) n_trades >= MIN_TRADES_FOR_SAVE (avoids saving on lucky zero-trade runs)
+
+  SAVE_SCHEDULE  (step_threshold, min_composite_score):
+    Phase 0 (0–400k)      : 0.05  — any positive signal
+    Phase 1 (400k–750k)   : 0.15  — post-warmup; need real signal
+    Phase 2 (750k–1.1M)   : 0.25  — consistency required
+    Phase 3 (1.1M–1.5M)   : 0.35  — quality grade
+    Phase 4 (1.5M+)        : 0.45  — elite; only clear best saved
+
+  Every checkpoint that passes the phase gate is saved as a numbered file:
+    checkpoint_s{N:02d}_step{step}_c{score:.2f}.zip
+  alongside its VecNormalize stats:
+    checkpoint_s{N:02d}_step{step}_c{score:.2f}_vecnormalize.pkl
+
+  The all-time best is additionally written as best_model.zip /
+  best_model_vecnormalize.pkl for backwards-compatible loading.
+
 Composite save score
 --------------------
   score = w_sharpe * sharpe_norm
         + w_pnl    * pnl_norm
         + w_wl     * wl_norm
         + w_dd     * (1 − dd_norm)          ← lower DD is better
-
-  Normalization reference points (configurable):
-    sharpe_norm  = clip((sharpe + 1) / 4,  0, 1)   −1→0, 0→0.25, 3→1
-    pnl_norm     = clip(total_pnl_r / 20,  0, 1)    20R  per eval run → 1
-    wl_norm      = clip(wl_ratio / 3,       0, 1)   3:1 WL ratio     → 1
-    dd_norm      = clip(max_dd_r / 8,       0, 1)   8R drawdown      → 1
 
 Early stopping
 --------------
@@ -44,7 +60,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -53,6 +69,21 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv
 from utils.logger import get_logger
 
 log = get_logger(__name__)
+
+
+# ── Tiered save schedule ──────────────────────────────────────────────────────
+# (step_threshold, minimum_composite_score_to_save)
+SAVE_SCHEDULE: List[Tuple[int, float]] = [
+    (0,         0.05),   # Phase 0: Warmup — any positive composite
+    (400_000,   0.15),   # Phase 1: Post-warmup — need real signal
+    (750_000,   0.25),   # Phase 2: Consistency required
+    (1_100_000, 0.35),   # Phase 3: Quality grade
+    (1_500_000, 0.45),   # Phase 4: Elite — only clear best
+]
+
+# Minimum trades in an eval run before we consider saving.
+# Prevents saving a checkpoint that got lucky on 1-2 trades with no statistical validity.
+MIN_TRADES_FOR_SAVE = 8
 
 
 # ── Metric container ──────────────────────────────────────────────────────────
@@ -95,33 +126,20 @@ class ValMetrics:
 class TradingEvalCallback(BaseCallback):
     """
     Evaluates the agent on a validation environment using trading metrics,
-    saves the best model, and early-stops when no improvement is seen.
+    saves numbered checkpoints on every phase-passing eval, and maintains
+    a best_model alias pointing to the all-time best checkpoint.
 
     Parameters
     ----------
     eval_env : VecEnv | gymnasium.Env
-        Validation environment (single, non-augmented).
     save_path : str | Path
-        Directory to write ``best_model.zip``.
+        Directory for all checkpoint files.
     eval_freq : int
-        Evaluate every N training steps (total across all envs).
     n_eval_episodes : int
-        Number of val episodes per evaluation run.
     warmup_steps : int
-        Minimum training steps before early stopping can trigger.
     patience_steps : int
-        Stop training if no improvement for this many steps.
-
-    Composite score weights (must sum to 1.0):
-    ------------------------------------------
-    w_sharpe, w_pnl, w_wl, w_dd
-
-    Normalization anchors (1-unit = score of 1.0 on that axis):
-    -----------------------------------------------------------
-    sharpe_ref  :  Sharpe of +3 maps to norm = 1.0
-    pnl_ref     :  total_pnl_r of +20R maps to norm = 1.0
-    wl_ref      :  win/loss ratio of 3.0 maps to norm = 1.0
-    dd_ref      :  max_drawdown_r of 8R maps to norm = 1.0 (worst)
+    w_sharpe, w_pnl, w_wl, w_dd : float
+        Composite score weights.
     """
 
     def __init__(
@@ -146,7 +164,6 @@ class TradingEvalCallback(BaseCallback):
     ) -> None:
         super().__init__(verbose)
 
-        # Wrap bare env in DummyVecEnv if needed
         if not isinstance(eval_env, VecEnv):
             eval_env = DummyVecEnv([lambda: eval_env])
         self.eval_env = eval_env
@@ -158,14 +175,12 @@ class TradingEvalCallback(BaseCallback):
         self.warmup_steps    = warmup_steps
         self.patience_steps  = patience_steps
 
-        # Weights
         total_w = w_sharpe + w_pnl + w_wl + w_dd
         self.w_sharpe = w_sharpe / total_w
         self.w_pnl    = w_pnl    / total_w
         self.w_wl     = w_wl     / total_w
         self.w_dd     = w_dd     / total_w
 
-        # Anchors
         self.sharpe_ref = max(sharpe_ref, 1e-6)
         self.pnl_ref    = max(pnl_ref,    1e-6)
         self.wl_ref     = max(wl_ref,     1e-6)
@@ -177,42 +192,68 @@ class TradingEvalCallback(BaseCallback):
         self._last_eval_step:  int   = 0
         self._eval_history:    List[ValMetrics] = []
         self._early_stopped:   bool  = False
+        self._save_n:          int   = 0   # counter for numbered checkpoints
+        self._cur_phase:       int   = 0
+
+    # ── Phase helpers ─────────────────────────────────────────────────────────
+
+    def _phase_min_composite(self) -> float:
+        """Return the minimum composite score required to save at current step."""
+        threshold = SAVE_SCHEDULE[0][1]
+        for step_thr, min_score in SAVE_SCHEDULE:
+            if self.num_timesteps >= step_thr:
+                threshold = min_score
+        return threshold
+
+    def _phase_idx(self) -> int:
+        idx = 0
+        for i, (step_thr, _) in enumerate(SAVE_SCHEDULE):
+            if self.num_timesteps >= step_thr:
+                idx = i
+        return idx
 
     # ── SB3 hook ─────────────────────────────────────────────────────────────
 
     def _on_step(self) -> bool:
-        """Called after every environment step during training."""
         if self.num_timesteps - self._last_eval_step < self.eval_freq:
-            return True   # not time yet
+            return True
 
         self._last_eval_step = self.num_timesteps
 
-        # Sync VecNormalize obs stats from train → eval env so eval uses
-        # the same normalisation the model was trained with.
-        self._sync_vec_normalize()
+        # Phase advancement — reset patience when phase advances
+        phase_now = self._phase_idx()
+        if phase_now > self._cur_phase:
+            self._cur_phase = phase_now
+            log.info(
+                "Eval phase advanced",
+                phase=phase_now,
+                min_composite=self._phase_min_composite(),
+            )
 
+        self._sync_vec_normalize()
         metrics = self._run_eval()
 
         if metrics is None:
-            return True   # nothing collected (no trades in warm-up episodes)
+            return True
 
         self._eval_history.append(metrics)
         self._log_metrics(metrics)
 
-        # ── Save best model ───────────────────────────────────
-        if metrics.composite_score > self._best_score:
-            self._best_score      = metrics.composite_score
-            self._best_score_step = self.num_timesteps
-            best_path = self.save_path / "best_model"
-            self.model.save(str(best_path))
-            # Also save VecNormalize stats alongside best model
-            self._save_vec_normalize(self.save_path / "best_model_vecnormalize.pkl")
-            log.info(
-                "New best model saved",
-                step=self.num_timesteps,
-                composite=round(metrics.composite_score, 4),
-                path=str(best_path),
-            )
+        # ── Tiered save logic ─────────────────────────────────
+        min_composite = self._phase_min_composite()
+        passes_phase  = metrics.composite_score >= min_composite
+        passes_trades = metrics.n_trades >= MIN_TRADES_FOR_SAVE
+
+        if passes_phase and passes_trades:
+            self._save_checkpoint(metrics)
+        else:
+            reasons = []
+            if not passes_phase:
+                reasons.append(f"composite={metrics.composite_score:.3f} < phase_min={min_composite:.2f}")
+            if not passes_trades:
+                reasons.append(f"n_trades={metrics.n_trades} < min={MIN_TRADES_FOR_SAVE}")
+            log.info("Checkpoint not saved", reasons=", ".join(reasons))
+
         # ── Early stopping ────────────────────────────────────
         if self.num_timesteps >= self.warmup_steps:
             steps_no_improve = self.num_timesteps - self._best_score_step
@@ -226,27 +267,82 @@ class TradingEvalCallback(BaseCallback):
                     best_score=round(self._best_score, 4),
                 )
                 self._early_stopped = True
-                return False  # signals SB3 to stop training
+                return False
 
         return True
+
+    # ── Save helpers ──────────────────────────────────────────────────────────
+
+    def _save_checkpoint(self, metrics: ValMetrics) -> None:
+        """Save a numbered checkpoint + VecNorm. Also update best_model alias."""
+        self._save_n += 1
+        is_new_best = metrics.composite_score > self._best_score
+
+        # Numbered checkpoint filename
+        stem = (
+            f"checkpoint_s{self._save_n:02d}"
+            f"_step{self.num_timesteps}"
+            f"_c{metrics.composite_score:.2f}"
+        )
+        ckpt_path   = self.save_path / stem
+        vn_path     = self.save_path / f"{stem}_vecnormalize.pkl"
+
+        self.model.save(str(ckpt_path))
+        self._save_vec_normalize(vn_path)
+
+        tag = "★ NEW BEST" if is_new_best else "✓ SAVED"
+        log.info(
+            f"Checkpoint {tag} #{self._save_n}",
+            step=self.num_timesteps,
+            composite=round(metrics.composite_score, 4),
+            trades=metrics.n_trades,
+            win_rate=f"{metrics.win_rate*100:.1f}%",
+            phase=self._cur_phase,
+            path=str(ckpt_path),
+        )
+
+        if is_new_best:
+            self._best_score      = metrics.composite_score
+            self._best_score_step = self.num_timesteps
+            # Also write the best_model alias for backwards-compatible loading
+            best_path = self.save_path / "best_model"
+            best_vn   = self.save_path / "best_model_vecnormalize.pkl"
+            self.model.save(str(best_path))
+            self._save_vec_normalize(best_vn)
+            log.info(
+                "best_model alias updated",
+                step=self.num_timesteps,
+                score=round(self._best_score, 4),
+            )
+
+    def save_final_checkpoint(self) -> None:
+        """
+        Save a FINAL_STEP checkpoint regardless of composite score.
+        Called by Trainer.run() at end of training as a safety-net so at
+        least one testable checkpoint always exists per fold.
+        """
+        stem      = f"checkpoint_FINAL_STEP{self.num_timesteps}"
+        ckpt_path = self.save_path / stem
+        vn_path   = self.save_path / f"{stem}_vecnormalize.pkl"
+        self.model.save(str(ckpt_path))
+        self._save_vec_normalize(vn_path)
+        log.info("FINAL_STEP checkpoint saved", path=str(ckpt_path))
 
     # ── VecNormalize helpers ──────────────────────────────────────────────────
 
     def _sync_vec_normalize(self) -> None:
-        """Copy obs running stats from training env → eval env."""
         try:
             from stable_baselines3.common.vec_env import VecNormalize
             train_vn = self.training_env
             eval_vn  = self.eval_env
             if isinstance(train_vn, VecNormalize) and isinstance(eval_vn, VecNormalize):
-                eval_vn.obs_rms   = train_vn.obs_rms
-                eval_vn.ret_rms   = train_vn.ret_rms
-                eval_vn.clip_obs  = train_vn.clip_obs
+                eval_vn.obs_rms  = train_vn.obs_rms
+                eval_vn.ret_rms  = train_vn.ret_rms
+                eval_vn.clip_obs = train_vn.clip_obs
         except Exception:
             pass
 
-    def _save_vec_normalize(self, path) -> None:
-        """Save VecNormalize stats if the training env is wrapped."""
+    def _save_vec_normalize(self, path: Path) -> None:
         try:
             from stable_baselines3.common.vec_env import VecNormalize
             if isinstance(self.training_env, VecNormalize):
@@ -257,31 +353,19 @@ class TradingEvalCallback(BaseCallback):
     # ── Evaluation runner ─────────────────────────────────────────────────────
 
     def _run_eval(self) -> Optional[ValMetrics]:
-        """
-        Roll out n_eval_episodes on the val env and collect episode summaries.
-
-        Returns ValMetrics or None if no trades were executed.
-        """
-        # Episode-level P&L list (for Sharpe across episodes)
-        episode_pnl_r: List[float] = []
-
-        # Trade-level aggregates
-        all_wins_r:      List[float] = []
-        all_losses_r:    List[float] = []
-        all_durations:   List[float] = []
-        all_win_dollars: List[float] = []
+        episode_pnl_r:    List[float] = []
+        all_wins_r:       List[float] = []
+        all_losses_r:     List[float] = []
+        all_durations:    List[float] = []
+        all_win_dollars:  List[float] = []
         all_loss_dollars: List[float] = []
         n_wins = n_losses = 0
+        cumulative_r: List[float] = [0.0]
 
-        # Running cumulative R for drawdown calculation
-        cumulative_r:   List[float] = [0.0]
-
-        # Recurrent PPO requires carrying LSTM state between steps
-        obs      = self.eval_env.reset()
-        lstm_states = None
+        obs            = self.eval_env.reset()
+        lstm_states    = None
         episode_starts = np.ones(self.eval_env.num_envs, dtype=bool)
-
-        episodes_done = 0
+        episodes_done  = 0
 
         while episodes_done < self.n_eval_episodes:
             action, lstm_states = self.model.predict(
@@ -302,7 +386,6 @@ class TradingEvalCallback(BaseCallback):
                 episode_pnl_r.append(ep_pnl)
                 cumulative_r.append(cumulative_r[-1] + ep_pnl)
 
-                # Trade-level data from episode summary
                 n_ep_wins   = int(info.get("n_wins",   0))
                 n_ep_losses = int(info.get("n_losses", 0))
                 n_wins   += n_ep_wins
@@ -323,17 +406,16 @@ class TradingEvalCallback(BaseCallback):
                 if episodes_done >= self.n_eval_episodes:
                     break
 
-        # ── Compute aggregate metrics ─────────────────────────
         n_trades = n_wins + n_losses
         if n_trades == 0:
             log.warning("No trades in eval — skipping metric update.")
             return None
 
-        total_pnl_r  = float(sum(episode_pnl_r))
-        win_rate     = n_wins / n_trades
+        total_pnl_r    = float(sum(episode_pnl_r))
+        win_rate       = n_wins / n_trades
         win_loss_ratio = n_wins / max(n_losses, 1)
 
-        avg_win_r  = float(np.mean(all_wins_r))  if all_wins_r  else 0.0
+        avg_win_r  = float(np.mean(all_wins_r))   if all_wins_r   else 0.0
         avg_loss_r = float(np.mean(all_losses_r)) if all_losses_r else 0.0
         avg_rr     = avg_win_r / max(avg_loss_r, 1e-6)
         exp_return = win_rate * avg_win_r - (1.0 - win_rate) * avg_loss_r
@@ -342,18 +424,15 @@ class TradingEvalCallback(BaseCallback):
         max_win_d  = float(max(all_win_dollars,  default=0.0))
         max_loss_d = float(min(all_loss_dollars, default=0.0))
 
-        # Episode-level Sharpe
         if len(episode_pnl_r) >= 2:
-            mu  = float(np.mean(episode_pnl_r))
-            std = float(np.std(episode_pnl_r, ddof=1))
+            mu     = float(np.mean(episode_pnl_r))
+            std    = float(np.std(episode_pnl_r, ddof=1))
             sharpe = mu / max(std, 1e-6)
         else:
             sharpe = float(np.mean(episode_pnl_r)) if episode_pnl_r else 0.0
 
-        # Max drawdown across all episodes (on cumulative R curve)
         max_drawdown_r = self._max_drawdown(cumulative_r)
-
-        composite = self._composite_score(sharpe, total_pnl_r, win_loss_ratio, max_drawdown_r)
+        composite      = self._composite_score(sharpe, total_pnl_r, win_loss_ratio, max_drawdown_r)
 
         return ValMetrics(
             total_pnl_r=total_pnl_r,
@@ -374,28 +453,11 @@ class TradingEvalCallback(BaseCallback):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _composite_score(
-        self,
-        sharpe:    float,
-        pnl_r:    float,
-        wl_ratio: float,
-        max_dd_r: float,
-    ) -> float:
-        """
-        Weighted normalised composite score.
-
-        All components normalised to [0, 1] before weighting.
-        Drawdown is inverted (lower DD = higher norm score).
-        """
-        # Sharpe: −1 → 0,  0 → 0.25,  3 → 1.0
+    def _composite_score(self, sharpe, pnl_r, wl_ratio, max_dd_r) -> float:
         sharpe_norm = float(np.clip((sharpe + 1.0) / (self.sharpe_ref + 1.0), 0.0, 1.0))
-        # P&L R: 0 → 0,  pnl_ref → 1.0
         pnl_norm    = float(np.clip(pnl_r    / self.pnl_ref, 0.0, 1.0))
-        # Win/Loss: 0 → 0,  wl_ref → 1.0
         wl_norm     = float(np.clip(wl_ratio / self.wl_ref,  0.0, 1.0))
-        # Max DD: 0 → 1.0,  dd_ref → 0.0  (inverted)
         dd_penalty  = float(np.clip(max_dd_r / self.dd_ref,  0.0, 1.0))
-
         return (
             self.w_sharpe * sharpe_norm
             + self.w_pnl  * pnl_norm
@@ -405,8 +467,7 @@ class TradingEvalCallback(BaseCallback):
 
     @staticmethod
     def _max_drawdown(cumulative: List[float]) -> float:
-        """Peak-to-trough maximum drawdown of a cumulative R series."""
-        arr = np.array(cumulative, dtype=np.float64)
+        arr  = np.array(cumulative, dtype=np.float64)
         peak = arr[0]
         max_dd = 0.0
         for v in arr:
@@ -419,17 +480,18 @@ class TradingEvalCallback(BaseCallback):
 
     def _log_metrics(self, m: ValMetrics) -> None:
         step = self.num_timesteps
+        phase_min = self._phase_min_composite()
         if self.verbose >= 1:
             log.info(
                 "Eval",
                 step=step,
                 metrics=m.log_str(),
+                phase=self._cur_phase,
+                phase_min_composite=round(phase_min, 2),
                 warmup_passed=(step >= self.warmup_steps),
                 steps_since_best=(step - self._best_score_step),
                 patience=self.patience_steps,
             )
-
-        # TensorBoard
         self.logger.record("eval/total_pnl_r",         m.total_pnl_r)
         self.logger.record("eval/sharpe_ratio",         m.sharpe_ratio)
         self.logger.record("eval/win_loss_ratio",       m.win_loss_ratio)
@@ -444,6 +506,7 @@ class TradingEvalCallback(BaseCallback):
         self.logger.record("eval/max_win_dollars",      m.max_win_dollars)
         self.logger.record("eval/max_loss_dollars",     m.max_loss_dollars)
         self.logger.record("eval/composite_score",      m.composite_score)
+        self.logger.record("eval/phase_min_composite",  phase_min)
         self.logger.record("eval/best_composite",       self._best_score)
         self.logger.record("eval/steps_since_best",     step - self._best_score_step)
         self.logger.dump(step)

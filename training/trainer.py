@@ -229,7 +229,7 @@ class Trainer:
         PPOAgent
             The trained agent.
         """
-        callbacks = self._build_callbacks()
+        callbacks, eval_cb = self._build_callbacks()
 
         log.info(
             "Training run started",
@@ -254,6 +254,10 @@ class Trainer:
             steps_per_second=round(self.total_timesteps / elapsed, 0),
         )
 
+        # Always write a FINAL_STEP checkpoint — guarantees at least one
+        # testable model exists per fold even if no phase gate was ever cleared.
+        eval_cb.save_final_checkpoint()
+
         # Save final model + VecNormalize stats into the dedicated models folder
         self.models_dir.mkdir(parents=True, exist_ok=True)
         final_path = self.models_dir / "final_model"
@@ -268,7 +272,7 @@ class Trainer:
 
     # ── Callback assembly ─────────────────────────────────────
 
-    def _build_callbacks(self) -> CallbackList:
+    def _build_callbacks(self) -> tuple[CallbackList, TradingEvalCallback]:
         cbs = []
 
         # 1. Pretty-printed tables: training episodes + RL diagnostics
@@ -340,4 +344,4 @@ class Trainer:
         if self.curriculum_scheduler is not None:
             cbs.append(CurriculumCallback(self.curriculum_scheduler))
 
-        return CallbackList(cbs)
+        return CallbackList(cbs), eval_cb

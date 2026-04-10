@@ -7,7 +7,14 @@ core:
   scale: 1.0                            # global reward scaling factor
 
 step:
-  hold_flat_penalty: -0.005             # per-bar cost of doing nothing flat (5x larger to push agent to trade)
+  # ── Hold-flat penalty ────────────────────────────────────────────────────
+  # CRITICAL FOR TRADE FREQUENCY: this must make holding costlier than a bad
+  # entry.  At -0.005/bar a single bad entry (entry_cost + no_zone + no_liq
+  # ≈ -0.37) would cost the same as 74 bars of holding → agent never trades.
+  # At -0.025/bar the daily hold cost (≈ 78 RTH bars × 0.025 ≈ 1.95/day)
+  # exceeds a typical loss (-1R × 0.5 WR ≈ -0.5), forcing at least 4-5
+  # trades per day to break even on the inactivity penalty alone.
+  hold_flat_penalty: -0.025             # 5× increase: forces agent to seek entries
 
 entry_bonuses:
   full_order_zone_confluence: 0.50      # all three pillars present
@@ -18,12 +25,21 @@ entry_bonuses:
   high_rr_ratio: 0.20                  # R:R >= minimum
 
 entry_penalties:
-  entry_cost: -0.02                    # reduced transaction cost proxy
-  no_zone_present: -0.10              # mild penalty — don't over-discourage exploration
-  atr_exhausted: -0.50                 # halved — agent already masked from entering when exhausted
-  rr_below_minimum: -0.15             # mild — R:R mask already blocks worst cases
-  no_liquidity_confluence: -0.10      # mild — let agent explore setups without sweep
-  overtrading: -0.20                   # keep this firm to prevent overtrading
+  # ── Entry cost ────────────────────────────────────────────────────────────
+  # Keep very small — we want the agent to trade; cost comes from outcome.
+  entry_cost: -0.005                    # near-zero: don't penalise exploration
+
+  # ── Zone/setup penalties (halved) ────────────────────────────────────────
+  # Rationale: no_zone + no_liq stacking was -0.20 per entry in addition to
+  # entry_cost and rr_below_minimum.  Combined ≈ -0.37 before outcome, which
+  # made every out-of-zone entry worse than 74 bars of holding.  Halving
+  # allows the agent to explore setups in early training without being
+  # paralysed; the reward signal still learns to prefer zones over time.
+  no_zone_present: -0.05                # halved from -0.10
+  atr_exhausted: -0.40                  # slightly reduced; reward already penalises this
+  rr_below_minimum: -0.08               # halved from -0.15
+  no_liquidity_confluence: -0.05        # halved from -0.10
+  overtrading: -0.20                    # keep firm — hard daily limit guardrail
 
 exit_rewards:
   trailing_stop_correctly: 0.30       # used trail stop before exit
