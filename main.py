@@ -942,8 +942,8 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
 
         # Inject fold_journal_cb into Trainer callbacks
         from stable_baselines3.common.callbacks import CallbackList
-        base_callbacks = trainer._build_callbacks()
-        all_callbacks  = CallbackList([base_callbacks, fold_journal_cb])
+        base_callbacks, eval_cb = trainer._build_callbacks()
+        all_callbacks = CallbackList([base_callbacks, fold_journal_cb])
 
         log.info("Training fold", fold=fold_id, timesteps=ppo_cfg.get("total_timesteps", 2_000_000))
         agent.train(
@@ -952,6 +952,9 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             progress_bar=True,
             reset_num_timesteps=True,
         )
+
+        # Always write a FINAL_STEP checkpoint as safety net
+        eval_cb.save_final_checkpoint()
 
         # ── Save fold journal ──────────────────────────────────
         fold_journal_cb.save(fold_id=fold_id, fold_dir=fold_dir)
