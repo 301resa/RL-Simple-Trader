@@ -128,7 +128,7 @@ as the natural first profit objective.
 
 | Trigger | Action |
 |---------|--------|
-| Profit reaches 2R | Trailing stop activates; locks in 2R minimum |
+| Profit reaches 1.2R | Trailing stop activates; locks in 1.2R minimum |
 | Profit reaches 4R | Trail tightens aggressively |
 
 ### Risk Per Trade

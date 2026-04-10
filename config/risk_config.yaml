@@ -18,9 +18,9 @@ take_profit:
   min_rr_ratio: 1.5              # minimum 1.5:1 R:R required to enter
 
 trailing:
-  activate_at_r: 2.0             # activate trailing stop at 2R unrealised profit
+  activate_at_r: 1.2             # activate trailing stop at 1.2R unrealised profit
   trail_aggressively_at_r: 4.0   # tighten trail at 4R
-  lock_in_r_at_trail: 2.0        # lock in at least 2R when trailing activates
+  lock_in_r_at_trail: 1.2        # lock in at least 1.2R when trailing activates
 
 atr_gate:
   block_entries_above_pct: 0.95  # block new entries if session used >= 95% of ATR
