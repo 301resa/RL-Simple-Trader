@@ -56,8 +56,7 @@ class DataLoader:
     tz : str
         Target timezone for the DatetimeIndex, e.g. "America/New_York".
         The CSV timestamps are assumed to be in exchange local time (CT/CST/CDT);
-        pass "America/Chicago" if you want to keep them in CT, or
-        "America/New_York" to shift to ET.
+        pass "America/New_York" for ET (default) or "America/Chicago" to keep in CT.
     """
 
     def __init__(
@@ -66,7 +65,7 @@ class DataLoader:
         instrument: str = "ES",
         intraday_tf: str = "5min",
         daily_tf: str = "1D",
-        tz: str = "America/Chicago",
+        tz: str = "America/New_York",
     ) -> None:
         self.data_dir = Path(data_dir)
         self.instrument = instrument.upper()

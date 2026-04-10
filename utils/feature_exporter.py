@@ -218,7 +218,7 @@ def _cli() -> None:
     dl = DataLoader(
         data_dir=args.data, instrument=instr,
         intraday_tf=f"{sess.get('bar_timeframe_minutes', 5)}min",
-        tz=sess.get("timezone", "America/Chicago"),
+        tz=sess.get("timezone", "America/New_York"),
     )
     dl.load()
 

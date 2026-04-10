@@ -9,18 +9,18 @@ instruments:
 session:
   bar_timeframe_minutes: 5
   daily_timeframe: "1D"
-  timezone: "America/Chicago"   # CME exchange timezone
+  timezone: "America/New_York"  # NY/ET timezone
 
   # session_type controls which bars are used for each episode:
-  #   RTH    → 08:30–15:00 CT  (Regular Trading Hours)
+  #   RTH    → 09:30–16:00 ET  (Regular Trading Hours)
   #   GLOBEX → bars outside RTH in the same day file (pre/post market)
   #   FULL   → all bars in the day file (23-hour session)
   session_type: "FULL"
 
-  rth_start_utc: "08:30"        # RTH open  (America/Chicago local)
-  rth_end_utc:   "15:00"        # RTH close (America/Chicago local)
-  globex_start:  "17:00"        # Globex re-open after settlement break
-  globex_end:    "08:15"        # Globex close before RTH open
+  rth_start_utc: "09:30"        # RTH open  (America/New_York local)
+  rth_end_utc:   "16:00"        # RTH close (America/New_York local)
+  globex_start:  "18:00"        # Globex re-open after settlement break
+  globex_end:    "09:15"        # Globex close before RTH open
 
 contracts:
   ES:
