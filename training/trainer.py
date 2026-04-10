@@ -196,12 +196,16 @@ class Trainer:
         vec_normalize=None,   # VecNormalize wrapper — stats saved alongside model
         resume: bool = False, # True when continuing from a checkpoint
         eval_save_enabled: bool = True,  # False = run eval metrics but save no models
-        # Training hot-save gate
-        hotsave_pf: float = 1.60,          # per-env PF threshold
-        hotsave_wr: float = 0.40,          # per-env win-rate threshold
-        hotsave_min_trades: int = 20,      # min trades per env
-        hotsave_min_envs: int = 2,         # envs that must pass simultaneously
-        hotsave_cooldown: int = 50_000,    # min steps between hot-saves
+        # Training hot-save — Gate 1 (PF/WR)
+        hotsave_pf: float = 1.60,
+        hotsave_wr: float = 0.40,
+        hotsave_min_trades: int = 20,
+        hotsave_min_envs: int = 2,
+        hotsave_cooldown: int = 50_000,
+        # Training hot-save — Gate 2 (Sharpe quality)
+        hotsave_sharpe: float = 1.2,
+        hotsave_sharpe_pf: float = 1.85,
+        hotsave_sharpe_cooldown: int = 50_000,
     ) -> None:
         self.agent = agent
         self.train_env = train_env
@@ -226,13 +230,16 @@ class Trainer:
         self.log_dir        = Path(log_dir)
         self.models_dir     = Path(models_dir)
         self.train_date_range = train_date_range
-        self.resume             = resume
-        self.eval_save_enabled  = eval_save_enabled
-        self.hotsave_pf         = hotsave_pf
-        self.hotsave_wr         = hotsave_wr
-        self.hotsave_min_trades = hotsave_min_trades
-        self.hotsave_min_envs   = hotsave_min_envs
-        self.hotsave_cooldown   = hotsave_cooldown
+        self.resume               = resume
+        self.eval_save_enabled    = eval_save_enabled
+        self.hotsave_pf           = hotsave_pf
+        self.hotsave_wr           = hotsave_wr
+        self.hotsave_min_trades   = hotsave_min_trades
+        self.hotsave_min_envs     = hotsave_min_envs
+        self.hotsave_cooldown     = hotsave_cooldown
+        self.hotsave_sharpe       = hotsave_sharpe
+        self.hotsave_sharpe_pf    = hotsave_sharpe_pf
+        self.hotsave_sharpe_cooldown = hotsave_sharpe_cooldown
 
     def run(self) -> PPOAgent:
         """
@@ -355,15 +362,20 @@ class Trainer:
             )
         )
 
-        # 7. Training hot-save (V7-style two-tier PF/WR gate on live training envs)
+        # 7. Training hot-saves — two gates in one callback
         cbs.append(
             TrainingHotSaveCallback(
                 models_dir=self.models_dir / "hotsaves",
+                # Gate 1 — PF/WR
                 pf_threshold=self.hotsave_pf,
                 wr_threshold=self.hotsave_wr,
                 min_trades=self.hotsave_min_trades,
                 min_envs_passing=self.hotsave_min_envs,
                 cooldown_steps=self.hotsave_cooldown,
+                # Gate 2 — Sharpe quality
+                sharpe_threshold=self.hotsave_sharpe,
+                sharpe_pf_threshold=self.hotsave_sharpe_pf,
+                sharpe_cooldown_steps=self.hotsave_sharpe_cooldown,
                 vec_normalize=self.vec_normalize,
                 verbose=1,
             )

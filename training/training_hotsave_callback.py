@@ -1,18 +1,27 @@
 """
 training/training_hotsave_callback.py
 =======================================
-Saves the model mid-training when per-env rolling metrics cross a
-single unified quality gate.
+Saves the model mid-training when per-env rolling metrics cross one of
+two quality gates.
 
-Combined gate (all conditions checked together):
+Gate 1 — Standard PF/WR gate (as before):
   At least min_envs_passing training envs simultaneously satisfy:
-    • PF  > pf_threshold   (profit factor)
-    • WR  >= wr_threshold  (win rate, 0–1)
-    • trades >= min_trades (statistical validity)
+    • PF  > pf_threshold   (default 1.60)
+    • WR  >= wr_threshold  (default 0.40)
+    • trades >= min_trades (default 20)
 
-A cooldown of cooldown_steps between saves prevents flooding the disk.
+Gate 2 — Sharpe quality gate (high-quality saves):
+  At least min_envs_passing training envs simultaneously satisfy:
+    • Sharpe > sharpe_threshold  (default 1.2)
+    • PF     > sharpe_pf_threshold (default 1.85)
+    • trades >= min_trades        (default 20)
+    • win_loss_ratio > 1.0        (avg winner > avg loser)
+    • total_pnl_r   > 0.0         (episode net positive)
 
-Saves: <models_dir>/hotsave_<step>.zip  +  <models_dir>/hotsave_<step>_vecnormalize.pkl
+Each gate has its own cooldown. Gate-2 saves use the prefix "hotsave_sh_"
+to distinguish them from Gate-1 saves ("hotsave_").
+
+Saves: <models_dir>/hotsave[_sh]_<step>.zip  +  ..._vecnormalize.pkl
 """
 
 from __future__ import annotations
@@ -30,24 +39,30 @@ log = get_logger(__name__)
 
 class TrainingHotSaveCallback(BaseCallback):
     """
-    Saves the model during training when the combined per-env gate is cleared.
+    Saves the model during training when either quality gate is cleared.
 
     Parameters
     ----------
     models_dir : str | Path
         Directory to write hot-save files into.
     pf_threshold : float
-        Each qualifying env must have PF > this value.
+        Gate 1 — each qualifying env must have PF > this value.
     wr_threshold : float
-        Each qualifying env must have win rate >= this (0–1).
+        Gate 1 — each qualifying env must have win rate >= this (0–1).
     min_trades : int
-        Minimum trades an env must have to be counted.
+        Both gates — minimum trades an env must have to be counted.
     min_envs_passing : int
-        How many envs must simultaneously pass all criteria.
+        Both gates — how many envs must simultaneously pass all criteria.
     cooldown_steps : int
-        Minimum steps between consecutive hot-saves.
+        Minimum steps between consecutive Gate-1 hot-saves.
+    sharpe_threshold : float
+        Gate 2 — each qualifying env must have annualised Sharpe > this.
+    sharpe_pf_threshold : float
+        Gate 2 — each qualifying env must have PF > this value.
+    sharpe_cooldown_steps : int
+        Minimum steps between consecutive Gate-2 hot-saves.
     check_every_steps : int
-        How often (in steps) to check the gate (~one rollout = 4096).
+        How often (in steps) to check both gates (~one rollout = 4096).
     vec_normalize : VecNormalize | None
         If provided, saves normalisation stats alongside each checkpoint.
     """
@@ -60,22 +75,29 @@ class TrainingHotSaveCallback(BaseCallback):
         min_trades: int = 20,
         min_envs_passing: int = 2,
         cooldown_steps: int = 50_000,
+        sharpe_threshold: float = 1.2,
+        sharpe_pf_threshold: float = 1.85,
+        sharpe_cooldown_steps: int = 50_000,
         check_every_steps: int = 4_096,
         vec_normalize=None,
         verbose: int = 1,
     ) -> None:
         super().__init__(verbose)
-        self.models_dir        = Path(models_dir)
-        self.pf_threshold      = pf_threshold
-        self.wr_threshold      = wr_threshold
-        self.min_trades        = min_trades
-        self.min_envs_passing  = min_envs_passing
-        self.cooldown_steps    = cooldown_steps
-        self.check_every_steps = check_every_steps
-        self.vec_normalize     = vec_normalize
+        self.models_dir           = Path(models_dir)
+        self.pf_threshold         = pf_threshold
+        self.wr_threshold         = wr_threshold
+        self.min_trades           = min_trades
+        self.min_envs_passing     = min_envs_passing
+        self.cooldown_steps       = cooldown_steps
+        self.sharpe_threshold     = sharpe_threshold
+        self.sharpe_pf_threshold  = sharpe_pf_threshold
+        self.sharpe_cooldown_steps= sharpe_cooldown_steps
+        self.check_every_steps    = check_every_steps
+        self.vec_normalize        = vec_normalize
 
         self._env_latest: Dict[int, dict] = {}
-        self._last_save_step: int = -cooldown_steps  # allow save at step 0 if gate passes
+        self._last_save_step:        int = -cooldown_steps
+        self._last_sharpe_save_step: int = -sharpe_cooldown_steps
 
     # ── Episode capture ───────────────────────────────────────────────────────
 
@@ -87,18 +109,17 @@ class TrainingHotSaveCallback(BaseCallback):
             if done and "profit_factor" in info:
                 self._env_latest[i] = dict(info)
 
-        # Gate check every N steps
+        # Check both gates every N steps
         if self.num_timesteps % self.check_every_steps < self.n_envs:
-            self._maybe_save()
+            self._check_pf_gate()
+            self._check_sharpe_gate()
 
         return True
 
-    # ── Gate logic ────────────────────────────────────────────────────────────
+    # ── Gate 1 — PF / WR ─────────────────────────────────────────────────────
 
-    def _maybe_save(self) -> None:
+    def _check_pf_gate(self) -> None:
         step = self.num_timesteps
-
-        # Cooldown guard
         if step - self._last_save_step < self.cooldown_steps:
             return
 
@@ -106,7 +127,6 @@ class TrainingHotSaveCallback(BaseCallback):
         if not filled:
             return
 
-        # Unified gate — count envs that pass ALL criteria simultaneously
         passing = [
             d for d in filled
             if (
@@ -115,37 +135,84 @@ class TrainingHotSaveCallback(BaseCallback):
                 and d.get("n_trades",      0)   >= self.min_trades
             )
         ]
-        n_passing = len(passing)
-        if n_passing < self.min_envs_passing:
+        if len(passing) < self.min_envs_passing:
             return
 
         avg_pf = float(np.mean([d["profit_factor"] for d in passing]))
-        self._save(step, avg_pf, n_passing)
+        avg_wr = float(np.mean([d["win_rate"]       for d in passing]))
+        self._save(
+            step=step,
+            prefix="hotsave",
+            tag="PF gate",
+            metrics={"avg_PF": avg_pf, "avg_WR": avg_wr, "envs": len(passing)},
+        )
+        self._last_save_step = step
 
-    def _save(self, step: int, avg_pf: float, n_passing: int) -> None:
+    # ── Gate 2 — Sharpe quality ───────────────────────────────────────────────
+
+    def _check_sharpe_gate(self) -> None:
+        step = self.num_timesteps
+        if step - self._last_sharpe_save_step < self.sharpe_cooldown_steps:
+            return
+
+        filled = [v for v in self._env_latest.values() if v]
+        if not filled:
+            return
+
+        passing = [
+            d for d in filled
+            if (
+                d.get("sharpe_ratio",    0.0) > self.sharpe_threshold
+                and d.get("profit_factor", 0.0) > self.sharpe_pf_threshold
+                and d.get("n_trades",      0)   >= self.min_trades
+                and d.get("win_loss_ratio", 0.0) > 1.0
+                and d.get("total_pnl_r",   0.0) > 0.0
+            )
+        ]
+        if len(passing) < self.min_envs_passing:
+            return
+
+        avg_sh = float(np.mean([d["sharpe_ratio"]   for d in passing]))
+        avg_pf = float(np.mean([d["profit_factor"]  for d in passing]))
+        avg_rr = float(np.mean([d["win_loss_ratio"] for d in passing]))
+        self._save(
+            step=step,
+            prefix="hotsave_sh",
+            tag="Sharpe gate",
+            metrics={"avg_SH": avg_sh, "avg_PF": avg_pf, "avg_RR": avg_rr, "envs": len(passing)},
+        )
+        self._last_sharpe_save_step = step
+
+    # ── Shared save helper ────────────────────────────────────────────────────
+
+    def _save(self, step: int, prefix: str, tag: str, metrics: dict) -> None:
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        name = f"hotsave_{step:010d}"
+        name       = f"{prefix}_{step:010d}"
         model_path = self.models_dir / name
 
         self.model.save(str(model_path))
-        self._last_save_step = step
 
         if self.vec_normalize is not None:
             vn_path = self.models_dir / f"{name}_vecnormalize.pkl"
             self.vec_normalize.save(str(vn_path))
 
         if self.verbose >= 1:
-            vn_note = " + VecNormalize" if self.vec_normalize is not None else ""
-            print(
-                f"\n[HotSave] step={step:,}  avg_PF={avg_pf:.2f}  "
-                f"envs_passing={n_passing}  → {model_path}.zip{vn_note}"
-            )
+            vn_note  = " + VecNormalize" if self.vec_normalize is not None else ""
+            met_str  = "  ".join(f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}"
+                                 for k, v in metrics.items())
+            line = "=" * 70
+            print(f"\n{line}")
+            print(f"  HOTSAVE [{tag}]  |  step {step:,}")
+            print(f"  {met_str}")
+            print(f"  File : {model_path}.zip{vn_note}")
+            print(line)
+
         log.info(
             "Training hot-save written",
+            gate=tag,
             step=step,
-            avg_pf=round(avg_pf, 3),
-            envs_passing=n_passing,
             path=str(model_path),
+            **{k: round(v, 3) if isinstance(v, float) else v for k, v in metrics.items()},
         )
 
     # ── n_envs helper ─────────────────────────────────────────────────────────
