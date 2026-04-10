@@ -46,7 +46,7 @@ checkpointing:
   keep_n_checkpoints: 5            # keep only the N most recent rolling checkpoints
 
 evaluation:
-  eval_freq: 20_000                # run val metrics every N training steps (was 50k)
+  eval_freq: 100_000               # run val metrics every N training steps
   n_eval_episodes: 20              # val episodes per evaluation run
   save_enabled: true               # set false to log eval metrics without saving any models
   # Early stopping — warmup must complete before patience can trigger
