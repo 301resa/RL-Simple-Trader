@@ -1,28 +1,277 @@
-Simple Trader Reinforcement learning Agent
+# RL Simple Trader — R1
 
+A Reinforcement Learning trading agent trained on ES/NQ futures using a two-pillar
+Order Zone entry strategy (Supply/Demand Zone confluence + Liquidity Sweep).
 
-main.py
-========
-Entry point for the RL Trading Agent.
+Built on **RecurrentPPO** (LSTM) via SB3/sb3_contrib. The agent processes one 5-minute
+bar at a time — the LSTM hidden state carries session memory across bars without needing
+a multi-bar lookback window in the observation vector.
 
-Usage:
-    # Train from scratch
-    python main.py --mode train --config config/ --data data
+---
 
-    # Continue training from checkpoint
-    python main.py --mode train --config config/ --data data/ --checkpoint logs/checkpoints/best_model.zip
+## ⚠️ IMPORTANT — For AI Assistants / Low-Context Sessions
 
-    # Evaluate (backtest) a trained model
-    python main.py --mode evaluate --config config/ --data data/ \\
-                   --checkpoint logs/checkpoints/best_model.zip
+> **Do NOT remove, rename, or stub out any existing function, class, method, callback,
+> or file unless the user explicitly asks you to delete it.**
+>
+> This codebase is large. If you are running low on context or tokens:
+> - Edit only the specific lines/functions you were asked to change.
+> - Leave all surrounding code untouched.
+> - Do not "clean up" imports, remove unused variables, or refactor adjacent code.
+> - Do not replace working implementations with `pass` or `raise NotImplementedError`.
+> - If unsure whether something is used, assume it IS used and leave it alone.
 
-    # Print journal analysis for a completed backtest
-    python main.py --mode analyse --journal logs/journal/
+---
 
-    # Walk-forward analysis (rolling 12-month train / 5-week val folds)
-    python main.py --mode walk_forward --config config/ --data data/
+## Project Structure
 
-All parameters are loaded from YAML config files — no command-line
-parameter overrides for model hyperparameters (edit the YAML instead).
-"""
+```
+R1/
+├── main.py                          # Entry point — train / evaluate / walk_forward / analyse
+├── config/
+│   ├── agent_config.yaml            # PPO hyperparameters, LSTM, eval schedule, walk-forward
+│   ├── environment_config.yaml      # Instruments (ES/NQ/MES/MNQ), session, account
+│   ├── features_config.yaml         # ATR, zone detection, liquidity sweep thresholds
+│   ├── risk_config.yaml             # Stop loss, take profit, position sizing, daily limits
+│   ├── reward_config.yaml           # Shaped reward weights (R-multiples)
+│   └── logging_config.yaml          # Log level, file paths
+│
+├── agent/
+│   ├── ppo_agent.py                 # PPOAgent wrapper around SB3 RecurrentPPO
+│   └── network.py                   # Custom LSTM policy network
+│
+├── data/
+│   ├── data_loader.py               # Loads 5-min OHLCV CSV + daily bars
+│   ├── data_splitter.py             # Chronological train/val/test splits
+│   ├── data_augmentor.py            # OHLCV jitter augmentation (training only)
+│   └── data_validator.py            # Data quality checks
+│
+├── environment/
+│   ├── trading_env.py               # Gymnasium TradingEnv — core episode loop
+│   ├── position_manager.py          # Position sizing, trailing stops, daily risk limits
+│   ├── reward_calculator.py         # R-multiple shaped reward function
+│   └── action_space.py              # Action masker (entry conditions, session gates)
+│
+├── features/
+│   ├── order_zone_engine.py         # Two-pillar Order Zone: zone + sweep confluence score
+│   ├── zone_detector.py             # Supply/Demand zone detection (consolidation + impulse)
+│   ├── liquidity_detector.py        # Liquidity sweep detection (swing high/low sweeps)
+│   ├── trend_classifier.py          # HH/HL/LH/LL trend structure
+│   ├── atr_calculator.py            # ATR (daily) — gates entries and sizes stops
+│   └── observation_builder.py       # Builds flat observation vector for the LSTM
+│
+├── training/
+│   ├── trainer.py                   # Main training loop — wires all callbacks
+│   ├── trading_eval_callback.py     # Eval-based model saving (phase-gated composite score)
+│   ├── training_hotsave_callback.py # Training hot-save (V7-style two-tier PF/WR gate)
+│   ├── metrics_logger_callback.py   # Per-env training table printed after each rollout
+│   ├── checkpoint_manager.py        # Periodic checkpoint saving + rotation
+│   ├── training_journal_callback.py # Excel + Plotly HTML trade journal (every 50k steps)
+│   ├── fold_journal_callback.py     # Per-fold journal for walk-forward analysis
+│   ├── shaping_decay_callback.py    # Reward shaping decay across training stages
+│   └── curriculum.py                # Optional curriculum scheduler
+│
+├── evaluation/
+│   ├── test_fold.py                 # Load all checkpoints, ranked results table + Plotly HTML
+│   ├── backtester.py                # Deterministic backtest on test data
+│   ├── metrics_calculator.py        # Sharpe, profit factor, drawdown, etc.
+│   ├── trade_journal.py             # Trade-level logging (Excel + CSV)
+│   └── journal_viewer.py            # Journal analysis viewer
+│
+├── utils/
+│   ├── logger.py                    # Structured logging (structlog)
+│   ├── metrics_printer.py           # Console + file log helpers
+│   ├── normalizer.py                # Observation normalisation utilities
+│   ├── validators.py                # Config validation
+│   └── feature_exporter.py         # Export computed features to CSV
+│
+├── docs/
+│   ├── RL_Order_Zone_Strategy_Summary.docx   # Full strategy document
+│   ├── RL_Order_Zone_Strategy_Summary.pdf    # PDF version
+│   └── generate_strategy_doc.py              # Script that regenerates the Word doc
+│
+├── test_environment.py              # Smoke-test for TradingEnv
+└── test_features.py                 # Smoke-test for feature pipeline
+```
 
+---
+
+## Trading Strategy
+
+### Entry — Two-Pillar Order Zone System
+
+A trade is only entered when **two pillars** are present. Each pillar has a weight:
+
+| Pillar | Weight | Condition |
+|--------|--------|-----------|
+| Supply/Demand Zone | 55% | Price is inside a valid consolidation-then-impulse zone |
+| Liquidity Sweep | 35% | A recent swing high/low sweep has occurred |
+| ATR Room | 10% | Session has not used ≥ 95% of daily ATR |
+
+- Minimum confluence score: **0.35** (configurable in `features_config.yaml`)
+- Minimum R:R ratio: **1.5:1** before an entry is allowed
+
+### Stop Loss
+
+Stop placed **1.5 fixed points** beyond the zone boundary (not ATR-based).
+Stop widening is **never** allowed once placed.
+
+### Take Profit
+
+Target = 75% of remaining ATR distance from entry.
+
+### Trailing Stop
+
+| Trigger | Action |
+|---------|--------|
+| Profit reaches 2R | Trailing stop activates; locks in 2R minimum |
+| Profit reaches 4R | Trail tightens aggressively |
+
+### Risk Per Trade
+
+- 1% of account equity per trade
+- 1–3 contracts (sized by account and stop distance)
+- Daily loss limit: **−3R** → stops trading for the day
+
+---
+
+## Running the Agent
+
+### Train from scratch
+```bash
+python main.py --mode train --config config/ --data data/
+```
+
+### Continue from checkpoint
+```bash
+python main.py --mode train --config config/ --data data/ \
+    --checkpoint logs/models/checkpoint_00100000.zip --no-clean
+```
+
+### Backtest a trained model
+```bash
+python main.py --mode evaluate --config config/ --data data/ \
+    --checkpoint logs/models/best_model.zip
+```
+
+### Walk-forward analysis (rolling 12-month train / 5-week val)
+```bash
+python main.py --mode walk_forward --config config/ --data data/
+```
+
+### Analyse a saved journal
+```bash
+python main.py --mode analyse --journal logs/journal/
+```
+
+> **Clean slate**: Every `train` and `walk_forward` run **automatically deletes** all
+> previous output (models, checkpoints, logs, journals) under `logs/` before starting.
+> Pass `--no-clean` to skip this when resuming.
+
+---
+
+## Output Layout
+
+```
+logs/
+├── models/
+│   ├── checkpoint_NNNNNNNNNN.zip           # Phase-gated eval checkpoints
+│   ├── checkpoint_NNNNNNNNNN_vecnormalize.pkl
+│   ├── final_model.zip                     # Safety-net checkpoint at end of training
+│   ├── vecnormalize.pkl                    # VecNormalize stats (end of training)
+│   └── hotsaves/
+│       ├── hotsave_NNNNNNNNNN.zip          # Training hot-saves (PF/WR gate)
+│       └── hotsave_NNNNNNNNNN_vecnormalize.pkl
+├── checkpoints/                            # Periodic SB3 checkpoints (every 100k steps)
+├── tensorboard/                            # TensorBoard event files
+├── journal/                                # Excel + Plotly HTML trade journals
+├── walk_forward/                           # Per-fold outputs
+└── metrics.log                             # Console table mirror
+```
+
+---
+
+## Model Saving Logic
+
+### 1. Eval-based saves (`TradingEvalCallback`)
+Fires every **20,000 steps** on the validation set. Saves when a **composite score**
+beats the previous best AND the phase gate is cleared:
+
+| Phase | Steps | Min composite score |
+|-------|-------|---------------------|
+| 1 | 0–400k | 0.05 |
+| 2 | 400k–800k | 0.15 |
+| 3 | 800k–1.2M | 0.25 |
+| 4 | 1.2M–1.6M | 0.35 |
+| 5 | 1.6M+ | 0.45 |
+
+Composite score = weighted average of: Sharpe (30%), P&L in R (25%), Win/Loss ratio (25%), Max drawdown (20%).
+
+A **FINAL_STEP** checkpoint is always written at the end of training as a safety net.
+
+### 2. Training hot-saves (`TrainingHotSaveCallback`)
+Checks every ~4,096 steps (one rollout) against a two-tier gate on live training envs:
+
+- **Tier 1**: Mean PF across all envs > 1.30
+- **Tier 2**: At least 2 individual envs have PF > 1.80, WR ≥ 40%, trades ≥ 20
+
+Saved to `logs/models/hotsaves/`. Cooldown: 50,000 steps between saves.
+
+---
+
+## Configuration Files
+
+| File | Controls |
+|------|----------|
+| `agent_config.yaml` | PPO hyperparameters, LSTM size, eval schedule, walk-forward settings |
+| `environment_config.yaml` | Instrument (ES/NQ), session type (RTH/GLOBEX/FULL), account size |
+| `features_config.yaml` | Zone detection thresholds, ATR settings, liquidity sweep parameters |
+| `risk_config.yaml` | Stop placement, take profit, position sizing, daily loss limits |
+| `reward_config.yaml` | Shaped reward weights — hold penalty, entry bonuses/penalties, exit rewards |
+| `logging_config.yaml` | Log verbosity and output paths |
+
+---
+
+## Key Design Decisions
+
+- **LSTM over multi-bar lookback**: `lookback_bars: 1` — one candle per step. The LSTM
+  hidden state (512 units) carries session memory. This avoids large observation vectors
+  and lets the agent learn temporal patterns at the architecture level.
+
+- **Annualised Sharpe**: All Sharpe calculations use `mean(pnl_r) / std(pnl_r) × √252`
+  consistently across training table, eval callback, and test_fold.
+
+- **Fixed stop buffer**: 1.5 points beyond zone boundary. Not ATR-relative — gives
+  precise, predictable risk definition on 5-min ES/NQ bars.
+
+- **No hard trade cap**: `max_trades_per_day: 999` — the −3R daily loss limit is the
+  natural brake. The reward's `hold_flat_penalty: −0.025/bar` forces the agent to seek
+  entries rather than sit idle.
+
+- **VecNormalize**: Normalises observations only (`norm_reward=False`). Stats are saved
+  alongside every checkpoint so evaluation always uses matched normalisation.
+
+---
+
+## Instruments
+
+| Symbol | Point Value | Tick Size |
+|--------|------------|-----------|
+| ES | $50 / point | 0.25 |
+| MES | $5 / point | 0.25 |
+| NQ | $20 / point | 0.25 |
+| MNQ | $2 / point | 0.25 |
+
+Default instrument: **ES** (configurable in `environment_config.yaml`).
+
+---
+
+## Dependencies
+
+- `stable-baselines3` + `sb3-contrib` (RecurrentPPO)
+- `gymnasium`
+- `torch`
+- `pandas`, `numpy`
+- `plotly`, `openpyxl` (journals)
+- `python-docx` (strategy document generation)
+- `pyyaml`, `structlog`

@@ -11,7 +11,7 @@ Usage:
     python main.py --mode train --config config/ --data data/ --checkpoint logs/checkpoints/best_model.zip
 
     # Evaluate (backtest) a trained model
-    python main.py --mode evaluate --config config/ --data data/raw/ \\
+    python main.py --mode evaluate --config config/ --data data/ \\
                    --checkpoint logs/checkpoints/best_model.zip
 
     # Print journal analysis for a completed backtest
@@ -390,8 +390,19 @@ def clean_run_dirs(log_dir: Path) -> None:
     """
     Delete all generated output under log_dir so each run starts fresh.
     Skipped automatically when --no-clean is passed or --checkpoint is set.
+    Uses an onerror handler to force-remove read-only files on Windows.
     """
     import shutil
+    import stat
+
+    def _force_remove(func, path, *_):
+        """On Windows, read-only files raise PermissionError — chmod then retry."""
+        try:
+            import os
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass  # best-effort; skip files that are truly locked
 
     subdirs = [
         log_dir / "models",
@@ -403,19 +414,26 @@ def clean_run_dirs(log_dir: Path) -> None:
     ]
     log_file = log_dir / "metrics.log"
 
+    print("\n========================================")
+    print("  CLEAN SLATE — removing previous outputs")
+    print("========================================")
+
     removed = []
     for d in subdirs:
         if d.exists():
-            shutil.rmtree(d)
+            print(f"  Removing folder : {d}")
+            shutil.rmtree(d, onerror=_force_remove)
             removed.append(str(d))
     if log_file.exists():
-        log_file.unlink()
+        print(f"  Removing file   : {log_file}")
+        log_file.unlink(missing_ok=True)
         removed.append(str(log_file))
 
     if removed:
-        print(f"[clean] Removed {len(removed)} output paths under {log_dir}/")
+        print(f"  Done — {len(removed)} item(s) removed.")
     else:
-        print(f"[clean] Nothing to remove under {log_dir}/ — already clean.")
+        print("  Nothing to remove — already clean.")
+    print("========================================\n")
 
 
 # ── Mode handlers ─────────────────────────────────────────────────────────────
