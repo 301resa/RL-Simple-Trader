@@ -295,30 +295,26 @@ class TradingEvalCallback(BaseCallback):
         self.model.save(str(ckpt_path))
         self._save_vec_normalize(vn_path)
 
-        tag = "★ NEW BEST" if is_new_best else "✓ SAVED"
-        log.info(
-            f"Checkpoint {tag} #{self._save_n}",
-            step=self.num_timesteps,
-            composite=round(metrics.composite_score, 4),
-            trades=metrics.n_trades,
-            win_rate=f"{metrics.win_rate*100:.1f}%",
-            phase=self._cur_phase,
-            path=str(ckpt_path),
-        )
-
         if is_new_best:
             self._best_score      = metrics.composite_score
             self._best_score_step = self.num_timesteps
-            # Also write the best_model alias for backwards-compatible loading
             best_path = self.save_path / "best_model"
             best_vn   = self.save_path / "best_model_vecnormalize.pkl"
             self.model.save(str(best_path))
             self._save_vec_normalize(best_vn)
-            log.info(
-                "best_model alias updated",
-                step=self.num_timesteps,
-                score=round(self._best_score, 4),
-            )
+
+        # ── Visible save banner ───────────────────────────────
+        tag  = "★  NEW BEST" if is_new_best else "✓  SAVED"
+        line = "=" * 70
+        print(f"\n{line}")
+        print(f"  MODEL {tag}  #{self._save_n}  |  step {self.num_timesteps:,}  |  phase {self._cur_phase}")
+        print(f"  Score : {metrics.composite_score:.4f}   Trades : {metrics.n_trades}   "
+              f"WR : {metrics.win_rate*100:.1f}%   PF : {metrics.win_loss_ratio:.2f}   "
+              f"Sharpe : {metrics.sharpe_ratio:.2f}")
+        print(f"  File  : {ckpt_path}.zip")
+        if is_new_best:
+            print(f"  Best  : {best_path}.zip  (best_model alias updated)")
+        print(f"{line}\n")
 
     def save_final_checkpoint(self) -> None:
         """
@@ -335,7 +331,11 @@ class TradingEvalCallback(BaseCallback):
         vn_path   = self.save_path / f"{stem}_vecnormalize.pkl"
         self.model.save(str(ckpt_path))
         self._save_vec_normalize(vn_path)
-        log.info("FINAL_STEP checkpoint saved", path=str(ckpt_path))
+        line = "=" * 70
+        print(f"\n{line}")
+        print(f"  MODEL FINAL_STEP  |  step {self.num_timesteps:,}  (end-of-training safety net)")
+        print(f"  File  : {ckpt_path}.zip")
+        print(f"{line}\n")
 
     # ── VecNormalize helpers ──────────────────────────────────────────────────
 

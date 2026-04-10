@@ -382,7 +382,7 @@ class RewardCalculator:
             One of: "max_drawdown_breach", "daily_loss_limit_breach".
         """
         penalty = self.violations.get(violation_type, -1.0) * self.core_scale
-        log.warning("Violation penalty applied", type=violation_type, penalty=penalty)
+        log.debug("Violation penalty applied", type=violation_type, penalty=penalty)
         return RewardBreakdown(
             total=round(penalty, 6),
             violation_penalty=penalty,
