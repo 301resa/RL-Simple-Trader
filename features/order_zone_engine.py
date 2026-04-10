@@ -235,7 +235,8 @@ class OrderZoneEngine:
             "zone_bullish":  zone_score_bullish,
             "sweep_bearish": sweep_score_bearish,
             "sweep_bullish": sweep_score_bullish,
-            "atr_room":      atr_score,
+            "atr_room_bearish": atr_score_bearish,
+            "atr_room_bullish": atr_score_bullish,
         }
 
         return OrderZoneState(
