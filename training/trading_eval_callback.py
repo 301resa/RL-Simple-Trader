@@ -160,6 +160,7 @@ class TradingEvalCallback(BaseCallback):
         pnl_ref:    float        = 20.0,
         wl_ref:     float        = 3.0,
         dd_ref:     float        = 8.0,
+        save_enabled: bool       = True,  # set False to run eval without saving any models
         verbose: int             = 1,
     ) -> None:
         super().__init__(verbose)
@@ -181,10 +182,11 @@ class TradingEvalCallback(BaseCallback):
         self.w_wl     = w_wl     / total_w
         self.w_dd     = w_dd     / total_w
 
-        self.sharpe_ref = max(sharpe_ref, 1e-6)
-        self.pnl_ref    = max(pnl_ref,    1e-6)
-        self.wl_ref     = max(wl_ref,     1e-6)
-        self.dd_ref     = max(dd_ref,     1e-6)
+        self.sharpe_ref   = max(sharpe_ref, 1e-6)
+        self.pnl_ref      = max(pnl_ref,    1e-6)
+        self.wl_ref       = max(wl_ref,     1e-6)
+        self.dd_ref       = max(dd_ref,     1e-6)
+        self.save_enabled = save_enabled
 
         # State
         self._best_score:      float = float("-inf")
@@ -240,19 +242,22 @@ class TradingEvalCallback(BaseCallback):
         self._log_metrics(metrics)
 
         # ── Tiered save logic ─────────────────────────────────
-        min_composite = self._phase_min_composite()
-        passes_phase  = metrics.composite_score >= min_composite
-        passes_trades = metrics.n_trades >= MIN_TRADES_FOR_SAVE
-
-        if passes_phase and passes_trades:
-            self._save_checkpoint(metrics)
+        if not self.save_enabled:
+            log.info("Eval save disabled (save_enabled=False) — metrics logged only")
         else:
-            reasons = []
-            if not passes_phase:
-                reasons.append(f"composite={metrics.composite_score:.3f} < phase_min={min_composite:.2f}")
-            if not passes_trades:
-                reasons.append(f"n_trades={metrics.n_trades} < min={MIN_TRADES_FOR_SAVE}")
-            log.info("Checkpoint not saved", reasons=", ".join(reasons))
+            min_composite = self._phase_min_composite()
+            passes_phase  = metrics.composite_score >= min_composite
+            passes_trades = metrics.n_trades >= MIN_TRADES_FOR_SAVE
+
+            if passes_phase and passes_trades:
+                self._save_checkpoint(metrics)
+            else:
+                reasons = []
+                if not passes_phase:
+                    reasons.append(f"composite={metrics.composite_score:.3f} < phase_min={min_composite:.2f}")
+                if not passes_trades:
+                    reasons.append(f"n_trades={metrics.n_trades} < min={MIN_TRADES_FOR_SAVE}")
+                log.info("Checkpoint not saved", reasons=", ".join(reasons))
 
         # ── Early stopping ────────────────────────────────────
         if self.num_timesteps >= self.warmup_steps:
@@ -320,7 +325,11 @@ class TradingEvalCallback(BaseCallback):
         Save a FINAL_STEP checkpoint regardless of composite score.
         Called by Trainer.run() at end of training as a safety-net so at
         least one testable checkpoint always exists per fold.
+        Skipped when save_enabled=False.
         """
+        if not self.save_enabled:
+            log.info("FINAL_STEP save skipped (save_enabled=False)")
+            return
         stem      = f"checkpoint_FINAL_STEP{self.num_timesteps}"
         ckpt_path = self.save_path / stem
         vn_path   = self.save_path / f"{stem}_vecnormalize.pkl"

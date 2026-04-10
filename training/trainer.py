@@ -195,12 +195,12 @@ class Trainer:
         train_date_range: str = "",
         vec_normalize=None,   # VecNormalize wrapper — stats saved alongside model
         resume: bool = False, # True when continuing from a checkpoint
-        # Training hot-save gate (V7-style)
-        hotsave_pf_avg: float = 1.30,      # Tier-1: mean PF across all envs
-        hotsave_pf_ind: float = 1.80,      # Tier-2: per-env PF threshold
-        hotsave_wr: float = 0.40,          # Tier-2: per-env win-rate threshold
-        hotsave_min_trades: int = 20,      # Tier-2: min trades per env
-        hotsave_min_envs: int = 2,         # Tier-2: envs that must pass
+        eval_save_enabled: bool = True,  # False = run eval metrics but save no models
+        # Training hot-save gate
+        hotsave_pf: float = 1.60,          # per-env PF threshold
+        hotsave_wr: float = 0.40,          # per-env win-rate threshold
+        hotsave_min_trades: int = 20,      # min trades per env
+        hotsave_min_envs: int = 2,         # envs that must pass simultaneously
         hotsave_cooldown: int = 50_000,    # min steps between hot-saves
     ) -> None:
         self.agent = agent
@@ -226,9 +226,9 @@ class Trainer:
         self.log_dir        = Path(log_dir)
         self.models_dir     = Path(models_dir)
         self.train_date_range = train_date_range
-        self.resume         = resume
-        self.hotsave_pf_avg     = hotsave_pf_avg
-        self.hotsave_pf_ind     = hotsave_pf_ind
+        self.resume             = resume
+        self.eval_save_enabled  = eval_save_enabled
+        self.hotsave_pf         = hotsave_pf
         self.hotsave_wr         = hotsave_wr
         self.hotsave_min_trades = hotsave_min_trades
         self.hotsave_min_envs   = hotsave_min_envs
@@ -314,6 +314,7 @@ class Trainer:
             w_pnl=self.w_pnl,
             w_wl=self.w_wl,
             w_dd=self.w_dd,
+            save_enabled=self.eval_save_enabled,
             verbose=1,
         )
         cbs.append(eval_cb)
@@ -358,8 +359,7 @@ class Trainer:
         cbs.append(
             TrainingHotSaveCallback(
                 models_dir=self.models_dir / "hotsaves",
-                pf_avg_threshold=self.hotsave_pf_avg,
-                pf_ind_threshold=self.hotsave_pf_ind,
+                pf_threshold=self.hotsave_pf,
                 wr_threshold=self.hotsave_wr,
                 min_trades=self.hotsave_min_trades,
                 min_envs_passing=self.hotsave_min_envs,

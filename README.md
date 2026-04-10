@@ -129,7 +129,7 @@ as the natural first profit objective.
 | Trigger | Action |
 |---------|--------|
 | Profit reaches 1.2R | Trailing stop activates; locks in 1.2R minimum |
-| Profit reaches 4R | Trail tightens aggressively |
+| Profit reaches 3R | Trail tightens aggressively |
 
 ### Risk Per Trade
 
@@ -214,12 +214,21 @@ Composite score = weighted average of: Sharpe (30%), P&L in R (25%), Win/Loss ra
 A **FINAL_STEP** checkpoint is always written at the end of training as a safety net.
 
 ### 2. Training hot-saves (`TrainingHotSaveCallback`)
-Checks every ~4,096 steps (one rollout) against a two-tier gate on live training envs:
+Checks every ~4,096 steps (one rollout) against a **single unified gate** on live training envs:
 
-- **Tier 1**: Mean PF across all envs > 1.30
-- **Tier 2**: At least 2 individual envs have PF > 1.80, WR ≥ 40%, trades ≥ 20
+At least **2 individual envs** must simultaneously satisfy **all** of:
+
+| Criterion | Threshold |
+|-----------|-----------|
+| Profit Factor | > 1.60 |
+| Win Rate | ≥ 40% |
+| Trades | ≥ 20 |
 
 Saved to `logs/models/hotsaves/`. Cooldown: 50,000 steps between saves.
+
+### Disabling eval saves
+Set `save_enabled: false` under `evaluation:` in `agent_config.yaml` to run eval
+metrics and log results without writing any model files (useful for exploration runs).
 
 ---
 

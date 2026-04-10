@@ -1,26 +1,24 @@
 """
 training/training_hotsave_callback.py
 =======================================
-V7-style training hot-save: saves the model mid-training when the
-rolling PF/WR metrics across live training envs cross quality gates.
+Saves the model mid-training when per-env rolling metrics cross a
+single unified quality gate.
 
-Two-tier gate (both must pass):
-  Tier 1 (aggregate): mean PF across ALL envs > pf_avg_threshold
-  Tier 2 (individual): at least min_envs_passing envs individually satisfy
-                       PF > pf_ind_threshold AND WR >= wr_threshold
-                       AND trades >= min_trades
+Combined gate (all conditions checked together):
+  At least min_envs_passing training envs simultaneously satisfy:
+    • PF  > pf_threshold   (profit factor)
+    • WR  >= wr_threshold  (win rate, 0–1)
+    • trades >= min_trades (statistical validity)
 
-A cooldown of cooldown_steps between hot-saves prevents flooding the disk
-when the agent briefly crosses the gate.
+A cooldown of cooldown_steps between saves prevents flooding the disk.
 
 Saves: <models_dir>/hotsave_<step>.zip  +  <models_dir>/hotsave_<step>_vecnormalize.pkl
 """
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -32,27 +30,24 @@ log = get_logger(__name__)
 
 class TrainingHotSaveCallback(BaseCallback):
     """
-    Saves the model during training whenever rolling per-env metrics
-    cross a two-tier quality gate.
+    Saves the model during training when the combined per-env gate is cleared.
 
     Parameters
     ----------
     models_dir : str | Path
         Directory to write hot-save files into.
-    pf_avg_threshold : float
-        Tier-1 gate — mean PF across all envs must exceed this.
-    pf_ind_threshold : float
-        Tier-2 gate — individual env PF must exceed this.
+    pf_threshold : float
+        Each qualifying env must have PF > this value.
     wr_threshold : float
-        Tier-2 gate — individual env win rate must be >= this (0–1).
+        Each qualifying env must have win rate >= this (0–1).
     min_trades : int
-        Minimum trades an env must have before it counts toward Tier-2.
+        Minimum trades an env must have to be counted.
     min_envs_passing : int
-        How many individual envs must pass Tier-2 simultaneously.
+        How many envs must simultaneously pass all criteria.
     cooldown_steps : int
         Minimum steps between consecutive hot-saves.
     check_every_steps : int
-        How often (in steps) to evaluate the gate (default 4096 — one rollout).
+        How often (in steps) to check the gate (~one rollout = 4096).
     vec_normalize : VecNormalize | None
         If provided, saves normalisation stats alongside each checkpoint.
     """
@@ -60,8 +55,7 @@ class TrainingHotSaveCallback(BaseCallback):
     def __init__(
         self,
         models_dir: str | Path,
-        pf_avg_threshold: float = 1.30,
-        pf_ind_threshold: float = 1.80,
+        pf_threshold: float = 1.60,
         wr_threshold: float = 0.40,
         min_trades: int = 20,
         min_envs_passing: int = 2,
@@ -72,8 +66,7 @@ class TrainingHotSaveCallback(BaseCallback):
     ) -> None:
         super().__init__(verbose)
         self.models_dir        = Path(models_dir)
-        self.pf_avg_threshold  = pf_avg_threshold
-        self.pf_ind_threshold  = pf_ind_threshold
+        self.pf_threshold      = pf_threshold
         self.wr_threshold      = wr_threshold
         self.min_trades        = min_trades
         self.min_envs_passing  = min_envs_passing
@@ -113,25 +106,20 @@ class TrainingHotSaveCallback(BaseCallback):
         if not filled:
             return
 
-        # Tier 1 — aggregate PF
-        pf_values = [d.get("profit_factor", 0.0) for d in filled]
-        avg_pf = float(np.mean(pf_values))
-        if avg_pf <= self.pf_avg_threshold:
-            return
-
-        # Tier 2 — count individual envs passing all three criteria
-        n_passing = sum(
-            1 for d in filled
+        # Unified gate — count envs that pass ALL criteria simultaneously
+        passing = [
+            d for d in filled
             if (
-                d.get("profit_factor", 0.0) > self.pf_ind_threshold
-                and d.get("win_rate", 0.0) >= self.wr_threshold
-                and d.get("n_trades", 0) >= self.min_trades
+                d.get("profit_factor", 0.0) > self.pf_threshold
+                and d.get("win_rate",      0.0) >= self.wr_threshold
+                and d.get("n_trades",      0)   >= self.min_trades
             )
-        )
+        ]
+        n_passing = len(passing)
         if n_passing < self.min_envs_passing:
             return
 
-        # Both tiers cleared — save
+        avg_pf = float(np.mean([d["profit_factor"] for d in passing]))
         self._save(step, avg_pf, n_passing)
 
     def _save(self, step: int, avg_pf: float, n_passing: int) -> None:
