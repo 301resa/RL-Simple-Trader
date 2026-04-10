@@ -20,7 +20,7 @@ a multi-bar lookback window in the observation vector.
 > - Do not "clean up" imports, remove unused variables, or refactor adjacent code.
 > - Do not replace working implementations with `pass` or `raise NotImplementedError`.
 > - If unsure whether something is used, assume it IS used and leave it alone.
-
+> - before you change the code read Readme.md and if you change code update the READme.md for the change that made
 ---
 
 ## Project Structure
@@ -118,7 +118,11 @@ Stop widening is **never** allowed once placed.
 
 ### Take Profit
 
-Target = 75% of remaining ATR distance from entry.
+Target = the **high of the last up-leg** (for a LONG) or the **low of the last down-leg** (for a SHORT).
+
+This is the swing extreme of the most recent directional move before the pullback/dip
+that created the supply/demand zone. The agent targets that prior swing high or low
+as the natural first profit objective.
 
 ### Trailing Stop
 
