@@ -23,6 +23,7 @@ a multi-bar lookback window in the observation vector.
 > - before you change the code read Readme.md and if you change code update the READme.md for the change that made
 
 >- make sure you remove the redunant codes, variables and tidy up the code without losing functionalities or breaking the codes.  make sure codes are clean, readable, professional and comply with highest coding standards.
+> - once you review the code, make a note of all the bottleknecks in the codes and let user know the effect of improving on the speed , perforamce and stabilty or anyother metric in the code execution.
 ---
 
 ## Project Structure
@@ -279,6 +280,18 @@ metrics and log results without writing any model files (useful for exploration 
 
 - **VecNormalize**: Normalises observations only (`norm_reward=False`). Stats are saved
   alongside every checkpoint so evaluation always uses matched normalisation.
+
+- **Performance optimisations** (applied to hot paths):
+  - `ATRCalculator.get_atr_for_date()`: O(n) pandas filter → O(log n) `bisect` on sorted list.
+  - `ATRCalculator.compute_all_session_states()`: vectorised O(n) running max/min replaces
+    O(n²) per-step DataFrame slice in the precompute loop.
+  - `ObservationBuilder.prepare_episode()`: numpy arrays and rolling-20 volume averages
+    pre-extracted once per episode reset (cumsum trick); `build()` uses cached arrays.
+  - `ZoneDetector`: invalid Zone objects pruned from lists once they exceed 3× the per-side cap.
+  - `TradingEnv` precompute loop: `copy.deepcopy()` replaced with `dataclasses.replace()`
+    (~10–50× faster) for Zone snapshots; `ATRState`/`OrderZoneState` stored directly.
+  - `TradingEnv.step()`: `atr_series.iloc[]` lookup replaced with already-loaded
+    `atr_state.atr_daily`; `current_price` reused for session-end force-close.
 
 ---
 
