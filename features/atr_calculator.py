@@ -11,8 +11,9 @@ Used for:
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -113,6 +114,9 @@ class ATRCalculator:
 
         self._atr_series: Optional[pd.Series] = None   # date_str → atr_value
         self._daily_bars: Optional[pd.DataFrame] = None  # date_str indexed
+        # Fast O(log n) lookup structures built in fit()
+        self._sorted_dates: List[str] = []
+        self._sorted_atrs: List[float] = []
 
     # ── Public API ────────────────────────────────────────────
 
@@ -149,6 +153,10 @@ class ATRCalculator:
         self._daily_bars = df.copy()
         self._daily_bars.index = date_strs
 
+        # Build sorted arrays for O(log n) date lookups
+        self._sorted_dates = list(date_strs)
+        self._sorted_atrs  = list(atr.values.astype(float))
+
     def get_atr_for_date(self, date_str: str) -> Optional[float]:
         """
         Return the ATR value to use for a given trading date.
@@ -165,20 +173,17 @@ class ATRCalculator:
         -------
         float or None if not enough history.
         """
-        if self._atr_series is None:
+        if not self._sorted_dates:
             return None
 
-        series = self._atr_series
-
-        # Prefer data strictly before this date (no lookahead)
-        prior = series[series.index < date_str].dropna()
-        if not prior.empty:
-            return float(prior.iloc[-1])
+        # O(log n) bisect lookup — find last date strictly before date_str
+        idx = bisect.bisect_left(self._sorted_dates, date_str)
+        if idx > 0:
+            return self._sorted_atrs[idx - 1]
 
         # Fallback: allow the date itself (e.g. first day in dataset)
-        up_to = series[series.index <= date_str].dropna()
-        if not up_to.empty:
-            return float(up_to.iloc[-1])
+        if idx < len(self._sorted_dates) and self._sorted_dates[idx] == date_str:
+            return self._sorted_atrs[idx]
 
         return None
 
@@ -254,6 +259,73 @@ class ATRCalculator:
             atr_short_exhausted=move_down >= thresh,  # already moved down 85% of ATR
             atr_long_exhausted=move_up >= thresh,     # already moved up 85% of ATR
         )
+
+    def compute_all_session_states(
+        self,
+        date: str,
+        session_bars: pd.DataFrame,
+    ) -> List[ATRState]:
+        """
+        Vectorised version of compute_session_state — computes ATRState for
+        every bar in the session in a single O(n) pass using running max/min.
+
+        Replaces calling compute_session_state() n times (which is O(n²) due
+        to .max()/.min() on growing slices).
+
+        Returns
+        -------
+        List[ATRState] with one entry per row in session_bars.
+        """
+        atr_val = self.get_atr_for_date(date)
+        if atr_val is None or atr_val <= 0:
+            return []
+
+        prior_high = prior_low = prior_range = 0.0
+        if self._daily_bars is not None:
+            prior_days = self._daily_bars[self._daily_bars.index < date]
+            if not prior_days.empty:
+                last_day   = prior_days.iloc[-1]
+                prior_high = float(last_day["high"])
+                prior_low  = float(last_day["low"])
+                prior_range = prior_high - prior_low
+
+        highs_np = session_bars["high"].to_numpy(dtype=np.float64)
+        lows_np  = session_bars["low"].to_numpy(dtype=np.float64)
+        opens_np = session_bars["open"].to_numpy(dtype=np.float64)
+        n = len(highs_np)
+        if n == 0:
+            return []
+
+        session_open = float(opens_np[0])
+        thresh = self.exhaustion_threshold * atr_val
+
+        states: List[ATRState] = []
+        running_high = float(highs_np[0])
+        running_low  = float(lows_np[0])
+
+        for i in range(n):
+            running_high = max(running_high, float(highs_np[i]))
+            running_low  = min(running_low,  float(lows_np[i]))
+            current_range = running_high - running_low
+            atr_pct_used  = current_range / atr_val
+            atr_remaining = max(0.0, atr_val - current_range)
+            move_down = max(0.0, session_open - running_low)
+            move_up   = max(0.0, running_high - session_open)
+            states.append(ATRState(
+                atr_daily=atr_val,
+                prior_day_high=prior_high,
+                prior_day_low=prior_low,
+                prior_day_range=prior_range,
+                session_open=session_open,
+                session_high=running_high,
+                session_low=running_low,
+                current_daily_range=current_range,
+                atr_pct_used=atr_pct_used,
+                atr_remaining_pts=atr_remaining,
+                atr_short_exhausted=move_down >= thresh,
+                atr_long_exhausted=move_up   >= thresh,
+            ))
+        return states
 
     @staticmethod
     def compute_atr_target_price(

@@ -151,6 +151,7 @@ class ZoneDetector:
         self._last_scanned_idx = current_bar_idx
 
         self._update_zone_validity(current_bar_idx, current_price, atr)
+        self._prune_invalid_zones()
         return self._build_state(current_price)
 
     # ── Private helpers ───────────────────────────────────────
@@ -240,6 +241,14 @@ class ZoneDetector:
         valid = [z for z in zone_list if z.is_valid]
         if len(valid) > self.max_zones_per_side:
             min(valid, key=lambda z: z.bar_formed_idx).is_valid = False
+
+    def _prune_invalid_zones(self) -> None:
+        """Remove fully-invalid zones once lists exceed 3× the per-side cap."""
+        cap = self.max_zones_per_side * 3
+        if len(self._supply_zones) > cap:
+            self._supply_zones = [z for z in self._supply_zones if z.is_valid]
+        if len(self._demand_zones) > cap:
+            self._demand_zones = [z for z in self._demand_zones if z.is_valid]
 
     def _build_state(self, current_price: float) -> ZoneState:
         """Return the nearest valid supply and demand zones to current price."""

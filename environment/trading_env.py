@@ -21,7 +21,7 @@ Compliant with gymnasium.Env API (stable-baselines3 compatible).
 
 from __future__ import annotations
 
-import copy
+from dataclasses import replace as _dc_replace
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -42,6 +42,20 @@ from features.zone_detector import ZoneDetector
 from utils.logger import get_logger
 
 log = get_logger(__name__)
+
+
+def _freeze_zone_state(zs) -> object:
+    """
+    Return a snapshot of a ZoneState whose Zone objects cannot be mutated
+    by future calls to _update_zone_validity().
+
+    Uses dataclasses.replace() (shallow copy of scalar fields) which is
+    ~10–50× faster than copy.deepcopy() for these small dataclasses.
+    """
+    supply = _dc_replace(zs.nearest_supply) if zs.nearest_supply is not None else None
+    demand = _dc_replace(zs.nearest_demand) if zs.nearest_demand is not None else None
+    from features.zone_detector import ZoneState
+    return ZoneState(nearest_supply=supply, nearest_demand=demand)
 
 
 class TradingEnv(gym.Env):
@@ -295,29 +309,32 @@ class TradingEnv(gym.Env):
         # ── Pre-compute all market feature states for every bar ───────────────
         # Market features depend only on price history — never on agent actions.
         # One pass here eliminates repeated Pandas slicing inside step().
-        self._precomputed_states: list = []
 
-        for bar_idx in range(self._n_steps):
-            # ATR state uses session-only bars (daily ATR lookup, no history needed)
-            atr_s = self.atr_calculator.compute_session_state(
-                date=self._current_day,
-                session_bars=self._session_bars,
-                current_bar_idx=bar_idx,
+        # Vectorised ATR: O(n) running max/min instead of O(n²) growing slices
+        atr_states = self.atr_calculator.compute_all_session_states(
+            self._current_day, self._session_bars
+        )
+        if not atr_states:
+            from features.atr_calculator import ATRState as _ATRState
+            cp = float(self._session_bars.iloc[0]["close"])
+            fallback = _ATRState(
+                atr_daily=100.0, prior_day_high=cp + 50,
+                prior_day_low=cp - 50, prior_day_range=100.0,
+                session_open=cp, session_high=cp, session_low=cp,
+                current_daily_range=0.0, atr_pct_used=0.0,
+                atr_remaining_pts=100.0,
+                atr_short_exhausted=False, atr_long_exhausted=False,
             )
-            if atr_s is None:
-                from features.atr_calculator import ATRState as _ATRState
-                cp = float(self._session_bars.iloc[bar_idx]["close"])
-                atr_s = _ATRState(
-                    atr_daily=100.0, prior_day_high=cp + 50,
-                    prior_day_low=cp - 50, prior_day_range=100.0,
-                    session_open=cp, session_high=cp, session_low=cp,
-                    current_daily_range=0.0, atr_pct_used=0.0,
-                    atr_remaining_pts=100.0,
-                    atr_short_exhausted=False, atr_long_exhausted=False,
-                )
+            atr_states = [fallback] * self._n_steps
 
-            # Zone + liquidity detectors use the full history-extended context
-            # so they can see supply/demand structure from prior sessions.
+        # Cache per-episode numpy arrays in the observation builder (once per reset)
+        self.observation_builder.prepare_episode(self._combined_bars)
+
+        self._precomputed_states: list = []
+        for bar_idx in range(self._n_steps):
+            atr_s = atr_states[bar_idx] if bar_idx < len(atr_states) else atr_states[-1]
+
+            # Zone detector uses full history-extended context
             combined_idx = self._combined_session_offset + bar_idx
             zone_s = self.zone_detector.scan_and_update(
                 bars=self._combined_bars,
@@ -331,11 +348,16 @@ class TradingEnv(gym.Env):
                 zone_state=zone_s,
                 trend_snapshot=None,
             )
-            # deepcopy freezes the state at this bar — prevents future bars
-            # from retroactively mutating zone.is_valid references (lookahead bug)
-            self._precomputed_states.append(copy.deepcopy({
-                "atr": atr_s, "zone": zone_s, "oz": oz_s
-            }))
+            # Freeze ZoneState: Zone objects in the detector's lists are mutable
+            # and will be updated by future bars — snapshot them cheaply with
+            # dataclasses.replace() instead of copy.deepcopy() (~10-50× faster).
+            # ATRState and OrderZoneState are created fresh each iteration → safe to
+            # store directly with no copy.
+            self._precomputed_states.append({
+                "atr": atr_s,
+                "zone": _freeze_zone_state(zone_s),
+                "oz": oz_s,
+            })
 
         # Build initial observation
         obs, info = self._build_obs_and_info()
@@ -364,11 +386,12 @@ class TradingEnv(gym.Env):
         """
         assert self._session_bars is not None, "Call reset() before step()."
 
-        current_bar = self._session_bars.iloc[self._current_step]
+        # Single .iloc lookup — reuse values throughout the step
+        current_bar   = self._session_bars.iloc[self._current_step]
         current_price = float(current_bar["close"])
-        current_high = float(current_bar["high"])
-        current_low = float(current_bar["low"])
-        atr_state = self._current_atr_state
+        current_high  = float(current_bar["high"])
+        current_low   = float(current_bar["low"])
+        atr_state     = self._current_atr_state
 
         # ── Validate action against mask ──────────────────────
         mask = self._compute_action_mask(atr_state)
@@ -405,7 +428,7 @@ class TradingEnv(gym.Env):
             current_bar_high=current_high,
             current_bar_low=current_low,
             current_bar_idx=self._current_step,
-            atr=float(self._atr_series.iloc[self._current_step]),
+            atr=atr_state.atr_daily,   # already loaded from precomputed states
             agent_wants_exit=agent_wants_exit,
             agent_wants_trail=agent_wants_trail,
         )
@@ -469,10 +492,9 @@ class TradingEnv(gym.Env):
         # End of session
         self._current_step += 1
         if self._current_step >= self._n_steps:
-            # Force close any open position at session end
+            # Force close any open position at session end — reuse current_price
             if self.position_manager.state.is_open:
-                close_price = float(self._session_bars.iloc[-1]["close"])
-                self.position_manager.force_close(close_price, self._current_step - 1, ExitReason.SESSION_END)
+                self.position_manager.force_close(current_price, self._current_step - 1, ExitReason.SESSION_END)
             truncated = True
 
         # ── Build next observation ────────────────────────────
@@ -531,7 +553,12 @@ class TradingEnv(gym.Env):
     def _build_obs_and_info(self) -> Tuple[np.ndarray, dict]:
         """Build the observation vector and info dict for the current step."""
         step = min(self._current_step, self._n_steps - 1)
-        current_price = float(self._session_bars.iloc[step]["close"])
+        combined_idx  = self._combined_session_offset + step
+        # Use cached numpy array when available — avoids pandas .iloc overhead
+        if self.observation_builder._cached_closes is not None:
+            current_price = float(self.observation_builder._cached_closes[combined_idx])
+        else:
+            current_price = float(self._session_bars.iloc[step]["close"])
 
         # ── O(1) lookup from pre-computed states ─────────────────────────────
         states           = self._precomputed_states[step]
@@ -551,9 +578,7 @@ class TradingEnv(gym.Env):
         }
 
         # Use the history-extended bar context for the price lookback window.
-        # This ensures the last N candles at bar 0 of a session contain real
-        # prior-session price data rather than zero-padding.
-        combined_idx = self._combined_session_offset + step
+        # combined_idx already computed above.
         obs = self.observation_builder.build(
             bars=self._combined_bars,
             current_bar_idx=combined_idx,
