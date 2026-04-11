@@ -82,41 +82,63 @@ class ObservationBuilder:
         """
         cv   = self.clip_value
         atr  = max(atr_state.atr_daily, 1.0)
-        current_bar  = bars.iloc[current_bar_idx]
-        current_close = float(current_bar["close"])
+        current_close = float(bars.iloc[current_bar_idx]["close"])
         features: list = []
 
         # ── 1. Recent price history (log returns) ────────────
-        # Log returns: log(price_t / price_{t-1}) are stationary,
-        # zero-centred, and scale-invariant — neural nets learn faster
-        # than ATR-normalised absolute offsets.
-        # OHLC: log return relative to previous bar's close.
-        # Volume: ratio vs 20-bar rolling average (unchanged).
-        for i in range(self.price_history_len):
-            idx = current_bar_idx - (self.price_history_len - 1 - i)
-            if idx < 0:
-                features.extend([0.0, 0.0, 0.0, 0.0, 0.0])
-                continue
-            b    = bars.iloc[idx]
-            # Previous bar's close as the base for log returns
-            prev_close = float(bars.iloc[idx - 1]["close"]) if idx > 0 else float(b["close"])
-            prev_close = max(prev_close, 1e-6)  # guard against zero
+        # Convert DataFrame columns to numpy arrays once — avoids 500+ slow
+        # pandas .iloc calls per step (each returns a full Series object).
+        opens_np   = bars["open"].to_numpy(dtype=np.float64)
+        highs_np   = bars["high"].to_numpy(dtype=np.float64)
+        lows_np    = bars["low"].to_numpy(dtype=np.float64)
+        closes_np  = bars["close"].to_numpy(dtype=np.float64)
+        has_volume = "volume" in bars.columns
+        vols_np    = bars["volume"].to_numpy(dtype=np.float64) if has_volume else None
 
-            def _lr(price: float) -> float:
-                return float(np.clip(np.log(max(price, 1e-6) / prev_close), -cv, cv))
+        n = self.price_history_len
+        # Index array for the window: oldest → newest
+        indices    = np.arange(current_bar_idx - n + 1, current_bar_idx + 1)
+        valid_mask = indices >= 0
+        safe_idx   = np.maximum(indices, 0)
+        prev_idx   = np.maximum(indices - 1, 0)
 
-            features.append(_lr(float(b["open"])))
-            features.append(_lr(float(b["high"])))
-            features.append(_lr(float(b["low"])))
-            features.append(_lr(float(b["close"])))
-            # Volume ratio (unchanged — already a ratio, no log needed)
-            vol = float(b["volume"]) if "volume" in b.index else 0.0
-            vol_window = bars.iloc[max(0, idx - 20): idx]
-            if "volume" in bars.columns and len(vol_window) > 0:
-                avg_vol = float(vol_window["volume"].mean())
-            else:
-                avg_vol = max(vol, 1.0)
-            features.append(float(np.clip(vol / max(avg_vol, 1.0), 0.0, 5.0)))
+        # prev_close: close of the bar just before each window bar
+        # For idx==0 (no prior bar) use the bar's own close → log-return = 0
+        prev_closes = np.where(
+            valid_mask & (indices > 0),
+            closes_np[prev_idx],
+            closes_np[safe_idx],
+        )
+        prev_closes = np.maximum(prev_closes, 1e-6)
+
+        # Vectorised log returns — shape (n,) each
+        def _lr_vec(prices: np.ndarray) -> np.ndarray:
+            return np.where(
+                valid_mask,
+                np.clip(np.log(np.maximum(prices[safe_idx], 1e-6) / prev_closes), -cv, cv),
+                0.0,
+            )
+
+        lr_open  = _lr_vec(opens_np)
+        lr_high  = _lr_vec(highs_np)
+        lr_low   = _lr_vec(lows_np)
+        lr_close = _lr_vec(closes_np)
+
+        # Volume ratios — rolling 20-bar average using numpy slicing
+        if has_volume and vols_np is not None:
+            vol_ratios = np.zeros(n, dtype=np.float64)
+            for i, idx in enumerate(safe_idx):
+                if valid_mask[i]:
+                    vol         = vols_np[idx]
+                    vol_start   = max(0, idx - 20)
+                    avg_vol     = float(np.mean(vols_np[vol_start:idx])) if idx > vol_start else float(vol)
+                    vol_ratios[i] = np.clip(vol / max(avg_vol, 1.0), 0.0, 5.0)
+        else:
+            vol_ratios = np.zeros(n, dtype=np.float64)
+
+        # Interleave [open, high, low, close, vol] × n and extend features
+        price_block = np.column_stack([lr_open, lr_high, lr_low, lr_close, vol_ratios])
+        features.extend(price_block.ravel().tolist())
 
         # ── 2. ATR features ───────────────────────────────────
         atr_dict = atr_state.as_feature_dict()
