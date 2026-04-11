@@ -255,8 +255,17 @@ metrics and log results without writing any model files (useful for exploration 
   (log-returns + volume ratio) are included in every observation. The window shifts
   forward one bar at each step. Prior-session bars fill the window from the start of
   each episode so bar 0 never has zero-padding — the same 500-bar history context
-  used by the zone detector. The LSTM (512 units) additionally carries within-session
+  used by the zone detector. The LSTM (256 units) additionally carries within-session
   state across steps. Observation vector size: `500 × 5 + 28 = 2,528` features.
+
+- **OHLCV jitter augmentation** (`data/data_augmentor.py`): Applied to every training
+  episode to prevent the agent memorising price-to-outcome mappings. Each bar receives
+  an independent discrete offset sampled uniformly from `{−0.5, −0.25, 0, +0.25, +0.5}`
+  points for OHLC and `{−10, −5, 0, +5, +10}` contracts for volume. OHLC integrity is
+  enforced after jittering (`high ≥ max(open, close)`, `low ≤ min(open, close)`).
+  Each of the 16 parallel workers is seeded differently so every env sees a unique
+  jitter sequence. Augmentation is **training-only** — evaluation and backtest use
+  clean unadjusted bars.
 
 - **Annualised Sharpe**: All Sharpe calculations use `mean(pnl_r) / std(pnl_r) × √252`
   consistently across training table, eval callback, and test_fold.
