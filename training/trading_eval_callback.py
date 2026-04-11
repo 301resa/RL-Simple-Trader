@@ -283,13 +283,14 @@ class TradingEvalCallback(BaseCallback):
         self._save_n += 1
         is_new_best = metrics.composite_score > self._best_score
 
-        # Numbered checkpoint filename
+        # Numbered checkpoint filename — explicit .zip so SB3 doesn't mangle
+        # the score suffix (e.g. c0.57 would be treated as the file extension)
         stem = (
             f"checkpoint_s{self._save_n:02d}"
             f"_step{self.num_timesteps}"
             f"_c{metrics.composite_score:.2f}"
         )
-        ckpt_path   = self.save_path / stem
+        ckpt_path   = self.save_path / f"{stem}.zip"
         vn_path     = self.save_path / f"{stem}_vecnormalize.pkl"
 
         self.model.save(str(ckpt_path))
@@ -327,7 +328,7 @@ class TradingEvalCallback(BaseCallback):
             log.info("FINAL_STEP save skipped (save_enabled=False)")
             return
         stem      = f"checkpoint_FINAL_STEP{self.num_timesteps}"
-        ckpt_path = self.save_path / stem
+        ckpt_path = self.save_path / f"{stem}.zip"
         vn_path   = self.save_path / f"{stem}_vecnormalize.pkl"
         self.model.save(str(ckpt_path))
         self._save_vec_normalize(vn_path)

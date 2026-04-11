@@ -47,26 +47,39 @@ except ImportError:
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _checkpoint_base(p: Path) -> str:
+    """Return the base name of a checkpoint without the .zip extension."""
+    name = p.name
+    return name[:-4] if name.endswith(".zip") else name
+
+
 def _find_checkpoints(models_dir: Path) -> List[Path]:
     """
-    Return all checkpoint .zip files sorted by composite score then step.
+    Return all checkpoint files sorted by composite score then step.
 
-    Naming conventions recognised:
-      checkpoint_s{N:02d}_step{S}_c{C:.2f}.zip
-      checkpoint_FINAL_STEP{S}.zip
+    Handles both correctly-saved files (checkpoint_*.zip) and legacy saves
+    where SB3 stripped the numeric score suffix and saved without .zip.
     """
     zips = sorted(models_dir.glob("checkpoint_*.zip"))
-    if not zips:
+    if zips:
+        return zips
+    # Legacy: SB3 treated the score decimal (e.g. .57) as the file extension
+    # and saved without .zip — match any checkpoint_* that is not a .pkl or dir
+    candidates = sorted(
+        f for f in models_dir.glob("checkpoint_*")
+        if not f.name.endswith(".pkl") and not f.is_dir()
+    )
+    if not candidates:
         raise FileNotFoundError(
-            f"No checkpoint_*.zip files found in {models_dir}"
+            f"No checkpoint files found in {models_dir}"
         )
-    return zips
+    return candidates
 
 
 def _vecnorm_path(ckpt: Path) -> Optional[Path]:
     """Derive paired VecNormalize .pkl path from checkpoint path."""
-    stem = ckpt.stem          # e.g. checkpoint_s03_step800000_c0.31
-    candidate = ckpt.parent / f"{stem}_vecnormalize.pkl"
+    base = _checkpoint_base(ckpt)   # strip .zip if present
+    candidate = ckpt.parent / f"{base}_vecnormalize.pkl"
     if candidate.exists():
         return candidate
     # Fallback: best_model_vecnormalize.pkl or vecnormalize.pkl in same dir
@@ -79,10 +92,10 @@ def _vecnorm_path(ckpt: Path) -> Optional[Path]:
 
 def _composite_from_name(p: Path) -> float:
     """Parse composite score from checkpoint filename, or 0 if FINAL_STEP."""
-    stem = p.stem
-    if "_c" in stem:
+    base = _checkpoint_base(p)
+    if "_c" in base:
         try:
-            return float(stem.split("_c")[-1])
+            return float(base.split("_c")[-1])
         except ValueError:
             pass
     return 0.0
@@ -90,16 +103,15 @@ def _composite_from_name(p: Path) -> float:
 
 def _step_from_name(p: Path) -> int:
     """Parse training step from checkpoint filename."""
-    stem = p.stem
-    for token in stem.split("_"):
+    base = _checkpoint_base(p)
+    for token in base.split("_"):
         if token.startswith("step"):
             try:
                 return int(token[4:])
             except ValueError:
                 pass
-    # FINAL_STEP
-    if "FINAL" in stem:
-        part = stem.split("FINAL_STEP")[-1]
+    if "FINAL" in base:
+        part = base.split("FINAL_STEP")[-1]
         try:
             return int(part)
         except ValueError:
