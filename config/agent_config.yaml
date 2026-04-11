@@ -22,7 +22,7 @@ ppo:
   ent_coef: 0.01                   # entropy coefficient (initial)
   vf_coef: 0.5                     # value function coefficient
   max_grad_norm: 0.5               # gradient clipping
-  total_timesteps: 5_000_000       # 5M steps — scaled for 2,528-dim observation
+  total_timesteps: 4_000_000       # 4M steps — scaled for 2,528-dim observation
   eval_freq: 100_000               # evaluate every N steps
 
 network:
@@ -39,7 +39,7 @@ network:
 exploration:
   ent_coef_start: 0.05             # entropy at start of training
   ent_coef_end: 0.005              # entropy at end of annealing
-  ent_coef_decay_steps: 2_000_000  # steps over which to anneal (40% of 5M total)
+  ent_coef_decay_steps: 2_000_000  # steps over which to anneal (50% of 4M total)
 
 checkpointing:
   save_freq: 100_000               # periodic checkpoint every N steps

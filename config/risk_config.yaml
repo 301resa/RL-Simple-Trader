@@ -12,13 +12,10 @@ sizing:
   confluence_tier_thresholds: [0.50, 0.65, 0.75, 0.85]
 
 stop_loss:
-  method: zone_based             # stop placed just beyond zone boundary
   zone_buffer_atr_pct: 0.03     # buffer beyond zone top/bottom (3% of ATR)
   allow_stop_widening: false     # HARD RULE: never widen a stop once placed
 
 take_profit:
-  method: atr_remaining          # target = fraction of ATR remaining
-  atr_remaining_pct: 0.75        # use 75% of remaining ATR as target distance
   min_rr_ratio: 1.5              # minimum 1.5:1 R:R required to enter
 
 trailing:

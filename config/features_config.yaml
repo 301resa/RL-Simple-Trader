@@ -6,7 +6,6 @@ atr:
   period: 1                       # Wilder's ATR period (days)
   exhaustion_threshold: 0.85       # directional move >= 85% ATR → block that direction only
   danger_threshold: 0.85           # same threshold (warning = exhaustion)
-  profit_target_pct: 0.75          # target = 75% of remaining ATR
 
 # Number of prior-session bars fed to zone detector on each reset.
 # At 5-min bars: 500 bars ≈ 40 hours ≈ 3–4 prior trading sessions.
@@ -32,7 +31,7 @@ trend:
   strength_lookback_bars: 40
 
 order_zone:
-  min_confluence_score: 0.35       # zone score alone drives confluence
+  min_confluence_score: 0.45       # zone score alone drives confluence
   weights:                         # sweep removed — zone is the dominant signal
     zone: 0.90                     # supply/demand zone membership
     atr: 0.10                      # ATR room remaining (directional)

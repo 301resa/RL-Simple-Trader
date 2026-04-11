@@ -236,7 +236,7 @@ logs/
 ## Model Saving Logic
 
 ### 1. Eval-based saves (`TradingEvalCallback`)
-Fires every **20,000 steps** on the validation set. Saves when a **composite score**
+Fires every **100,000 steps** on the validation set. Saves when a **composite score**
 beats the previous best AND the phase gate is cleared:
 
 | Phase | Steps | Min composite score |
@@ -247,7 +247,7 @@ beats the previous best AND the phase gate is cleared:
 | 4 | 1.2M–1.6M | 0.35 |
 | 5 | 1.6M+ | 0.45 |
 
-Composite score = weighted average of: Sharpe (30%), P&L in R (25%), Win/Loss ratio (25%), Max drawdown (20%).
+Composite score = weighted average of: Sharpe (40%), P&L in R (30%), Win/Loss ratio (15%), Max drawdown (15%).
 
 A **FINAL_STEP** checkpoint is always written at the end of training as a safety net.
 
