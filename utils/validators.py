@@ -101,8 +101,8 @@ def validate_risk_config(cfg: dict) -> None:
 
     sizing = cfg["sizing"]
     _assert_range(sizing["risk_per_trade_pct"], 0.001, 0.05, "risk_per_trade_pct")
-    _assert_positive_int(sizing["min_contracts"], "min_contracts")
-    _assert_positive_int(sizing["max_contracts"], "max_contracts")
+    _assert_positive_number(sizing["min_contracts"], "min_contracts")
+    _assert_positive_number(sizing["max_contracts"], "max_contracts")
 
     if sizing["min_contracts"] > sizing["max_contracts"]:
         raise ValueError("min_contracts must be <= max_contracts.")
@@ -228,3 +228,9 @@ def _assert_range(value: float, lo: float, hi: float, name: str) -> None:
 def _assert_positive_int(value: int, name: str) -> None:
     if not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+
+
+def _assert_positive_number(value, name: str) -> None:
+    """Accept int or float, as long as the value is > 0."""
+    if not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError(f"{name} must be a positive number, got {value!r}.")

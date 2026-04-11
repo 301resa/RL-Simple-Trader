@@ -113,7 +113,7 @@ A trade is only entered when the **zone pillar** is present. Weighted factors:
 The liquidity sweep pillar has been removed. The LSTM learns sweep context
 directly from raw price observations.
 
-- Minimum confluence score: **0.35** (configurable in `features_config.yaml`)
+- Minimum confluence score: **0.55** (configurable in `features_config.yaml`)
 - Minimum R:R ratio: **1.5:1** before an entry is allowed
 
 ### Pending Limit Order Entry
