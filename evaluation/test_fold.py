@@ -55,25 +55,41 @@ def _checkpoint_base(p: Path) -> str:
 
 def _find_checkpoints(models_dir: Path) -> List[Path]:
     """
-    Return all checkpoint files sorted by composite score then step.
+    Return all checkpoint and hotsave files sorted by step number.
 
-    Handles both correctly-saved files (checkpoint_*.zip) and legacy saves
-    where SB3 stripped the numeric score suffix and saved without .zip.
+    Scans models_dir/ and models_dir/hotsaves/ (if present).
+    Picks up:
+      - checkpoint_*.zip   (eval-gated saves)
+      - hotsave_*.zip      (training hot-saves)
+      - legacy extension-less files (SB3 stripped the score decimal)
     """
-    zips = sorted(models_dir.glob("checkpoint_*.zip"))
-    if zips:
-        return zips
-    # Legacy: SB3 treated the score decimal (e.g. .57) as the file extension
-    # and saved without .zip — match any checkpoint_* that is not a .pkl or dir
-    candidates = sorted(
-        f for f in models_dir.glob("checkpoint_*")
-        if not f.name.endswith(".pkl") and not f.is_dir()
-    )
-    if not candidates:
-        raise FileNotFoundError(
-            f"No checkpoint files found in {models_dir}"
-        )
-    return candidates
+    search_dirs = [models_dir]
+    hotsaves_dir = models_dir / "hotsaves"
+    if hotsaves_dir.is_dir():
+        search_dirs.append(hotsaves_dir)
+
+    found: List[Path] = []
+    for d in search_dirs:
+        # .zip files — both checkpoint_ and hotsave_ prefixes
+        zips = [
+            f for f in d.glob("*.zip")
+            if f.stem.startswith(("checkpoint_", "hotsave_"))
+        ]
+        if zips:
+            found.extend(zips)
+        else:
+            # Legacy: SB3 stripped the score decimal as a file extension
+            found.extend(
+                f for f in d.iterdir()
+                if not f.name.endswith(".pkl")
+                and not f.is_dir()
+                and (f.stem.startswith("checkpoint_") or f.stem.startswith("hotsave_"))
+            )
+
+    if not found:
+        raise FileNotFoundError(f"No checkpoint or hotsave files found in {models_dir}")
+
+    return sorted(set(found), key=_step_from_name)
 
 
 def _vecnorm_path(ckpt: Path) -> Optional[Path]:
@@ -102,20 +118,27 @@ def _composite_from_name(p: Path) -> float:
 
 
 def _step_from_name(p: Path) -> int:
-    """Parse training step from checkpoint filename."""
+    """Parse training step from checkpoint or hotsave filename."""
     base = _checkpoint_base(p)
+    # checkpoint_sNN_stepNNNNNN_... format
     for token in base.split("_"):
         if token.startswith("step"):
             try:
                 return int(token[4:])
             except ValueError:
                 pass
+    # FINAL_STEP format
     if "FINAL" in base:
         part = base.split("FINAL_STEP")[-1]
         try:
             return int(part)
         except ValueError:
             pass
+    # hotsave_NNNNNNNNNN format — last numeric token
+    tokens = base.split("_")
+    for token in reversed(tokens):
+        if token.isdigit():
+            return int(token)
     return 0
 
 
@@ -189,49 +212,66 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
     """Compute summary metrics from raw trade list."""
     if not trades:
         return {
-            "n_trades": 0, "win_rate": 0.0, "total_pnl_r": 0.0,
-            "avg_win_r": 0.0, "avg_loss_r": 0.0, "profit_factor": 0.0,
-            "sharpe": 0.0, "max_dd_r": 0.0, "avg_duration_min": 0.0,
+            "n_trades": 0, "win_rate": 0.0,
+            "total_pnl_r": 0.0, "total_pnl_dollars": 0.0,
+            "avg_win_r": 0.0, "avg_loss_r": 0.0,
+            "avg_win_dollars": 0.0, "avg_loss_dollars": 0.0,
+            "profit_factor": 0.0, "sharpe": 0.0,
+            "max_dd_r": 0.0, "max_dd_dollars": 0.0,
+            "avg_duration_min": 0.0,
         }
 
-    pnl = [t["pnl_r"] for t in trades]
-    wins = [p for p in pnl if p > 0]
-    losses = [p for p in pnl if p <= 0]
-    n = len(pnl)
+    pnl_r   = [t["pnl_r"] for t in trades]
+    pnl_usd = [t.get("pnl_dollars", 0.0) for t in trades]
+    wins_r   = [p for p in pnl_r   if p > 0]
+    losses_r = [p for p in pnl_r   if p <= 0]
+    wins_u   = [p for p in pnl_usd if p > 0]
+    losses_u = [p for p in pnl_usd if p <= 0]
+    n = len(pnl_r)
 
-    win_rate = len(wins) / n
-    total_pnl = sum(pnl)
-    avg_win = float(np.mean(wins)) if wins else 0.0
-    avg_loss = float(abs(np.mean(losses))) if losses else 0.0
-    gp = sum(wins) if wins else 0.0
-    gl = abs(sum(losses)) if losses else 1e-9
+    win_rate   = len(wins_r) / n
+    total_pnl  = sum(pnl_r)
+    total_usd  = sum(pnl_usd)
+    avg_win    = float(np.mean(wins_r))   if wins_r   else 0.0
+    avg_loss   = float(abs(np.mean(losses_r))) if losses_r else 0.0
+    avg_win_u  = float(np.mean(wins_u))   if wins_u   else 0.0
+    avg_loss_u = float(abs(np.mean(losses_u))) if losses_u else 0.0
+    gp = sum(wins_r)   if wins_r   else 0.0
+    gl = abs(sum(losses_r)) if losses_r else 1e-9
     pf = gp / gl
 
-    # Sharpe: episode-level daily PnL std
+    # Sharpe: episode-level daily PnL std (annualised)
     ep_pnls = [ep.get("total_pnl_r", 0.0) for ep in episodes if ep]
     sharpe = 0.0
     if len(ep_pnls) >= 2:
         mu = float(np.mean(ep_pnls))
         sd = float(np.std(ep_pnls))
-        sharpe = (mu / sd) * np.sqrt(252) if sd > 1e-9 else 0.0  # annualised
+        sharpe = (mu / sd) * np.sqrt(252) if sd > 1e-9 else 0.0
 
-    # Max drawdown
-    equity = np.cumsum(pnl)
-    peak = np.maximum.accumulate(equity)
-    max_dd = float((peak - equity).max()) if len(equity) > 0 else 0.0
+    # Max drawdown (R and $)
+    eq_r   = np.cumsum(pnl_r)
+    eq_usd = np.cumsum(pnl_usd)
+    peak_r   = np.maximum.accumulate(eq_r)
+    peak_usd = np.maximum.accumulate(eq_usd)
+    max_dd   = float((peak_r   - eq_r).max())   if n > 0 else 0.0
+    max_dd_u = float((peak_usd - eq_usd).max()) if n > 0 else 0.0
 
     avg_dur = float(np.mean([t.get("duration_min", 0) for t in trades]))
 
     return {
-        "n_trades":       n,
-        "win_rate":       round(win_rate, 4),
-        "total_pnl_r":    round(total_pnl, 4),
-        "avg_win_r":      round(avg_win,   4),
-        "avg_loss_r":     round(avg_loss,  4),
-        "profit_factor":  round(pf,        4),
-        "sharpe":         round(sharpe,    4),
-        "max_dd_r":       round(max_dd,    4),
-        "avg_duration_min": round(avg_dur, 1),
+        "n_trades":          n,
+        "win_rate":          round(win_rate,   4),
+        "total_pnl_r":       round(total_pnl,  4),
+        "total_pnl_dollars": round(total_usd,  2),
+        "avg_win_r":         round(avg_win,    4),
+        "avg_loss_r":        round(avg_loss,   4),
+        "avg_win_dollars":   round(avg_win_u,  2),
+        "avg_loss_dollars":  round(avg_loss_u, 2),
+        "profit_factor":     round(pf,         4),
+        "sharpe":            round(sharpe,     4),
+        "max_dd_r":          round(max_dd,     4),
+        "max_dd_dollars":    round(max_dd_u,   2),
+        "avg_duration_min":  round(avg_dur,    1),
     }
 
 
@@ -268,10 +308,10 @@ _COL_W = {
     "ckpt":      28,
     "trades":     6,
     "wr":         7,
-    "pnl":        8,
+    "pnl":       10,   # dollars: e.g. $-12,345
     "pf":         6,
     "sharpe":     8,
-    "dd":         7,
+    "dd":         9,   # dollars: e.g. $12,345
     "dur":        7,
     "comp":       7,
 }
@@ -281,10 +321,10 @@ def _header_row() -> str:
         f"{'Checkpoint':<{_COL_W['ckpt']}}"
         f"{'Trades':>{_COL_W['trades']}}"
         f"{'WR%':>{_COL_W['wr']}}"
-        f"{'PnL(R)':>{_COL_W['pnl']}}"
+        f"{'PnL($)':>{_COL_W['pnl']}}"
         f"{'PF':>{_COL_W['pf']}}"
         f"{'Sharpe':>{_COL_W['sharpe']}}"
-        f"{'MaxDD':>{_COL_W['dd']}}"
+        f"{'MaxDD($)':>{_COL_W['dd']}}"
         f"{'AvgMin':>{_COL_W['dur']}}"
         f"{'Score':>{_COL_W['comp']}}"
     )
@@ -292,14 +332,16 @@ def _header_row() -> str:
 
 def _data_row(name: str, m: dict, score: float) -> str:
     short = name[:_COL_W["ckpt"] - 1] if len(name) > _COL_W["ckpt"] - 1 else name
+    pnl_str = f"${m['total_pnl_dollars']:+,.0f}"
+    dd_str  = f"${m['max_dd_dollars']:,.0f}"
     return (
         f"{short:<{_COL_W['ckpt']}}"
         f"{m['n_trades']:>{_COL_W['trades']}}"
         f"{m['win_rate']*100:>{_COL_W['wr']}.1f}"
-        f"{m['total_pnl_r']:>{_COL_W['pnl']}.2f}"
+        f"{pnl_str:>{_COL_W['pnl']}}"
         f"{m['profit_factor']:>{_COL_W['pf']}.2f}"
         f"{m['sharpe']:>{_COL_W['sharpe']}.3f}"
-        f"{m['max_dd_r']:>{_COL_W['dd']}.2f}"
+        f"{dd_str:>{_COL_W['dd']}}"
         f"{m['avg_duration_min']:>{_COL_W['dur']}.1f}"
         f"{score:>{_COL_W['comp']}.3f}"
     )
@@ -310,193 +352,335 @@ def _separator() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plotly chart per checkpoint
+# Per-model trading journal
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_chart(
+def _resolve_trade_times(trades: List[dict], data_loader) -> List[dict]:
+    """
+    Add 'entry_time' and 'exit_time' ISO strings to each trade dict by
+    mapping bar indices into the actual session timestamps from the data loader.
+
+    entry_bar_idx / exit_bar_idx are indices into the session bars for that day.
+    """
+    enriched = []
+    day_bar_cache: dict = {}
+
+    for t in trades:
+        date = t["date"]
+        if date not in day_bar_cache:
+            try:
+                day_bar_cache[date] = data_loader.get_day_bars(date)
+            except Exception:
+                day_bar_cache[date] = pd.DataFrame()
+
+        day_bars = day_bar_cache[date]
+        n = len(day_bars)
+        entry_idx = min(int(t.get("entry_bar_idx", 0)), max(n - 1, 0))
+        exit_idx  = min(int(t.get("exit_bar_idx",  0)), max(n - 1, 0))
+
+        tc = t.copy()
+        if n > 0:
+            tc["entry_time"] = str(day_bars.index[entry_idx])
+            tc["exit_time"]  = str(day_bars.index[exit_idx])
+        else:
+            tc["entry_time"] = date + " 00:00"
+            tc["exit_time"]  = date + " 00:00"
+        enriched.append(tc)
+
+    return enriched
+
+
+def _build_journal(
     ckpt_name: str,
     trades: List[dict],
+    metrics: dict,
+    score: float,
     data_loader,
+    test_days: List[str],
     out_path: Path,
 ) -> None:
     """
-    Build a Plotly HTML with:
-      Upper panel: candlestick + trade entry/exit markers + SL/TP lines
-      Lower panel: equity curve
+    Build a self-contained HTML trading journal for one model checkpoint.
+
+    Layout
+    ------
+    1. Header — model name + test period
+    2. Metrics card — all trading metrics in styled tiles
+    3. Candlestick chart — full test period bars with entry/exit/SL/TP overlays
+    4. Equity curve + drawdown chart
+    5. Trade-by-trade table — sortable, win/loss colour coded
     """
     if not PLOTLY_OK:
         return
-    if not trades:
-        return
 
-    # ── Gather OHLCV bars for the date range ─────────────────────────────────
-    dates = sorted({t["date"] for t in trades})
-    if not dates:
-        return
+    trades = _resolve_trade_times(trades, data_loader)
 
-    try:
-        bars_list = []
-        for d in dates:
-            day_bars = data_loader.get_bars_for_day(d)
-            if day_bars is not None and not day_bars.empty:
-                bars_list.append(day_bars)
-        if not bars_list:
-            return
-        bars = pd.concat(bars_list).sort_index()
-    except Exception:
-        return
+    # ── Load all bars for the test period ─────────────────────────────────────
+    bars_list = []
+    for d in test_days:
+        try:
+            db = data_loader.get_day_bars(d)
+            if db is not None and not db.empty:
+                bars_list.append(db)
+        except Exception:
+            pass
 
-    # ── Reset index for Plotly ────────────────────────────────────────────────
-    bars = bars.reset_index()
-    time_col = bars.columns[0]   # typically "datetime" or "timestamp"
+    has_bars = bool(bars_list)
+    if has_bars:
+        all_bars = pd.concat(bars_list).sort_index().reset_index()
+        time_col = all_bars.columns[0]
 
+    # ── Build candlestick + equity chart ──────────────────────────────────────
     fig = make_subplots(
-        rows=2, cols=1,
+        rows=3, cols=1,
         shared_xaxes=True,
-        row_heights=[0.70, 0.30],
-        vertical_spacing=0.04,
-        subplot_titles=[f"Trades — {ckpt_name}", "Equity Curve (R)"],
+        row_heights=[0.60, 0.20, 0.20],
+        vertical_spacing=0.03,
+        subplot_titles=["Price & Trades", "Equity Curve (R)", "Drawdown (R)"],
     )
 
-    # Candlestick
-    fig.add_trace(
-        go.Candlestick(
-            x=bars[time_col],
-            open=bars["open"],
-            high=bars["high"],
-            low=bars["low"],
-            close=bars["close"],
-            name="Price",
-            increasing_line_color="#26a69a",
-            decreasing_line_color="#ef5350",
-            showlegend=False,
-        ),
-        row=1, col=1,
-    )
+    if has_bars:
+        fig.add_trace(
+            go.Candlestick(
+                x=all_bars[time_col],
+                open=all_bars["open"],
+                high=all_bars["high"],
+                low=all_bars["low"],
+                close=all_bars["close"],
+                name="Price",
+                increasing_line_color="#26a69a",
+                decreasing_line_color="#ef5350",
+                showlegend=False,
+            ),
+            row=1, col=1,
+        )
 
-    # ── Trade markers + SL/TP lines ──────────────────────────────────────────
+    # ── Trade overlays ────────────────────────────────────────────────────────
     equity = 0.0
-    eq_times: List[Any] = []
+    eq_times: list = []
     eq_vals:  List[float] = []
 
     for t in trades:
-        is_long  = t["direction"].upper() == "LONG"
-        is_win   = t["is_win"]
-        entry_px = t["entry_price"]
-        stop_px  = t["stop_price"]
-        tgt_px   = t["initial_target"]
-        exit_px  = t["exit_price"]
-        pnl_r    = t["pnl_r"]
+        is_long    = t["direction"].upper() == "LONG"
+        is_win     = t["is_win"]
+        entry_px   = t["entry_price"]
+        stop_px    = t["stop_price"]
+        tgt_px     = t["initial_target"]
+        exit_px    = t["exit_price"]
+        pnl_r      = t["pnl_r"]
+        entry_time = t["entry_time"]
+        exit_time  = t["exit_time"]
+        reason     = t.get("exit_reason", "")
+        dur_min    = t.get("duration_min", 0)
+        contracts  = t.get("n_contracts", 1)
+        pnl_pts    = t.get("pnl_points", 0.0)
 
-        # Entry marker
-        marker_sym  = "triangle-up" if is_long else "triangle-down"
-        marker_col  = "#2196F3"   # blue = entry
-        entry_size  = 12
+        entry_sym = "triangle-up"   if is_long else "triangle-down"
+        entry_col = "#2196F3"
+        exit_col  = "#26a69a"       if is_win  else "#ef5350"
 
-        # Find approx time for entry_bar_idx
-        entry_idx   = t.get("entry_bar_idx", 0)
-        exit_idx    = t.get("exit_bar_idx",  0)
-
-        entry_time  = bars[time_col].iloc[min(entry_idx, len(bars) - 1)]
-        exit_time   = bars[time_col].iloc[min(exit_idx,  len(bars) - 1)]
-
-        exit_col = "#26a69a" if is_win else "#ef5350"
-
-        # Entry marker
-        fig.add_trace(
-            go.Scatter(
-                x=[entry_time], y=[entry_px],
-                mode="markers",
-                marker=dict(symbol=marker_sym, color=marker_col,
-                            size=entry_size, line=dict(width=1, color="white")),
-                name="Entry",
-                showlegend=False,
-                hovertemplate=(
-                    f"<b>{'LONG' if is_long else 'SHORT'} Entry</b><br>"
-                    f"Price: {entry_px}<br>"
-                    f"SL: {stop_px}<br>"
-                    f"TP: {tgt_px}<br>"
-                    f"PnL: {pnl_r:+.2f}R<extra></extra>"
-                ),
-            ),
-            row=1, col=1,
+        hover_entry = (
+            f"<b>{'LONG ▲' if is_long else 'SHORT ▼'} Entry</b><br>"
+            f"Time : {entry_time}<br>"
+            f"Price: {entry_px}<br>"
+            f"SL   : {stop_px}<br>"
+            f"TP   : {tgt_px}<br>"
+            f"Lots : {contracts}<br>"
+            f"PnL  : {pnl_r:+.2f}R  ({pnl_pts:+.2f} pts)<extra></extra>"
+        )
+        hover_exit = (
+            f"<b>Exit — {reason}</b><br>"
+            f"Time : {exit_time}<br>"
+            f"Price: {exit_px}<br>"
+            f"PnL  : {pnl_r:+.2f}R<br>"
+            f"Dur  : {dur_min} min<extra></extra>"
         )
 
-        # Exit marker
-        fig.add_trace(
-            go.Scatter(
-                x=[exit_time], y=[exit_px],
-                mode="markers",
-                marker=dict(symbol="x", color=exit_col,
-                            size=10, line=dict(width=2, color=exit_col)),
-                name="Exit",
-                showlegend=False,
-                hovertemplate=(
-                    f"<b>Exit ({t.get('exit_reason','')})</b><br>"
-                    f"Price: {exit_px}<br>"
-                    f"PnL: {pnl_r:+.2f}R<extra></extra>"
-                ),
-            ),
-            row=1, col=1,
-        )
+        fig.add_trace(go.Scatter(
+            x=[entry_time], y=[entry_px], mode="markers",
+            marker=dict(symbol=entry_sym, color=entry_col, size=13,
+                        line=dict(width=1, color="white")),
+            showlegend=False, hovertemplate=hover_entry,
+        ), row=1, col=1)
 
-        # SL line (dashed red)
-        fig.add_shape(
-            type="line",
-            x0=entry_time, x1=exit_time,
-            y0=stop_px,    y1=stop_px,
-            line=dict(color="rgba(239,83,80,0.6)", width=1, dash="dot"),
-            row=1, col=1,
-        )
-        # TP line (dashed green)
-        fig.add_shape(
-            type="line",
-            x0=entry_time, x1=exit_time,
-            y0=tgt_px,     y1=tgt_px,
-            line=dict(color="rgba(38,166,154,0.6)", width=1, dash="dot"),
-            row=1, col=1,
-        )
+        fig.add_trace(go.Scatter(
+            x=[exit_time], y=[exit_px], mode="markers",
+            marker=dict(symbol="x", color=exit_col, size=11,
+                        line=dict(width=2, color=exit_col)),
+            showlegend=False, hovertemplate=hover_exit,
+        ), row=1, col=1)
 
-        # Equity
+        # SL line (dashed red, entry→exit)
+        fig.add_shape(type="line",
+            x0=entry_time, x1=exit_time, y0=stop_px, y1=stop_px,
+            line=dict(color="rgba(239,83,80,0.55)", width=1, dash="dot"),
+            row=1, col=1)
+        # TP line (dashed green, entry→exit)
+        fig.add_shape(type="line",
+            x0=entry_time, x1=exit_time, y0=tgt_px,  y1=tgt_px,
+            line=dict(color="rgba(38,166,154,0.55)", width=1, dash="dot"),
+            row=1, col=1)
+
         equity += pnl_r
         eq_times.append(exit_time)
         eq_vals.append(round(equity, 4))
 
-    # ── Equity subplot ────────────────────────────────────────────────────────
+    # Equity curve
     eq_color = "#26a69a" if equity >= 0 else "#ef5350"
-    fig.add_trace(
-        go.Scatter(
-            x=eq_times, y=eq_vals,
-            mode="lines+markers",
-            line=dict(color=eq_color, width=2),
-            marker=dict(size=5),
-            fill="tozeroy",
-            fillcolor=(
-                "rgba(38,166,154,0.15)" if equity >= 0
-                else "rgba(239,83,80,0.15)"
-            ),
-            name="Equity (R)",
-            showlegend=False,
-        ),
-        row=2, col=1,
-    )
+    fig.add_trace(go.Scatter(
+        x=eq_times, y=eq_vals,
+        mode="lines+markers",
+        line=dict(color=eq_color, width=2),
+        marker=dict(size=4),
+        fill="tozeroy",
+        fillcolor="rgba(38,166,154,0.12)" if equity >= 0 else "rgba(239,83,80,0.12)",
+        showlegend=False,
+        hovertemplate="Equity: %{y:+.2f}R<br>%{x}<extra></extra>",
+    ), row=2, col=1)
+    fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.3)", width=1, dash="dash"), row=2, col=1)
 
-    # Zero line on equity panel
-    fig.add_hline(y=0, line=dict(color="white", width=1, dash="dash"),
-                  row=2, col=1)
+    # Drawdown curve
+    if eq_vals:
+        eq_arr  = np.array(eq_vals)
+        peak    = np.maximum.accumulate(eq_arr)
+        dd_arr  = eq_arr - peak
+        fig.add_trace(go.Scatter(
+            x=eq_times, y=dd_arr.tolist(),
+            mode="lines",
+            line=dict(color="#ef5350", width=1.5),
+            fill="tozeroy",
+            fillcolor="rgba(239,83,80,0.12)",
+            showlegend=False,
+            hovertemplate="DD: %{y:.2f}R<br>%{x}<extra></extra>",
+        ), row=3, col=1)
+        fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.3)", width=1, dash="dash"), row=3, col=1)
 
     fig.update_layout(
         template="plotly_dark",
-        title=dict(text=f"Test Fold — {ckpt_name}", font=dict(size=14)),
-        height=800,
+        height=900,
         xaxis_rangeslider_visible=False,
-        margin=dict(l=60, r=20, t=60, b=40),
-        legend=dict(orientation="h", y=1.02),
+        margin=dict(l=60, r=20, t=40, b=40),
     )
-    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_yaxes(title_text="Price",     row=1, col=1)
     fig.update_yaxes(title_text="Equity (R)", row=2, col=1)
+    fig.update_yaxes(title_text="DD (R)",     row=3, col=1)
 
-    fig.write_html(str(out_path))
+    chart_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+
+    # ── Metrics card ──────────────────────────────────────────────────────────
+    m = metrics
+    wr_pct    = m["win_rate"] * 100
+    wl_ratio  = m["avg_win_r"] / max(m["avg_loss_r"], 1e-6)
+
+    def tile(label: str, value: str, cls: str = "") -> str:
+        return (
+            f'<div class="tile">'
+            f'<div class="tlabel">{label}</div>'
+            f'<div class="tvalue {cls}">{value}</div>'
+            f'</div>'
+        )
+
+    pos = "pos" if m["total_pnl_r"] >= 0 else "neg"
+    tiles = "".join([
+        tile("Trades",       str(m["n_trades"])),
+        tile("Win Rate",     f"{wr_pct:.1f}%",                          "pos" if wr_pct >= 50 else "neg"),
+        tile("W/L Ratio",    f"{wl_ratio:.2f}",                         "pos" if wl_ratio >= 1 else "neg"),
+        tile("Total PnL",    f"${m['total_pnl_dollars']:+,.0f}",        pos),
+        tile("PnL (R)",      f"{m['total_pnl_r']:+.2f}R",               pos),
+        tile("Profit Factor",f"{m['profit_factor']:.2f}",               "pos" if m['profit_factor'] >= 1 else "neg"),
+        tile("Sharpe",       f"{m['sharpe']:.3f}",                      "pos" if m['sharpe'] >= 0 else "neg"),
+        tile("Max DD",       f"${m['max_dd_dollars']:,.0f}",            "neg" if m['max_dd_dollars'] > 500 else "pos"),
+        tile("Avg Win",      f"${m['avg_win_dollars']:,.0f}",           "pos"),
+        tile("Avg Loss",     f"-${m['avg_loss_dollars']:,.0f}",         "neg"),
+        tile("Avg Dur",      f"{m['avg_duration_min']:.0f} min"),
+        tile("Score",        f"{score:.3f}",                             "pos" if score >= 0.2 else "neg"),
+    ])
+
+    # ── Trade table ───────────────────────────────────────────────────────────
+    rows_html = ""
+    for i, t in enumerate(sorted(trades, key=lambda x: x["entry_time"]), 1):
+        cls = "win-row" if t["is_win"] else "loss-row"
+        pnl_cls = "pos" if t["pnl_r"] >= 0 else "neg"
+        rows_html += (
+            f'<tr class="{cls}">'
+            f'<td>{i}</td>'
+            f'<td>{t["date"]}</td>'
+            f'<td>{"▲ LONG" if t["direction"].upper()=="LONG" else "▼ SHORT"}</td>'
+            f'<td>{t["entry_time"][11:16] if len(t["entry_time"]) > 10 else t["entry_time"]}</td>'
+            f'<td>{t["exit_time"][11:16]  if len(t["exit_time"])  > 10 else t["exit_time"]}</td>'
+            f'<td>{t["duration_min"]} min</td>'
+            f'<td>{t["entry_price"]}</td>'
+            f'<td>{t["exit_price"]}</td>'
+            f'<td style="color:#ef5350">{t["stop_price"]}</td>'
+            f'<td style="color:#26a69a">{t["initial_target"]}</td>'
+            f'<td>{t.get("n_contracts", 1)}</td>'
+            f'<td class="{pnl_cls}">{t["pnl_r"]:+.2f}</td>'
+            f'<td class="{pnl_cls}">{t.get("pnl_points", 0.0):+.2f}</td>'
+            f'<td class="{pnl_cls}">${t.get("pnl_dollars", 0.0):+.0f}</td>'
+            f'<td>{t.get("exit_reason", "")}</td>'
+            f'<td>{t.get("mae_r", 0.0):.2f}</td>'
+            f'</tr>\n'
+        )
+
+    table_html = f"""
+<table id="trade-table">
+  <thead>
+    <tr>
+      <th>#</th><th>Date</th><th>Dir</th><th>Entry</th><th>Exit</th>
+      <th>Dur</th><th>Entry Px</th><th>Exit Px</th><th>SL</th><th>TP</th>
+      <th>Lots</th><th>PnL (R)</th><th>PnL (pts)</th><th>PnL ($)</th>
+      <th>Reason</th><th>MAE (R)</th>
+    </tr>
+  </thead>
+  <tbody>
+    {rows_html}
+  </tbody>
+</table>"""
+
+    # ── Assemble full HTML ────────────────────────────────────────────────────
+    period_str = f"{test_days[0]} → {test_days[-1]}  ({len(test_days)} days)"
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{ckpt_name}</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #131722; color: #d1d4dc; font-family: 'Segoe UI', monospace; font-size: 13px; }}
+  h1 {{ padding: 16px 20px 4px; font-size: 16px; font-weight: 600; color: #e0e0e0; }}
+  .subtitle {{ padding: 0 20px 12px; color: #888; font-size: 12px; }}
+  .tiles {{ display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 20px; }}
+  .tile {{ background: #1e222d; border: 1px solid #2a2e39; border-radius: 6px;
+           padding: 10px 18px; min-width: 100px; text-align: center; }}
+  .tlabel {{ font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }}
+  .tvalue {{ font-size: 20px; font-weight: 700; }}
+  .pos {{ color: #26a69a; }}
+  .neg {{ color: #ef5350; }}
+  .chart-wrap {{ padding: 0 10px; }}
+  h2 {{ padding: 16px 20px 8px; font-size: 13px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; border-top: 1px solid #2a2e39; margin-top: 12px; }}
+  table {{ width: calc(100% - 40px); margin: 0 20px 30px; border-collapse: collapse; font-size: 12px; }}
+  thead tr {{ background: #1e222d; }}
+  th {{ padding: 8px 10px; text-align: right; color: #888; font-weight: 600;
+        border-bottom: 2px solid #2a2e39; white-space: nowrap; }}
+  th:nth-child(-n+3) {{ text-align: left; }}
+  td {{ padding: 6px 10px; border-bottom: 1px solid #1e222d; text-align: right; }}
+  td:nth-child(-n+3) {{ text-align: left; }}
+  tr.win-row  td {{ background: rgba(38,166,154,0.04); }}
+  tr.loss-row td {{ background: rgba(239,83,80,0.04); }}
+  tr:hover td {{ background: rgba(255,255,255,0.04) !important; }}
+</style>
+</head>
+<body>
+<h1>&#x1F4C8; {ckpt_name}</h1>
+<div class="subtitle">Test period: {period_str}</div>
+<div class="tiles">{tiles}</div>
+<div class="chart-wrap">{chart_html}</div>
+<h2>Trade Journal — {len(trades)} trades</h2>
+{table_html}
+</body>
+</html>"""
+
+    out_path.write_text(html, encoding="utf-8")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -689,18 +873,21 @@ def main(argv: Optional[List[str]] = None) -> None:
         return PositionManager(
             real_capital=real_capital,
             risk_per_trade_pct=sizing_cfg.get("risk_per_trade_pct", 0.01),
-            min_contracts=sizing_cfg.get("min_contracts", 1),
-            max_contracts=sizing_cfg.get("max_contracts", 3),
+            min_contracts=sizing_cfg.get("min_contracts", 0.5),
+            max_contracts=sizing_cfg.get("max_contracts", 2.5),
             point_value=point_value,
             max_trades_per_day=daily_lim.get("max_trades_per_day", 5),
             trail_activate_r=trail_cfg.get("activate_at_r", 2.0),
             trail_aggressive_r=trail_cfg.get("trail_aggressively_at_r", 4.0),
             trail_lock_in_r=trail_cfg.get("lock_in_r_at_trail", 2.0),
             max_daily_loss_r=daily_lim.get("max_daily_loss_r", 3.0),
+            max_daily_loss_dollars=daily_lim.get("max_daily_loss_dollars", 1000.0),
             max_drawdown_r=5.0,
             pause_bars_after_loss_streak=daily_lim.get("pause_bars_after_loss_streak", 6),
             loss_streak_threshold=daily_lim.get("max_consecutive_losses_before_pause", 3),
             zone_buffer_atr_pct=risk_cfg.get("stop_loss", {}).get("zone_buffer_atr_pct", 0.03),
+            contract_tiers=sizing_cfg.get("contract_tiers"),
+            confluence_tier_thresholds=sizing_cfg.get("confluence_tier_thresholds"),
         )
 
     session_start = session_cfg.get("rth_start_utc", "08:30")
@@ -739,7 +926,10 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     # ── Find and evaluate checkpoints ────────────────────────────────────────
     checkpoints = _find_checkpoints(models_dir)
-    print(f"\nFound {len(checkpoints)} checkpoint(s) in {models_dir}\n")
+    n_ckpt = sum(1 for c in checkpoints if "checkpoint_" in c.name)
+    n_hot  = sum(1 for c in checkpoints if "hotsave_"    in c.name)
+    print(f"\nFound {len(checkpoints)} model(s) in {models_dir}  "
+          f"({n_ckpt} checkpoints, {n_hot} hotsaves)\n")
 
     results: List[Dict] = []
     sep = _separator()
@@ -749,7 +939,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(sep)
 
     for ckpt in checkpoints:
-        name = ckpt.stem
+        name = _checkpoint_base(ckpt)
         vn   = _vecnorm_path(ckpt)
 
         print(f"  → Evaluating {name} ...", end="", flush=True)
@@ -775,13 +965,13 @@ def main(argv: Optional[List[str]] = None) -> None:
             "episodes":  episodes,
         })
 
-        # Per-checkpoint HTML chart
-        if PLOTLY_OK and trades:
-            chart_path = out_dir / f"{name}_test_chart.html"
+        # Per-checkpoint interactive trade journal
+        if PLOTLY_OK:
+            journal_path = out_dir / f"{name}_journal.html"
             try:
-                _build_chart(name, trades, data_loader, chart_path)
+                _build_journal(name, trades, m, score, data_loader, test_days, journal_path)
             except Exception as exc:
-                _log.warning("Chart generation failed", ckpt=name, error=str(exc))
+                _log.warning("Journal generation failed", ckpt=name, error=str(exc))
 
     print(sep)
 
@@ -801,12 +991,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(sep)
 
     best = results[-1]
+    bm = best["metrics"]
     print(f"\n  Best checkpoint: {best['name']}")
     print(f"  Score={best['score']:.3f}  "
-          f"Trades={best['metrics']['n_trades']}  "
-          f"WR={best['metrics']['win_rate']*100:.1f}%  "
-          f"PnL={best['metrics']['total_pnl_r']:+.2f}R  "
-          f"PF={best['metrics']['profit_factor']:.2f}")
+          f"Trades={bm['n_trades']}  "
+          f"WR={bm['win_rate']*100:.1f}%  "
+          f"PnL=${bm['total_pnl_dollars']:+,.0f}  "
+          f"PF={bm['profit_factor']:.2f}  "
+          f"Sharpe={bm['sharpe']:.3f}")
 
     # ── Write text results ────────────────────────────────────────────────────
     txt_path = out_dir / "test_fold_results.txt"
@@ -823,14 +1015,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     for r in results:
         lines.append(_data_row(r["name"], r["metrics"], r["score"]))
     lines += [sep, "", f"Best: {best['name']}  score={best['score']:.4f}"]
-    txt_path.write_text("\n".join(lines))
+    txt_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"\n  Results saved → {txt_path}")
 
     if PLOTLY_OK:
-        charts = list(out_dir.glob("*_test_chart.html"))
-        print(f"  Charts saved  → {out_dir} ({len(charts)} file(s))")
+        journals = list(out_dir.glob("*_journal.html"))
+        print(f"  Journals saved → {out_dir} ({len(journals)} file(s))")
     else:
-        print("  (Plotly not installed — no charts generated)")
+        print("  (Plotly not installed — no journals generated)")
 
 
 if __name__ == "__main__":

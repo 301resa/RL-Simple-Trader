@@ -17,6 +17,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Tuple
 
+# Allowed position sizes in contracts (micro / fractional lots)
+CONTRACT_TIERS: List[float] = [0.5, 1.0, 1.5, 2.0, 2.5]
+
+# Default confluence-score thresholds — one per tier boundary (n tiers = n-1 thresholds)
+DEFAULT_CONFLUENCE_THRESHOLDS: List[float] = [0.50, 0.65, 0.75, 0.85]
+
 
 class ExitReason(str, Enum):
     STOP_LOSS    = "stop_loss"
@@ -41,7 +47,7 @@ class Trade:
     exit_price: float
     stop_price: float
     initial_target: float
-    n_contracts: int
+    n_contracts: float          # fractional lots (0.5 increments)
     entry_bar_idx: int
     exit_bar_idx: int
     pnl_r: float
@@ -51,6 +57,7 @@ class Trade:
     exit_reason: ExitReason
     max_adverse_excursion: float = 0.0
     duration_bars: int = 0
+    confluence_score: float = 0.0   # score at entry time
 
 
 @dataclass
@@ -61,7 +68,7 @@ class PositionState:
     entry_price: float = 0.0
     stop_price: float = 0.0
     target_price: float = 0.0
-    n_contracts: int = 1
+    n_contracts: float = 0.5    # fractional lots
     entry_bar_idx: int = 0
     trailing_active: bool = False
     trailing_stop_price: float = 0.0
@@ -72,8 +79,10 @@ class PositionState:
     in_loss_streak_pause: bool = False
     max_drawdown_remaining: float = 3.0
     daily_pnl_r: float = 0.0
+    daily_pnl_dollars: float = 0.0
     initial_risk_pts: float = 0.0
     mae_pts: float = 0.0
+    confluence_score: float = 0.0
 
 
 class PositionManager:
@@ -118,19 +127,22 @@ class PositionManager:
         self,
         real_capital: float = 50000.0,
         risk_per_trade_pct: float = 0.01,
-        min_contracts: int = 1,
-        max_contracts: int = 3,
+        min_contracts: float = 0.5,
+        max_contracts: float = 2.5,
         point_value: float = 2.0,
         max_trades_per_day: int = 5,
         trail_activate_r: float = 1.2,
         trail_aggressive_r: float = 3.0,
         trail_lock_in_r: float = 1.1,
         max_daily_loss_r: float = 3.0,
+        max_daily_loss_dollars: float = 1000.0,
         max_drawdown_r: float = 5.0,
         loss_streak_threshold: int = 3,
         pause_bars_after_loss_streak: int = 6,
         zone_buffer_atr_pct: float = 0.03,
         trail_step_atr_pct: float = 0.25,
+        contract_tiers: Optional[List[float]] = None,
+        confluence_tier_thresholds: Optional[List[float]] = None,
     ) -> None:
         self.real_capital = real_capital
         self.risk_per_trade_pct = risk_per_trade_pct
@@ -142,11 +154,19 @@ class PositionManager:
         self.trail_aggressive_r = trail_aggressive_r
         self.trail_lock_in_r = trail_lock_in_r
         self.max_daily_loss_r = max_daily_loss_r
+        self.max_daily_loss_dollars = max_daily_loss_dollars
         self.max_drawdown_r = max_drawdown_r
         self.loss_streak_threshold = loss_streak_threshold
         self.pause_bars_after_loss_streak = pause_bars_after_loss_streak
         self.zone_buffer_atr_pct = zone_buffer_atr_pct
         self.trail_step_atr_pct = trail_step_atr_pct
+        self._contract_tiers: List[float] = sorted(
+            contract_tiers if contract_tiers else CONTRACT_TIERS
+        )
+        self._confluence_thresholds: List[float] = (
+            confluence_tier_thresholds if confluence_tier_thresholds
+            else DEFAULT_CONFLUENCE_THRESHOLDS
+        )
 
         self._state = PositionState(
             n_contracts=min_contracts,
@@ -172,6 +192,48 @@ class PositionManager:
         )
         self._completed_trades = []
 
+    def _size_by_confluence(
+        self,
+        stop_pts: float,
+        confluence_score: float,
+    ) -> float:
+        """
+        Return the number of contracts (from CONTRACT_TIERS) for this trade.
+
+        Two constraints are applied, and the smaller is taken:
+          1. Capital constraint: 1% of equity / (stop_pts × point_value)
+             — snapped DOWN to the nearest tier.
+          2. Confluence constraint: confluence score maps to the highest
+             allowed tier via the configured thresholds.
+        """
+        # Capital-based maximum (snap down to nearest tier that doesn't exceed risk)
+        risk_dollars = self.real_capital * self.risk_per_trade_pct
+        risk_per_contract = max(stop_pts * self.point_value, 1e-6)
+        raw_n = risk_dollars / risk_per_contract
+
+        # Find the highest tier that doesn't exceed raw_n
+        capital_tier = self._contract_tiers[0]
+        for t in self._contract_tiers:
+            if t <= raw_n:
+                capital_tier = t
+
+        # Confluence-based maximum
+        thresholds = self._confluence_thresholds
+        if confluence_score < thresholds[0]:
+            conf_tier = self._contract_tiers[0]
+        elif len(thresholds) >= 2 and confluence_score < thresholds[1]:
+            conf_tier = self._contract_tiers[min(1, len(self._contract_tiers) - 1)]
+        elif len(thresholds) >= 3 and confluence_score < thresholds[2]:
+            conf_tier = self._contract_tiers[min(2, len(self._contract_tiers) - 1)]
+        elif len(thresholds) >= 4 and confluence_score < thresholds[3]:
+            conf_tier = self._contract_tiers[min(3, len(self._contract_tiers) - 1)]
+        else:
+            conf_tier = self._contract_tiers[-1]
+
+        # Take the smaller of capital and confluence constraints
+        n = min(capital_tier, conf_tier)
+        return max(self._contract_tiers[0], min(self._contract_tiers[-1], n))
+
     def enter(
         self,
         direction: int,
@@ -180,6 +242,7 @@ class PositionManager:
         target_price: float,
         current_bar_idx: int,
         atr: float,
+        confluence_score: float = 1.0,
     ) -> Tuple[bool, str]:
         """
         Open a new position.
@@ -220,11 +283,8 @@ class PositionManager:
         if initial_risk <= 0:
             return False, "zero_risk"
 
-        # Dynamic position sizing: risk_per_trade_pct of capital
-        risk_dollars = self.real_capital * self.risk_per_trade_pct
-        risk_per_contract = initial_risk * self.point_value
-        n_contracts = int(risk_dollars / max(risk_per_contract, 1e-6))
-        n_contracts = max(self.min_contracts, min(self.max_contracts, n_contracts))
+        # Confluence-graded fractional sizing (0.5 increments, capital-capped)
+        n_contracts = self._size_by_confluence(initial_risk, confluence_score)
 
         pos_dir = PositionDirection.LONG if direction == 1 else PositionDirection.SHORT
 
@@ -239,6 +299,7 @@ class PositionManager:
         s.trailing_stop_price = stop_price
         s.initial_risk_pts = initial_risk
         s.mae_pts = 0.0
+        s.confluence_score = confluence_score
 
         return True, "ok"
 
@@ -373,26 +434,36 @@ class PositionManager:
         s.unrealised_pnl_r = unrealised_r
         active_stop = (s.trailing_stop_price if s.trailing_active else s.stop_price) if s.is_open else 0.0
         return {
-            "position_open": s.is_open,
-            "position_direction": s.direction.name,
-            "position_size": s.n_contracts if s.is_open else 0,
-            "entry_price": s.entry_price if s.is_open else 0.0,
-            "current_pnl_r": unrealised_r,
-            "stop_loss_price": active_stop,
-            "take_profit_price": s.target_price if s.is_open else 0.0,
+            "position_open":          s.is_open,
+            "position_direction":     s.direction.name,
+            "position_size":          s.n_contracts if s.is_open else 0,
+            "entry_price":            s.entry_price if s.is_open else 0.0,
+            "current_pnl_r":          unrealised_r,
+            "stop_loss_price":        active_stop,
+            "take_profit_price":      s.target_price if s.is_open else 0.0,
             "max_drawdown_remaining": s.max_drawdown_remaining,
-            "daily_pnl_r": s.daily_pnl_r,
-            "trades_today": s.trades_today,
-            "consecutive_losses": s.consecutive_losses,
+            "daily_pnl_r":            s.daily_pnl_r,
+            "daily_pnl_dollars":      s.daily_pnl_dollars,
+            "trades_today":           s.trades_today,
+            "consecutive_losses":     s.consecutive_losses,
         }
 
     def is_max_drawdown_breached(self, current_price: float) -> bool:
-        """Return True if total daily loss has reached the max drawdown limit."""
+        """Return True if either R or dollar daily loss limit is reached."""
         s = self._state
         unrealised_r = self._compute_pnl_r(current_price) if s.is_open else 0.0
-        # Total loss = realised losses + current unrealised loss (if negative)
-        total_loss = -(s.daily_pnl_r + min(0.0, unrealised_r))
-        return total_loss >= self.max_daily_loss_r
+        total_loss_r = -(s.daily_pnl_r + min(0.0, unrealised_r))
+        if total_loss_r >= self.max_daily_loss_r:
+            return True
+        # Dollar limit: realised + unrealised (if negative)
+        if s.is_open and s.initial_risk_pts > 0:
+            unrealised_usd = (
+                unrealised_r * s.initial_risk_pts * s.n_contracts * self.point_value
+            )
+        else:
+            unrealised_usd = 0.0
+        total_loss_usd = -(s.daily_pnl_dollars + min(0.0, unrealised_usd))
+        return total_loss_usd >= self.max_daily_loss_dollars
 
     # ── Private helpers ───────────────────────────────────────
 
@@ -436,10 +507,12 @@ class PositionManager:
             exit_reason=exit_reason,
             max_adverse_excursion=mae_r,
             duration_bars=current_bar_idx - s.entry_bar_idx,
+            confluence_score=s.confluence_score,
         )
 
         # Update session-level accounting
         s.daily_pnl_r += pnl_r
+        s.daily_pnl_dollars += pnl_dollars
         s.realised_pnl_r += pnl_r
         s.trades_today += 1
         s.max_drawdown_remaining = self.max_daily_loss_r + s.daily_pnl_r
@@ -460,6 +533,7 @@ class PositionManager:
         s.target_price = 0.0
         s.initial_risk_pts = 0.0
         s.mae_pts = 0.0
+        s.confluence_score = 0.0
 
         self._completed_trades.append(trade)
         return trade

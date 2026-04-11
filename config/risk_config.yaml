@@ -4,8 +4,12 @@
 
 sizing:
   risk_per_trade_pct: 0.01       # risk 1% of account per trade
-  min_contracts: 1
-  max_contracts: 3
+  min_contracts: 0.5             # fractional micro contracts allowed
+  max_contracts: 2.5
+  contract_tiers: [0.5, 1.0, 1.5, 2.0, 2.5]   # allowed position sizes
+  # Confluence score thresholds that gate each tier (4 thresholds → 5 tiers)
+  # score < t[0] → 0.5, < t[1] → 1.0, < t[2] → 1.5, < t[3] → 2.0, else → 2.5
+  confluence_tier_thresholds: [0.50, 0.65, 0.75, 0.85]
 
 stop_loss:
   method: zone_based             # stop placed just beyond zone boundary
@@ -28,7 +32,8 @@ atr_gate:
 
 daily_limits:
   max_daily_loss_r: 3.0          # stop trading after -3R on the day
-  max_trades_per_day: 999        # no hard cap — daily loss limit (-3R) is the natural brake
+  max_daily_loss_dollars: 1000.0 # hard $ cap (whichever limit triggers first)
+  max_trades_per_day: 999        # no hard cap — daily loss limit is the natural brake
   max_consecutive_losses_before_pause: 3
   pause_bars_after_loss_streak: 6  # bars to sit out after loss streak
 

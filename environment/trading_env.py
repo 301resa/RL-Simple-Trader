@@ -179,6 +179,10 @@ class TradingEnv(gym.Env):
         self._entry_order_zone_state: Optional[OrderZoneState] = None
         self._entry_atr_state: Optional[ATRState] = None
         self._peak_unrealised_r: float = 0.0
+        # Pending limit order (placed at zone midpoint, filled when price reaches it)
+        # Keys: direction, limit_price, stop_price, target_price,
+        #       confluence_score, placed_bar_idx
+        self._pending_order: Optional[Dict[str, Any]] = None
 
         # Define observation space eagerly using builder's known dimension
         self._obs_dim: int = observation_builder.obs_dim
@@ -305,6 +309,7 @@ class TradingEnv(gym.Env):
         self._entry_order_zone_state = None
         self._entry_atr_state = None
         self._peak_unrealised_r = 0.0
+        self._pending_order = None
 
         # ── Pre-compute all market feature states for every bar ───────────────
         # Market features depend only on price history — never on agent actions.
@@ -393,6 +398,12 @@ class TradingEnv(gym.Env):
         current_low   = float(current_bar["low"])
         atr_state     = self._current_atr_state
 
+        # ── Check pending limit order fill ────────────────────
+        # Done before action processing so the fill reward is computed this bar.
+        if self._pending_order is not None and not self.position_manager.state.is_open:
+            if self._check_pending_fill(current_high, current_low):
+                self._open_from_pending(current_bar_idx=self._current_step)
+
         # ── Validate action against mask ──────────────────────
         mask = self._compute_action_mask(atr_state)
         if mask[action] == 0.0:
@@ -413,11 +424,16 @@ class TradingEnv(gym.Env):
             self._peak_unrealised_r = unrealised_r
 
         if action == Action.ENTER_SHORT:
-            self._execute_entry(direction=-1, current_price=current_price, atr_state=atr_state)
+            # Cancel any pending, then place new pending limit at zone midpoint
+            self._pending_order = None
+            self._place_pending_order(direction=-1, current_price=current_price, atr_state=atr_state)
         elif action == Action.ENTER_LONG:
-            self._execute_entry(direction=1, current_price=current_price, atr_state=atr_state)
+            self._pending_order = None
+            self._place_pending_order(direction=1, current_price=current_price, atr_state=atr_state)
         elif action == Action.EXIT:
-            pass  # Handled in position_manager.update below
+            # Cancel pending order when flat, or close open position below
+            if not self.position_manager.state.is_open and self._pending_order is not None:
+                self._pending_order = None
 
         # ── Update position (check stops, targets, trail) ─────
         agent_wants_exit = (action == Action.EXIT)
@@ -492,6 +508,8 @@ class TradingEnv(gym.Env):
         # End of session
         self._current_step += 1
         if self._current_step >= self._n_steps:
+            # Cancel any unfilled pending orders
+            self._pending_order = None
             # Force close any open position at session end — reuse current_price
             if self.position_manager.state.is_open:
                 self.position_manager.force_close(current_price, self._current_step - 1, ExitReason.SESSION_END)
@@ -587,6 +605,7 @@ class TradingEnv(gym.Env):
             order_zone_state=order_zone_state,
             portfolio_state=portfolio_state,
             session_info=session_info,
+            pending_order=self._pending_order,
         )
 
         self._last_obs = obs
@@ -645,46 +664,98 @@ class TradingEnv(gym.Env):
             ),
         )
 
-    def _execute_entry(
+    def _place_pending_order(
         self, direction: int, current_price: float, atr_state: ATRState
     ) -> None:
-        """Compute stop/target and open position."""
+        """
+        Compute limit price (zone midpoint), stop, target and store a pending
+        limit order.  The order fills when price reaches the limit level on a
+        future bar.  If price has already reached the limit level this bar,
+        the order is stored and immediately checked in the same step's fill logic
+        (which already ran above).  Next-bar fill avoids look-ahead bias.
+        """
         from features.order_zone_engine import FIXED_STOP_BUFFER_PTS
-        zone_state = self._last_zone_state if hasattr(self, "_last_zone_state") else None
-        atr = atr_state.atr_daily
-
-        # Stop loss: fixed 1.5 pts beyond the zone boundary.
-        # Short: stop = zone top + 1.5 pts
-        # Long:  stop = zone bottom - 1.5 pts
-        # Fallback (no zone detected): ATR-based stop
-        if direction == -1 and zone_state and zone_state.nearest_supply:
-            stop_price = zone_state.nearest_supply.top + FIXED_STOP_BUFFER_PTS
-        elif direction == 1 and zone_state and zone_state.nearest_demand:
-            stop_price = zone_state.nearest_demand.bottom - FIXED_STOP_BUFFER_PTS
-        else:
-            # Fallback: ATR-based stop (no zone visible)
-            stop_price = current_price + (atr * 0.15 * direction * -1)
-
-        # Target: ATR remaining level
         from features.atr_calculator import ATRCalculator
-        target_price = ATRCalculator.compute_atr_target_price(current_price, direction, atr_state)
+
+        zone_state = self._last_zone_state if hasattr(self, "_last_zone_state") else None
+        oz_state   = self._last_order_zone_state if hasattr(self, "_last_order_zone_state") else None
+        confluence = oz_state.confluence_score if oz_state is not None else 1.0
+        atr        = atr_state.atr_daily
+
+        # Limit price = zone midpoint (50% into the zone)
+        # Stop = 1.5 pts beyond the far edge of the zone
+        if direction == -1 and zone_state and zone_state.nearest_supply:
+            zone       = zone_state.nearest_supply
+            limit_price = zone.midpoint
+            stop_price  = zone.top + FIXED_STOP_BUFFER_PTS
+        elif direction == 1 and zone_state and zone_state.nearest_demand:
+            zone        = zone_state.nearest_demand
+            limit_price = zone.midpoint
+            stop_price  = zone.bottom - FIXED_STOP_BUFFER_PTS
+        else:
+            # No zone: fall back to current price (immediate market fill next bar)
+            limit_price = current_price
+            stop_price  = current_price + (atr * 0.15 * direction * -1)
+
+        target_price = ATRCalculator.compute_atr_target_price(limit_price, direction, atr_state)
+
+        self._pending_order = {
+            "direction":       direction,
+            "limit_price":     limit_price,
+            "stop_price":      stop_price,
+            "target_price":    target_price,
+            "confluence_score": confluence,
+            "placed_bar_idx":  self._current_step,
+            "atr_state":       atr_state,
+        }
+        log.debug(
+            "Pending order placed",
+            direction="LONG" if direction == 1 else "SHORT",
+            limit_price=limit_price,
+        )
+
+    def _check_pending_fill(self, bar_high: float, bar_low: float) -> bool:
+        """Return True if the current bar's range touches the pending limit price."""
+        po = self._pending_order
+        if po is None:
+            return False
+        if po["direction"] == 1:    # LONG: price must dip to or below limit
+            return bar_low <= po["limit_price"]
+        else:                       # SHORT: price must rise to or above limit
+            return bar_high >= po["limit_price"]
+
+    def _open_from_pending(self, current_bar_idx: int) -> None:
+        """Open a position at the pending limit price and clear the pending order."""
+        po = self._pending_order
+        if po is None:
+            return
 
         success, reason = self.position_manager.enter(
-            direction=direction,
-            current_price=current_price,
-            stop_price=stop_price,
-            target_price=target_price,
-            current_bar_idx=self._current_step,
-            atr=atr,
+            direction=po["direction"],
+            current_price=po["limit_price"],   # fill at the limit price
+            stop_price=po["stop_price"],
+            target_price=po["target_price"],
+            current_bar_idx=current_bar_idx,
+            atr=po["atr_state"].atr_daily,
+            confluence_score=po["confluence_score"],
         )
 
         if success:
-            # Capture entry-time state for trade close reward
-            self._entry_order_zone_state = self._last_order_zone_state if hasattr(self, "_last_order_zone_state") else None
-            self._entry_atr_state = atr_state
+            self._entry_order_zone_state = (
+                self._last_order_zone_state
+                if hasattr(self, "_last_order_zone_state") else None
+            )
+            self._entry_atr_state = po["atr_state"]
             self._peak_unrealised_r = 0.0
+            log.debug(
+                "Pending order filled",
+                direction="LONG" if po["direction"] == 1 else "SHORT",
+                fill_price=po["limit_price"],
+            )
         else:
-            log.debug("Entry rejected by PositionManager", reason=reason)
+            log.debug("Pending order fill rejected by PositionManager", reason=reason)
+
+        self._pending_order = None
 
     def _sample_episode_day(self) -> str:
         """Sample a trading day, applying curriculum filter if set."""

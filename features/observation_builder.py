@@ -109,6 +109,7 @@ class ObservationBuilder:
         portfolio_state: dict,
         session_info: dict,
         liquidity_state=None,   # kept for API compatibility — ignored
+        pending_order: dict | None = None,
     ) -> np.ndarray:
         """
         Build and return the observation vector for the current bar.
@@ -207,6 +208,17 @@ class ObservationBuilder:
         # ── 4. Order zone / confluence features ──────────────
         # Pillar 2 (liquidity sweep) removed — LSTM learns sweep context from raw price.
         # Pillar 3 (rejection candle) removed — 3 features kept as zeros.
+        # Pending order features — reuse the 3 slots previously occupied by
+        # the removed rejection-candle features (obs_dim stays at 28 fixed).
+        po_active    = 0.0
+        po_direction = 0.0   # 1.0 = pending long, -1.0 = pending short
+        po_dist_norm = 0.0   # normalised distance: (limit - current) / atr
+        if pending_order is not None:
+            po_active    = 1.0
+            po_direction = float(pending_order["direction"])   # 1 or -1
+            dist = (pending_order["limit_price"] - current_close) * pending_order["direction"]
+            po_dist_norm = float(np.clip(dist / max(atr, 1.0), -1.0, 1.0))
+
         features.extend([
             float(np.clip(order_zone_state.confluence_score, 0.0, 1.0)),
             float(order_zone_state.in_bearish_order_zone),
@@ -215,9 +227,9 @@ class ObservationBuilder:
             float(order_zone_state.zone_type.value == "bullish"),
             float(np.clip(order_zone_state.rr_ratio / 10.0, 0.0, 1.0)),
             float(order_zone_state.trade_worthwhile),
-            0.0,   # rc.detected   — removed
-            0.0,   # rc.strength   — removed
-            0.5,   # rc_dir_norm   — removed (neutral value)
+            po_active,       # pending order active flag
+            po_direction,    # pending direction: +1 long, -1 short, 0 none
+            po_dist_norm,    # how far price is from the limit level (ATR-normalised)
         ])
 
         # ── 5. Portfolio state ────────────────────────────────

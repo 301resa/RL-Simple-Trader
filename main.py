@@ -221,18 +221,21 @@ def build_components(configs: dict, data_dir: str):
         return PositionManager(
             real_capital=real_capital,
             risk_per_trade_pct=sizing_cfg.get("risk_per_trade_pct", 0.01),
-            min_contracts=sizing_cfg.get("min_contracts", 1),
-            max_contracts=sizing_cfg.get("max_contracts", 3),
+            min_contracts=sizing_cfg.get("min_contracts", 0.5),
+            max_contracts=sizing_cfg.get("max_contracts", 2.5),
             point_value=point_value,
             max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
             trail_activate_r=trail_cfg.get("activate_at_r", 2.0),
             trail_aggressive_r=trail_cfg.get("trail_aggressively_at_r", 4.0),
             trail_lock_in_r=trail_cfg.get("lock_in_r_at_trail", 2.0),
             max_daily_loss_r=daily_lim_cfg.get("max_daily_loss_r", 3.0),
+            max_daily_loss_dollars=daily_lim_cfg.get("max_daily_loss_dollars", 1000.0),
             max_drawdown_r=5.0,
             pause_bars_after_loss_streak=daily_lim_cfg.get("pause_bars_after_loss_streak", 6),
             loss_streak_threshold=daily_lim_cfg.get("max_consecutive_losses_before_pause", 3),
             zone_buffer_atr_pct=risk_cfg.get("stop_loss", {}).get("zone_buffer_atr_pct", 0.03),
+            contract_tiers=sizing_cfg.get("contract_tiers"),
+            confluence_tier_thresholds=sizing_cfg.get("confluence_tier_thresholds"),
         )
 
     # ── Reward Calculator ─────────────────────────────────────
@@ -788,18 +791,21 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         return PositionManager(
             real_capital=real_capital,
             risk_per_trade_pct=sizing_cfg.get("risk_per_trade_pct", 0.01),
-            min_contracts=sizing_cfg.get("min_contracts", 1),
-            max_contracts=sizing_cfg.get("max_contracts", 3),
+            min_contracts=sizing_cfg.get("min_contracts", 0.5),
+            max_contracts=sizing_cfg.get("max_contracts", 2.5),
             point_value=point_value,
             max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
             trail_activate_r=trail_cfg.get("activate_at_r", 2.0),
             trail_aggressive_r=trail_cfg.get("trail_aggressively_at_r", 4.0),
             trail_lock_in_r=trail_cfg.get("lock_in_r_at_trail", 2.0),
             max_daily_loss_r=daily_lim_cfg.get("max_daily_loss_r", 3.0),
+            max_daily_loss_dollars=daily_lim_cfg.get("max_daily_loss_dollars", 1000.0),
             max_drawdown_r=5.0,
             pause_bars_after_loss_streak=daily_lim_cfg.get("pause_bars_after_loss_streak", 6),
             loss_streak_threshold=daily_lim_cfg.get("max_consecutive_losses_before_pause", 3),
             zone_buffer_atr_pct=risk_cfg.get("stop_loss", {}).get("zone_buffer_atr_pct", 0.03),
+            contract_tiers=sizing_cfg.get("contract_tiers"),
+            confluence_tier_thresholds=sizing_cfg.get("confluence_tier_thresholds"),
         )
 
     def make_env(day_list, is_eval=False, worker_seed_offset=0):

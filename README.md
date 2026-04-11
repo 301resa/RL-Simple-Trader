@@ -116,9 +116,27 @@ directly from raw price observations.
 - Minimum confluence score: **0.35** (configurable in `features_config.yaml`)
 - Minimum R:R ratio: **1.5:1** before an entry is allowed
 
+### Pending Limit Order Entry
+
+When the agent decides to enter, it places a **pending limit order at the 50% midpoint
+of the detected zone** (i.e. `zone.midpoint = (top + bottom) / 2`), rather than entering
+at market. The order fills only when price trades at or through that level on a future bar.
+
+- **LONG**: fills when `bar.low ≤ zone_demand_midpoint`
+- **SHORT**: fills when `bar.high ≥ zone_supply_midpoint`
+- **Cancellation**: all pending orders are cancelled automatically at session end, or
+  when the agent places a new entry signal in any direction (cancel-and-replace).
+- **Agent EXIT action** while flat also cancels any open pending order.
+- If no zone is detected, the limit falls back to the current price (immediate fill on the next bar).
+
+The three observation slots previously reserved for the removed rejection-candle features
+are now used for pending order context: `pending_active`, `pending_direction`, `pending_dist_norm`
+(distance from current price to limit level, ATR-normalised). Observation dimension is unchanged.
+
 ### Stop Loss
 
-Stop placed **1.5 fixed points** beyond the zone boundary (not ATR-based).
+Stop placed **1.5 fixed points** beyond the zone boundary (not ATR-based), measured from
+the far edge of the zone (not the entry midpoint).
 Stop widening is **never** allowed once placed.
 
 ### Take Profit
@@ -138,9 +156,24 @@ as the natural first profit objective.
 
 ### Risk Per Trade
 
-- 1% of account equity per trade
-- 1–3 contracts (sized by account and stop distance)
-- Daily loss limit: **−3R** → stops trading for the day
+- **1% of account equity** per trade (capital-based sizing)
+- **Fractional contract sizes**: `[0.5, 1.0, 1.5, 2.0, 2.5]` — snapped to the largest
+  tier that doesn't exceed the 1% capital risk
+- **Confluence-graded sizing**: the confluence score gates the maximum allowed tier:
+
+  | Confluence Score | Max Contracts |
+  |-----------------|---------------|
+  | < 0.50          | 0.5           |
+  | 0.50 – 0.65     | 1.0           |
+  | 0.65 – 0.75     | 1.5           |
+  | 0.75 – 0.85     | 2.0           |
+  | ≥ 0.85          | 2.5           |
+
+  Final size = `min(capital_tier, confluence_tier)` — never exceeds 1% risk.
+
+- **Dual daily loss limit**: stops trading when **either** limit is reached:
+  - **−3R** on the day, OR
+  - **−$1,000** on the day (configurable via `max_daily_loss_dollars` in `risk_config.yaml`)
 
 ---
 
@@ -271,12 +304,19 @@ metrics and log results without writing any model files (useful for exploration 
 - **Annualised Sharpe**: All Sharpe calculations use `mean(pnl_r) / std(pnl_r) × √252`
   consistently across training table, eval callback, and test_fold.
 
-- **Fixed stop buffer**: 1.5 points beyond zone boundary. Not ATR-relative — gives
-  precise, predictable risk definition on 5-min ES/NQ bars.
+- **Fixed stop buffer**: 1.5 points beyond zone boundary (from zone edge, not midpoint).
+  Not ATR-relative — gives precise, predictable risk definition on 5-min ES/NQ bars.
 
-- **No hard trade cap**: `max_trades_per_day: 999` — the −3R daily loss limit is the
-  natural brake. The reward's `hold_flat_penalty: −0.025/bar` forces the agent to seek
-  entries rather than sit idle.
+- **No hard trade cap**: `max_trades_per_day: 999` — the dual daily loss limit (−3R
+  or −$1,000) is the natural brake. The reward's `hold_flat_penalty: −0.025/bar` forces
+  the agent to seek entries rather than sit idle.
+
+- **Pending limit order entry**: agent places a limit at the zone midpoint (50% depth);
+  filled on the bar that trades through the limit price, cancelled at session end or on
+  a new entry signal. Avoids chasing price and improves average fill quality.
+
+- **Confluence-graded sizing**: position size scales from 0.5 to 2.5 contracts in 0.5
+  increments based on the confluence score, capped by the 1%-of-capital risk constraint.
 
 - **VecNormalize**: Normalises observations only (`norm_reward=False`). Stats are saved
   alongside every checkpoint so evaluation always uses matched normalisation.
