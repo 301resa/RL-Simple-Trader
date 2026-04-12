@@ -828,7 +828,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     trail_cfg   = risk_cfg.get("trailing", {})
     contracts_cfg = env_cfg.get("contracts", {}).get(instrument, {})
 
-    real_capital = float(account_cfg.get("initial_balance", 2500))
+    real_capital = float(account_cfg.get("initial_balance", 50000))
     point_value  = float(contracts_cfg.get("micro_point_value", 2.0))
 
     trend_classifier = TrendClassifier(

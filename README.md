@@ -118,25 +118,24 @@ directly from raw price observations.
 
 ### Pending Limit Order Entry
 
-When the agent decides to enter, it places a **pending limit order at the 50% midpoint
-of the detected zone** (i.e. `zone.midpoint = (top + bottom) / 2`), rather than entering
-at market. The order fills only when price trades at or through that level on a future bar.
+When the agent decides to enter, it places a **pending limit order at the zone edge**,
+rather than entering at market. This gives tighter risk and better average fill quality.
 
-- **LONG**: fills when `bar.low ≤ zone_demand_midpoint`
-- **SHORT**: fills when `bar.high ≥ zone_supply_midpoint`
+- **LONG**: limit at `zone_demand.bottom` — fills when `bar.low ≤ demand_bottom`
+- **SHORT**: limit at `zone_supply.top` — fills when `bar.high ≥ supply_top`
+- **Wide zone filter**: zones wider than **10 points** are skipped entirely — too wide to define precise risk.
 - **Cancellation**: all pending orders are cancelled automatically at session end, or
   when the agent places a new entry signal in any direction (cancel-and-replace).
 - **Agent EXIT action** while flat also cancels any open pending order.
 - If no zone is detected, the limit falls back to the current price (immediate fill on the next bar).
 
-The three observation slots previously reserved for the removed rejection-candle features
-are now used for pending order context: `pending_active`, `pending_direction`, `pending_dist_norm`
-(distance from current price to limit level, ATR-normalised). Observation dimension is unchanged.
+The observation vector includes pending order context: `pending_active`, `pending_direction`,
+`pending_dist_norm` (distance from current price to limit level, ATR-normalised).
 
 ### Stop Loss
 
 Stop placed **1.5 fixed points** beyond the zone boundary (not ATR-based), measured from
-the far edge of the zone (not the entry midpoint).
+the far edge of the zone.
 Stop widening is **never** allowed once placed.
 
 ### Take Profit
@@ -285,12 +284,15 @@ metrics and log results without writing any model files (useful for exploration 
 
 ## Key Design Decisions
 
-- **500-candle sliding window**: `lookback_bars: 500` — the last 500 bars of OHLCV
-  (log-returns + volume ratio) are included in every observation. The window shifts
-  forward one bar at each step. Prior-session bars fill the window from the start of
-  each episode so bar 0 never has zero-padding — the same 500-bar history context
-  used by the zone detector. The LSTM (256 units) additionally carries within-session
-  state across steps. Observation vector size: `500 × 5 + 28 = 2,528` features.
+- **60-candle sliding window + 11 engineered features**: `lookback_bars: 60` — the last
+  60 bars of OHLCV (log-returns + volume ratio) form the price block. An additional 11
+  engineered features replace the information previously carried by the 500-bar window:
+  price location (5: drift from session open/high/low, prior-day high/low), multi-timeframe
+  momentum (3: 5/15/30-bar log-returns), volatility regime (2: short/long vol ratio,
+  close-in-range), and bar character (1: body/range ratio). The zone detector continues
+  to use its own 500-bar history internally — this only controls the obs window.
+  Observation vector size: `60 × 5 + 28 + 11 = 339` features (~7× smaller than before).
+  The LSTM (256 units) carries within-session state across steps.
 
 - **OHLCV jitter augmentation** (`data/data_augmentor.py`): Applied to every training
   episode to prevent the agent memorising price-to-outcome mappings. Each bar receives
@@ -308,12 +310,14 @@ metrics and log results without writing any model files (useful for exploration 
   Not ATR-relative — gives precise, predictable risk definition on 5-min ES/NQ bars.
 
 - **No hard trade cap**: `max_trades_per_day: 999` — the dual daily loss limit (−3R
-  or −$1,000) is the natural brake. The reward's `hold_flat_penalty: −0.025/bar` forces
-  the agent to seek entries rather than sit idle.
+  or −$1,000) is the natural brake. The reward's `hold_flat_penalty` is applied
+  **only when a valid order zone setup is present** — the agent is penalised for
+  ignoring a good setup, not for patiently waiting when no setup exists.
 
-- **Pending limit order entry**: agent places a limit at the zone midpoint (50% depth);
-  filled on the bar that trades through the limit price, cancelled at session end or on
-  a new entry signal. Avoids chasing price and improves average fill quality.
+- **Pending limit order entry**: agent places a limit at the zone edge (demand bottom /
+  supply top); filled on the bar that trades through the limit price, cancelled at session
+  end or on a new entry signal. Zones wider than 10 points are skipped. Avoids chasing
+  price, tightens risk, and improves average fill quality.
 
 - **Confluence-graded sizing**: position size scales from 0.5 to 2.5 contracts in 0.5
   increments based on the confluence score, capped by the 1%-of-capital risk constraint.

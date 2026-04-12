@@ -47,7 +47,9 @@ account:
 observation:
   clip_observations: 10.0       # clip obs vector to [-N, N]
   normalize_observations: false # running normalisation (enable for production)
-  lookback_bars: 500            # sliding window of last 500 candles fed as raw OHLCV log-returns
+  lookback_bars: 60             # sliding window of recent candles fed as OHLCV log-returns
+                                # Zone detector still uses 500-bar history (zone_lookback_bars in
+                                # features_config.yaml) — this only controls the obs window.
 
 episode:
   early_termination_on_max_drawdown: true

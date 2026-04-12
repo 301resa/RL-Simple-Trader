@@ -205,9 +205,17 @@ class RewardCalculator:
         note = ""
 
         # ── Hold / WAIT penalty ───────────────────────────────
+        # Only penalise idling when a valid zone setup is present and the agent
+        # is ignoring it.  Waiting patiently when no setup exists is correct
+        # behaviour and should not be penalised.
         if action == 0 and not is_position_open:
-            step_penalty += self.hold_flat_penalty
-            note = "hold_flat"
+            setup_present = (
+                order_zone_state.in_bearish_order_zone
+                or order_zone_state.in_bullish_order_zone
+            )
+            if setup_present:
+                step_penalty += self.hold_flat_penalty
+                note = "hold_flat_in_zone"
 
         # ── Entry bonuses & penalties ─────────────────────────
         elif action in (1, 2):  # ENTER_SHORT or ENTER_LONG
