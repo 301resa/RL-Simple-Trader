@@ -5,19 +5,24 @@ Assembles the neural network observation vector from all feature states.
 
 The observation is a flat float32 numpy array containing:
   1. Recent OHLCV price history — 60-bar sliding window (log-returns + vol ratio)
-  2. ATR features (exhaustion, remaining room)
-  3. Zone features (distance to supply/demand, in-zone flags)
-  4. Order zone / confluence features (score, R:R, pending order state)
-  5. Portfolio state (position, P&L, drawdown, trade counts)
-  6. Session timing (fraction of session elapsed / remaining)
-  7. Engineered features — 11 pre-computed signals replacing raw 500-bar history:
+  2. ATR features (exhaustion, remaining room)                             [4]
+  3. Zone features (distance, in-zone, width, age — supply + demand)      [8]
+  4. Order zone / confluence features (score, R:R, pending order state)   [10]
+  5. Portfolio state (position, P&L, drawdown, trade counts)              [8]
+  6. Session timing + market context (elapsed, remaining, RTH flag, RTH time) [4]
+  7. Engineered features — 11 pre-computed signals:                       [11]
        Price location (5): session drift, dist from session high/low, prior day high/low
        Momentum (3): 5-bar, 15-bar, 30-bar log-returns
        Volatility regime (2): short/long vol ratio, avg close-in-range
        Bar character (1): avg candle body/range ratio
 
-Total fixed features: 28 + 11 = 39
-Observation vector size: 60 × 5 + 39 = 339
+Total fixed features: 34 + 11 = 45
+Observation vector size: 60 × 5 + 45 = 345
+
+Zone width/age features give the agent context on zone quality — tight fresh zones
+trade differently from wide stale ones.  Wide zones (>10 pts) are zeroed out in
+the order-zone observation so the agent never learns to chase untradeable signals.
+The RTH features let the agent distinguish pre-market drift from regular-hours structure.
 """
 
 from __future__ import annotations
@@ -31,8 +36,10 @@ from features.atr_calculator import ATRState
 from features.zone_detector import ZoneState
 from features.order_zone_engine import OrderZoneState
 
-# Number of engineered features appended after the 28 structured features
-_N_ENGINEERED = 11
+# Structured feature counts
+_N_STRUCTURED  = 34   # ATR(4) + Zone(8) + OrderZone(10) + Portfolio(8) + Session(4)
+_N_ENGINEERED  = 11   # PriceLocation(5) + Momentum(3) + VolRegime(2) + BarCharacter(1)
+_MAX_ZONE_WIDTH = 10.0  # zones wider than this are zeroed in obs (not tradeable)
 
 
 class ObservationBuilder:
@@ -71,14 +78,14 @@ class ObservationBuilder:
     def obs_dim(self) -> int:
         """Total length of the observation vector (deterministic from config).
 
-        Structured features (28):
-          ATR(4) + Zone(4) + OrderZone(10) + Portfolio(8) + Session(2)
+        Structured features (34):
+          ATR(4) + Zone(8) + OrderZone(10) + Portfolio(8) + Session(4)
         Engineered features (11):
           PriceLocation(5) + Momentum(3) + VolRegime(2) + BarCharacter(1)
         Price window:
           lookback_bars × 5 OHLCV log-returns
         """
-        return self.price_history_len * 5 + 28 + _N_ENGINEERED
+        return self.price_history_len * 5 + _N_STRUCTURED + _N_ENGINEERED
 
     def prepare_episode(self, bars: pd.DataFrame) -> None:
         """
@@ -207,12 +214,48 @@ class ObservationBuilder:
         ])
 
         # ── 3. Zone features ──────────────────────────────────────────────────
-        zone_dict = zone_state.as_feature_dict(current_close, atr)
+        # Wide zones (> _MAX_ZONE_WIDTH) are zeroed out — agent can't trade them.
+        # Zone width and age give quality context (tight fresh > wide stale).
+        _max_zone_age = 300.0  # matches max_zone_age_bars in features_config
+
+        supply = zone_state.nearest_supply if zone_state else None
+        demand = zone_state.nearest_demand if zone_state else None
+
+        # Zero wide-zone signals to prevent phantom setup confusion (B2)
+        if supply and (supply.top - supply.bottom) > _MAX_ZONE_WIDTH:
+            supply = None
+        if demand and (demand.top - demand.bottom) > _MAX_ZONE_WIDTH:
+            demand = None
+
+        def _dist_norm(z) -> float:
+            if z is None or not z.is_valid:
+                return 0.0
+            return float(np.clip(abs(current_close - z.midpoint) / max(atr, 1.0), 0.0, 5.0))
+
+        in_supply = 1.0 if (supply and supply.is_valid
+                            and supply.bottom <= current_close <= supply.top) else 0.0
+        in_demand = 1.0 if (demand and demand.is_valid
+                            and demand.bottom <= current_close <= demand.top) else 0.0
+
+        def _width_norm(z) -> float:
+            if z is None or not z.is_valid:
+                return 0.0
+            return float(np.clip((z.top - z.bottom) / max(atr, 1.0), 0.0, 2.0))
+
+        def _age_norm(z, current_idx: int) -> float:
+            if z is None or not z.is_valid:
+                return 1.0  # unknown age → treat as stale
+            return float(np.clip((current_idx - z.bar_formed_idx) / _max_zone_age, 0.0, 1.0))
+
         features.extend([
-            zone_dict["supply_zone_dist_norm"],
-            zone_dict["demand_zone_dist_norm"],
-            zone_dict["in_supply_zone"],
-            zone_dict["in_demand_zone"],
+            _dist_norm(supply),
+            _dist_norm(demand),
+            in_supply,
+            in_demand,
+            _width_norm(supply),    # B1: tight zone = smaller value = better
+            _width_norm(demand),
+            _age_norm(supply, current_bar_idx),   # B1: 0=fresh, 1=expired
+            _age_norm(demand, current_bar_idx),
         ])
 
         # ── 4. Order zone / confluence features ──────────────────────────────
@@ -251,10 +294,15 @@ class ObservationBuilder:
             float(np.clip(portfolio_state.get("consecutive_losses", 0)       /  3.0,  0.0, 1.0)),
         ])
 
-        # ── 6. Session timing ─────────────────────────────────────────────────
+        # ── 6. Session timing + market context ───────────────────────────────
+        # is_rth: 1 during Regular Trading Hours (09:30–16:00 ET), 0 in Globex/pre-market.
+        # rth_time_pct: 0→1 across the RTH session; 0 outside RTH.
+        # These let the agent distinguish pre-market range-building from RTH price action.
         features.extend([
             float(np.clip(session_info.get("session_time_pct",   0.5), 0.0, 1.0)),
             float(np.clip(session_info.get("bars_remaining_pct", 0.5), 0.0, 1.0)),
+            float(session_info.get("is_rth", 0.0)),
+            float(np.clip(session_info.get("rth_time_pct", 0.0), 0.0, 1.0)),
         ])
 
         # ── 7. Engineered features (11) ───────────────────────────────────────

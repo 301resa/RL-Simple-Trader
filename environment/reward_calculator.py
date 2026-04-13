@@ -177,8 +177,9 @@ class RewardCalculator:
         atr_state: ATRState,
         order_zone_state: OrderZoneState,
         portfolio_state: dict,
-        trend_snapshot=None,   # kept for API compatibility, unused
+        trend_snapshot=None,       # kept for API compatibility, unused
         min_rr_ratio: float = 2.0,
+        pending_order: dict | None = None,
     ) -> RewardBreakdown:
         """
         Compute the per-step reward (excluding trade close rewards).
@@ -197,6 +198,10 @@ class RewardCalculator:
         portfolio_state : dict
         min_rr_ratio : float
             Minimum acceptable R:R for bonus/penalty assessment.
+        pending_order : dict | None
+            Current pending limit order, if any.  When a pending order is
+            active, HOLD is the *correct* action (waiting for fill) and must
+            not be penalised.
         """
         reward = 0.0
         entry_bonus = 0.0
@@ -205,15 +210,15 @@ class RewardCalculator:
         note = ""
 
         # ── Hold / WAIT penalty ───────────────────────────────
-        # Only penalise idling when a valid zone setup is present and the agent
-        # is ignoring it.  Waiting patiently when no setup exists is correct
-        # behaviour and should not be penalised.
+        # Penalise idling ONLY when a valid zone setup is present AND no pending
+        # order is already waiting.  If a pending order is active the agent has
+        # already committed — HOLD is correct and must not be penalised.
         if action == 0 and not is_position_open:
             setup_present = (
                 order_zone_state.in_bearish_order_zone
                 or order_zone_state.in_bullish_order_zone
             )
-            if setup_present:
+            if setup_present and pending_order is None:
                 step_penalty += self.hold_flat_penalty
                 note = "hold_flat_in_zone"
 

@@ -216,7 +216,7 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
             "total_pnl_r": 0.0, "total_pnl_dollars": 0.0,
             "avg_win_r": 0.0, "avg_loss_r": 0.0,
             "avg_win_dollars": 0.0, "avg_loss_dollars": 0.0,
-            "profit_factor": 0.0, "sharpe": 0.0,
+            "profit_factor": 0.0, "profit_factor_usd": 0.0, "sharpe": 0.0,
             "max_dd_r": 0.0, "max_dd_dollars": 0.0,
             "avg_duration_min": 0.0,
         }
@@ -236,9 +236,17 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
     avg_loss   = float(abs(np.mean(losses_r))) if losses_r else 0.0
     avg_win_u  = float(np.mean(wins_u))   if wins_u   else 0.0
     avg_loss_u = float(abs(np.mean(losses_u))) if losses_u else 0.0
+    # R-based profit factor (kept for reference)
     gp = sum(wins_r)   if wins_r   else 0.0
     gl = abs(sum(losses_r)) if losses_r else 1e-9
     pf = gp / gl
+
+    # Dollar-based profit factor — accounts for position sizing variation.
+    # This is the honest metric: a high-confluence loss (large position) can
+    # make dollar PnL negative even when R-PF looks positive.
+    gp_u = sum(wins_u)         if wins_u   else 0.0
+    gl_u = abs(sum(losses_u))  if losses_u else 1e-9
+    pf_dollars = gp_u / gl_u
 
     # Sharpe: episode-level daily PnL std (annualised)
     ep_pnls = [ep.get("total_pnl_r", 0.0) for ep in episodes if ep]
@@ -259,45 +267,70 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
     avg_dur = float(np.mean([t.get("duration_min", 0) for t in trades]))
 
     return {
-        "n_trades":          n,
-        "win_rate":          round(win_rate,   4),
-        "total_pnl_r":       round(total_pnl,  4),
-        "total_pnl_dollars": round(total_usd,  2),
-        "avg_win_r":         round(avg_win,    4),
-        "avg_loss_r":        round(avg_loss,   4),
-        "avg_win_dollars":   round(avg_win_u,  2),
-        "avg_loss_dollars":  round(avg_loss_u, 2),
-        "profit_factor":     round(pf,         4),
-        "sharpe":            round(sharpe,     4),
-        "max_dd_r":          round(max_dd,     4),
-        "max_dd_dollars":    round(max_dd_u,   2),
-        "avg_duration_min":  round(avg_dur,    1),
+        "n_trades":           n,
+        "win_rate":           round(win_rate,    4),
+        "total_pnl_r":        round(total_pnl,   4),
+        "total_pnl_dollars":  round(total_usd,   2),
+        "avg_win_r":          round(avg_win,      4),
+        "avg_loss_r":         round(avg_loss,     4),
+        "avg_win_dollars":    round(avg_win_u,    2),
+        "avg_loss_dollars":   round(avg_loss_u,   2),
+        "profit_factor":      round(pf,           4),   # R-based (reference)
+        "profit_factor_usd":  round(pf_dollars,   4),   # dollar-based (primary)
+        "sharpe":             round(sharpe,        4),
+        "max_dd_r":           round(max_dd,        4),
+        "max_dd_dollars":     round(max_dd_u,      2),
+        "avg_duration_min":   round(avg_dur,       1),
     }
 
 
 def _composite(m: dict,
                w_sharpe: float = 0.30,
-               w_pnl: float = 0.25,
-               w_wl: float = 0.25,
+               w_pnl: float = 0.30,
+               w_wl: float = 0.20,
                w_dd: float = 0.20) -> float:
-    """Replicate training composite score for ranking."""
-    sharpe  = max(m["sharpe"],       0.0)
-    pnl     = max(m["total_pnl_r"],  0.0)
-    wl      = m["win_rate"] * (m["avg_win_r"] / max(m["avg_loss_r"], 1e-6))
-    dd      = m["max_dd_r"]
+    """
+    Composite ranking score — dollar-based primary metrics.
 
-    ref_sharpe = 1.5   # annualised Sharpe (*sqrt(252))
-    ref_pnl    = 20.0
-    ref_wl     = 3.0
-    ref_dd     = 5.0
+    Design:
+      - Uses dollar PF and dollar PnL as primary profit signals so that
+        position-size variation (confluence grading) is fully accounted for.
+      - Hard gates ensure losing models (negative dollar PnL, dollar PF < 1,
+        or fewer than 20 trades) always rank below every profitable model.
+      - Profitable models score in [0.1, 1.0]; losing models in [0.0, 0.099].
 
-    sn = min(sharpe / ref_sharpe, 1.0)
-    pn = min(pnl    / ref_pnl,    1.0)
-    wn = min(wl     / ref_wl,     1.0)
-    dn = min(dd     / ref_dd,     1.0)
+    Weights:  Sharpe 30% | PnL$ 30% | W/L ratio 20% | MaxDD 20%
+    """
+    # ── Hard gate 1: insufficient trades — no statistical validity ────────────
+    if m["n_trades"] < 20:
+        return round(m["n_trades"] / 200.0 * 0.05, 4)  # tiny score, sub-ranks by volume
+
+    # ── Hard gate 2: losing in dollars OR dollar PF < 1 ──────────────────────
+    if m["total_pnl_dollars"] <= 0.0 or m["profit_factor_usd"] < 1.0:
+        pf_sub = min(m["profit_factor_usd"], 1.0) * 0.05
+        return round(max(0.0, pf_sub), 4)
+
+    # ── Profitable models: full composite ─────────────────────────────────────
+    sharpe  = max(m["sharpe"], 0.0)
+    pnl_usd = m["total_pnl_dollars"]
+    # W/L ratio using dollar averages (accounts for sizing)
+    wl = m["win_rate"] * (m["avg_win_dollars"] / max(m["avg_loss_dollars"], 1e-6))
+    dd = m["max_dd_dollars"]
+
+    # Reference targets
+    ref_sharpe  = 1.5      # annualised Sharpe
+    ref_pnl_usd = 5000.0   # dollar PnL target over test period
+    ref_wl      = 3.0      # win_rate × avg_win$/avg_loss$ target
+    ref_dd_usd  = 3000.0   # max drawdown $ target
+
+    sn = min(sharpe   / ref_sharpe,  1.0)
+    pn = min(pnl_usd  / ref_pnl_usd, 1.0)
+    wn = min(wl       / ref_wl,      1.0)
+    dn = min(dd       / ref_dd_usd,  1.0)
 
     total_w = w_sharpe + w_pnl + w_wl + w_dd
-    return (w_sharpe * sn + w_pnl * pn + w_wl * wn + w_dd * (1.0 - dn)) / total_w
+    raw = (w_sharpe * sn + w_pnl * pn + w_wl * wn + w_dd * (1.0 - dn)) / total_w
+    return round(max(raw, 0.1), 4)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -309,7 +342,7 @@ _COL_W = {
     "trades":     6,
     "wr":         7,
     "pnl":       10,   # dollars: e.g. $-12,345
-    "pf":         6,
+    "pf_usd":     6,   # dollar-based PF (primary)
     "sharpe":     8,
     "dd":         9,   # dollars: e.g. $12,345
     "dur":        7,
@@ -322,7 +355,7 @@ def _header_row() -> str:
         f"{'Trades':>{_COL_W['trades']}}"
         f"{'WR%':>{_COL_W['wr']}}"
         f"{'PnL($)':>{_COL_W['pnl']}}"
-        f"{'PF':>{_COL_W['pf']}}"
+        f"{'$PF':>{_COL_W['pf_usd']}}"
         f"{'Sharpe':>{_COL_W['sharpe']}}"
         f"{'MaxDD($)':>{_COL_W['dd']}}"
         f"{'AvgMin':>{_COL_W['dur']}}"
@@ -339,7 +372,7 @@ def _data_row(name: str, m: dict, score: float) -> str:
         f"{m['n_trades']:>{_COL_W['trades']}}"
         f"{m['win_rate']*100:>{_COL_W['wr']}.1f}"
         f"{pnl_str:>{_COL_W['pnl']}}"
-        f"{m['profit_factor']:>{_COL_W['pf']}.2f}"
+        f"{m['profit_factor_usd']:>{_COL_W['pf_usd']}.2f}"
         f"{m['sharpe']:>{_COL_W['sharpe']}.3f}"
         f"{dd_str:>{_COL_W['dd']}}"
         f"{m['avg_duration_min']:>{_COL_W['dur']}.1f}"
@@ -587,7 +620,7 @@ def _build_journal(
         tile("W/L Ratio",    f"{wl_ratio:.2f}",                         "pos" if wl_ratio >= 1 else "neg"),
         tile("Total PnL",    f"${m['total_pnl_dollars']:+,.0f}",        pos),
         tile("PnL (R)",      f"{m['total_pnl_r']:+.2f}R",               pos),
-        tile("Profit Factor",f"{m['profit_factor']:.2f}",               "pos" if m['profit_factor'] >= 1 else "neg"),
+        tile("PF ($)",       f"{m['profit_factor_usd']:.2f}",            "pos" if m['profit_factor_usd'] >= 1 else "neg"),
         tile("Sharpe",       f"{m['sharpe']:.3f}",                      "pos" if m['sharpe'] >= 0 else "neg"),
         tile("Max DD",       f"${m['max_dd_dollars']:,.0f}",            "neg" if m['max_dd_dollars'] > 500 else "pos"),
         tile("Avg Win",      f"${m['avg_win_dollars']:,.0f}",           "pos"),
@@ -997,7 +1030,7 @@ def main(argv: Optional[List[str]] = None) -> None:
           f"Trades={bm['n_trades']}  "
           f"WR={bm['win_rate']*100:.1f}%  "
           f"PnL=${bm['total_pnl_dollars']:+,.0f}  "
-          f"PF={bm['profit_factor']:.2f}  "
+          f"$PF={bm['profit_factor_usd']:.2f}  "
           f"Sharpe={bm['sharpe']:.3f}")
 
     # ── Write text results ────────────────────────────────────────────────────

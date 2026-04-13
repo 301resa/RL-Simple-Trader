@@ -39,6 +39,11 @@ class Zone:
     is_valid: bool = True
     touches: int = 0
     bar_formed_idx: int = 0
+    # Extreme of the impulse bar that created this zone.
+    # For DEMAND zones: impulse_extreme = impulse bar high  → natural LONG target.
+    # For SUPPLY zones: impulse_extreme = impulse bar low   → natural SHORT target.
+    # Falls back to midpoint if not set (pre-existing zones / no-zone fallback).
+    impulse_extreme: float = 0.0
 
     @property
     def midpoint(self) -> float:
@@ -211,6 +216,10 @@ class ZoneDetector:
             return
 
         is_bearish = float(bar["close"]) < float(bar["open"])
+        # The impulse bar's extreme becomes the natural profit target:
+        #   bearish impulse (supply zone)  → short target = impulse bar LOW
+        #   bullish impulse (demand zone)  → long target  = impulse bar HIGH
+        impulse_extreme = float(bar["low"]) if is_bearish else float(bar["high"])
 
         for n in range(self.consolidation_min_bars, self.consolidation_max_bars + 1):
             start = impulse_idx - n
@@ -227,6 +236,7 @@ class ZoneDetector:
                 bottom=float(base["low"].min()),
                 zone_type=ZoneType.SUPPLY if is_bearish else ZoneType.DEMAND,
                 bar_formed_idx=impulse_idx,
+                impulse_extreme=impulse_extreme,
             )
             if is_bearish:
                 self._supply_zones.append(zone)
@@ -251,10 +261,17 @@ class ZoneDetector:
             self._demand_zones = [z for z in self._demand_zones if z.is_valid]
 
     def _build_state(self, current_price: float) -> ZoneState:
-        """Return the nearest valid supply and demand zones to current price."""
+        """Return the nearest valid supply and demand zones to current price.
+
+        Selection is edge-proximity based:
+        - Supply: zone whose *top* edge is closest to current price (SHORT entry
+          triggers at supply.top, so proximity at the top edge matters).
+        - Demand: zone whose *bottom* edge is closest to current price (LONG entry
+          triggers at demand.bottom).
+        """
         valid_supply = [z for z in self._supply_zones if z.is_valid]
         valid_demand = [z for z in self._demand_zones if z.is_valid]
         return ZoneState(
-            nearest_supply=min(valid_supply, key=lambda z: abs(z.midpoint - current_price), default=None),
-            nearest_demand=min(valid_demand, key=lambda z: abs(z.midpoint - current_price), default=None),
+            nearest_supply=min(valid_supply, key=lambda z: abs(z.top - current_price), default=None),
+            nearest_demand=min(valid_demand, key=lambda z: abs(z.bottom - current_price), default=None),
         )

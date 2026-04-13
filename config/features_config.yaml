@@ -3,9 +3,9 @@
 # Feature engineering parameters for all signal modules.
 
 atr:
-  period: 1                       # Wilder's ATR period (days)
-  exhaustion_threshold: 0.85       # directional move >= 85% ATR → block that direction only
-  danger_threshold: 0.85           # same threshold (warning = exhaustion)
+  period: 14                      # Wilder's ATR period (days) — 14-day smoothed range
+  exhaustion_threshold: 0.85      # directional move >= 85% ATR → block that direction only
+  danger_threshold: 0.85          # same threshold (warning = exhaustion)
 
 # Number of prior-session bars fed to zone detector on each reset.
 # At 5-min bars: 500 bars ≈ 40 hours ≈ 3–4 prior trading sessions.

@@ -44,6 +44,27 @@ from utils.logger import get_logger
 log = get_logger(__name__)
 
 
+_MAX_ZONE_WIDTH_ENV = 10.0  # matches observation_builder._MAX_ZONE_WIDTH
+
+
+def _filter_wide_zones(zs) -> object:
+    """
+    Return a ZoneState with wide zones (> _MAX_ZONE_WIDTH_ENV points) set to None.
+    Wide zones are never traded (skipped in _place_pending_order) so their signals
+    must not influence confluence scoring or observation features.
+    """
+    from features.zone_detector import ZoneState
+    supply = zs.nearest_supply if (
+        zs.nearest_supply is not None
+        and (zs.nearest_supply.top - zs.nearest_supply.bottom) <= _MAX_ZONE_WIDTH_ENV
+    ) else None
+    demand = zs.nearest_demand if (
+        zs.nearest_demand is not None
+        and (zs.nearest_demand.top - zs.nearest_demand.bottom) <= _MAX_ZONE_WIDTH_ENV
+    ) else None
+    return ZoneState(nearest_supply=supply, nearest_demand=demand)
+
+
 def _freeze_zone_state(zs) -> object:
     """
     Return a snapshot of a ZoneState whose Zone objects cannot be mutated
@@ -346,11 +367,13 @@ class TradingEnv(gym.Env):
                 atr_series=self._combined_atr_series,
                 current_bar_idx=combined_idx,
             )
+            # Filter wide zones before scoring — agent cannot trade them, so
+            # confluence scores must not reflect their presence.
             oz_s = self.order_zone_engine.compute(
                 bars=self._combined_bars,
                 current_bar_idx=combined_idx,
                 atr_state=atr_s,
-                zone_state=zone_s,
+                zone_state=_filter_wide_zones(zone_s),
                 trend_snapshot=None,
             )
             # Freeze ZoneState: Zone objects in the detector's lists are mutable
@@ -467,8 +490,9 @@ class TradingEnv(gym.Env):
                 is_position_open=self.position_manager.state.is_open,
                 atr_state=atr_state,
                 order_zone_state=order_zone_state,
-                trend_snapshot=None,   # trend removed
+                trend_snapshot=None,
                 portfolio_state=portfolio_state,
+                pending_order=self._pending_order,
             )
 
         # ── Check termination conditions ──────────────────────
@@ -590,9 +614,35 @@ class TradingEnv(gym.Env):
 
         portfolio_state = self.position_manager.get_portfolio_state(current_price)
 
+        # RTH context: tells the agent whether it is in Regular Trading Hours
+        # (09:30–16:00 ET) vs Globex/pre-market.  RTH price action is structurally
+        # different (higher volume, tighter spreads, cleaner zone reactions).
+        is_rth = 0.0
+        rth_time_pct = 0.0
+        try:
+            bar_ts = self._session_bars.index[step]
+            bar_time = bar_ts.time()
+            rth_s = pd.Timestamp(f"2000-01-01 {self.rth_start}").time()
+            rth_e = pd.Timestamp(f"2000-01-01 {self.rth_end}").time()
+            if rth_s <= bar_time <= rth_e:
+                is_rth = 1.0
+                rth_total_secs = (
+                    pd.Timestamp(f"2000-01-01 {self.rth_end}")
+                    - pd.Timestamp(f"2000-01-01 {self.rth_start}")
+                ).total_seconds()
+                elapsed_secs = (
+                    pd.Timestamp(f"2000-01-01 {bar_time}")
+                    - pd.Timestamp(f"2000-01-01 {self.rth_start}")
+                ).total_seconds()
+                rth_time_pct = float(np.clip(elapsed_secs / max(rth_total_secs, 1.0), 0.0, 1.0))
+        except Exception:
+            pass
+
         session_info = {
-            "session_time_pct": step / max(self._n_steps - 1, 1),
+            "session_time_pct":   step / max(self._n_steps - 1, 1),
             "bars_remaining_pct": (self._n_steps - 1 - step) / max(self._n_steps - 1, 1),
+            "is_rth":             is_rth,
+            "rth_time_pct":       rth_time_pct,
         }
 
         # Use the history-extended bar context for the price lookback window.
@@ -674,7 +724,7 @@ class TradingEnv(gym.Env):
         are skipped entirely.  The order fills when price reaches the limit level
         on a future bar; next-bar fill avoids look-ahead bias.
         """
-        from features.order_zone_engine import FIXED_STOP_BUFFER_PTS
+        from features.order_zone_engine import FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS
         from features.atr_calculator import ATRCalculator
 
         zone_state = self._last_zone_state if hasattr(self, "_last_zone_state") else None
@@ -682,30 +732,38 @@ class TradingEnv(gym.Env):
         confluence = oz_state.confluence_score if oz_state is not None else 1.0
         atr        = atr_state.atr_daily
 
-        # Limit price = zone edge: demand bottom for LONG, supply top for SHORT.
-        # Stop = 1.5 pts beyond the far edge of the zone.
-        # Wide zones (> 10 pts) are skipped — risk definition too loose.
+        # Limit = zone edge (tightest entry price).
+        # Stop  = zone-geometry aware: half_width + buffer, min MIN_STOP_PTS.
+        #         This makes 1R meaningful regardless of zone width, and matches
+        #         the stop_pts used in order_zone_engine for confluence/RR scoring.
+        # Wide zones (> 10 pts) are skipped — undefined risk.
         _MAX_ZONE_WIDTH = 10.0
         if direction == -1 and zone_state and zone_state.nearest_supply:
             zone = zone_state.nearest_supply
             if zone.top - zone.bottom > _MAX_ZONE_WIDTH:
                 log.debug("Pending order skipped — supply zone too wide", width=round(zone.top - zone.bottom, 2))
                 return
+            half_width  = (zone.top - zone.bottom) / 2.0
+            stop_dist   = max(half_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
             limit_price = zone.top
-            stop_price  = zone.top + FIXED_STOP_BUFFER_PTS
+            stop_price  = zone.top + stop_dist
         elif direction == 1 and zone_state and zone_state.nearest_demand:
             zone = zone_state.nearest_demand
             if zone.top - zone.bottom > _MAX_ZONE_WIDTH:
                 log.debug("Pending order skipped — demand zone too wide", width=round(zone.top - zone.bottom, 2))
                 return
+            half_width  = (zone.top - zone.bottom) / 2.0
+            stop_dist   = max(half_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
             limit_price = zone.bottom
-            stop_price  = zone.bottom - FIXED_STOP_BUFFER_PTS
+            stop_price  = zone.bottom - stop_dist
         else:
-            # No zone: fall back to current price (immediate market fill next bar)
+            # No zone: fall back to current price with ATR-based stop
+            stop_dist   = max(atr * 0.08, MIN_STOP_PTS)
             limit_price = current_price
-            stop_price  = current_price + (atr * 0.15 * direction * -1)
+            stop_price  = current_price - direction * stop_dist
 
-        target_price = ATRCalculator.compute_atr_target_price(limit_price, direction, atr_state)
+        # Target: use zone's impulse extreme if available, else ATR projection
+        target_price = self._compute_target_price(direction, limit_price, zone_state, atr_state)
 
         self._pending_order = {
             "direction":       direction,
@@ -764,6 +822,46 @@ class TradingEnv(gym.Env):
             log.debug("Pending order fill rejected by PositionManager", reason=reason)
 
         self._pending_order = None
+
+    def _compute_target_price(
+        self,
+        direction: int,
+        entry_price: float,
+        zone_state,
+        atr_state,
+    ) -> float:
+        """
+        Determine the take-profit target.
+
+        Priority:
+          1. Zone impulse extreme — the high of the bullish impulse bar (LONG target)
+             or the low of the bearish impulse bar (SHORT target).  This is the
+             natural swing level the market already reached once from this zone,
+             making it a realistic, strategy-faithful objective.
+          2. ATR projection fallback — used when no zone or impulse_extreme is 0.
+
+        The target is validated: for LONG it must be above entry; for SHORT below.
+        If the impulse extreme fails validation (e.g. zone formed from a small bar),
+        we fall back to the ATR projection.
+        """
+        from features.atr_calculator import ATRCalculator
+
+        zone = None
+        if direction == 1 and zone_state and zone_state.nearest_demand:
+            zone = zone_state.nearest_demand
+        elif direction == -1 and zone_state and zone_state.nearest_supply:
+            zone = zone_state.nearest_supply
+
+        if zone is not None and zone.impulse_extreme != 0.0:
+            extreme = zone.impulse_extreme
+            # Validate direction: LONG target must be above entry, SHORT below
+            if direction == 1 and extreme > entry_price:
+                return extreme
+            if direction == -1 and extreme < entry_price:
+                return extreme
+
+        # Fallback: ATR remaining projection
+        return ATRCalculator.compute_atr_target_price(entry_price, direction, atr_state)
 
     def _sample_episode_day(self) -> str:
         """Sample a trading day, applying curriculum filter if set."""

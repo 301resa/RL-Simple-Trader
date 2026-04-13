@@ -285,13 +285,15 @@ metrics and log results without writing any model files (useful for exploration 
 ## Key Design Decisions
 
 - **60-candle sliding window + 11 engineered features**: `lookback_bars: 60` — the last
-  60 bars of OHLCV (log-returns + volume ratio) form the price block. An additional 11
-  engineered features replace the information previously carried by the 500-bar window:
-  price location (5: drift from session open/high/low, prior-day high/low), multi-timeframe
-  momentum (3: 5/15/30-bar log-returns), volatility regime (2: short/long vol ratio,
-  close-in-range), and bar character (1: body/range ratio). The zone detector continues
-  to use its own 500-bar history internally — this only controls the obs window.
-  Observation vector size: `60 × 5 + 28 + 11 = 339` features (~7× smaller than before).
+  60 bars of OHLCV (log-returns + volume ratio) form the price block. Structured features
+  (34) cover: price location (5: drift from session open/high/low, prior-day high/low),
+  portfolio state (6: account metrics, position info), order zone signals (8: dist_norm×2,
+  in_zone×2, zone_width_norm×2, zone_age_norm×2), action mask (5), pending order context
+  (3), and session timing (4: session_time_pct, bars_remaining_pct, `is_rth`,
+  `rth_time_pct`). An additional 11 engineered price/volatility features complete the
+  vector. Wide zones (> 10 pts) are zeroed in all zone features before building the obs.
+  The zone detector uses its own 500-bar history internally — this only controls the obs
+  window. Observation vector size: `60 × 5 + 34 + 11 = 345` features.
   The LSTM (256 units) carries within-session state across steps.
 
 - **OHLCV jitter augmentation** (`data/data_augmentor.py`): Applied to every training
@@ -306,13 +308,16 @@ metrics and log results without writing any model files (useful for exploration 
 - **Annualised Sharpe**: All Sharpe calculations use `mean(pnl_r) / std(pnl_r) × √252`
   consistently across training table, eval callback, and test_fold.
 
-- **Fixed stop buffer**: 1.5 points beyond zone boundary (from zone edge, not midpoint).
-  Not ATR-relative — gives precise, predictable risk definition on 5-min ES/NQ bars.
+- **Zone-geometry-aware stop**: `stop_dist = max(half_zone_width + 1.5, MIN_STOP_PTS=3.0)`.
+  The stop sits 1.5 points beyond the far edge of the zone, with a minimum distance of
+  3.0 points. Wider zones get proportionally wider stops so that 1R remains meaningful
+  relative to the zone structure, preventing inflated R multiples on tight setups.
 
 - **No hard trade cap**: `max_trades_per_day: 999` — the dual daily loss limit (−3R
   or −$1,000) is the natural brake. The reward's `hold_flat_penalty` is applied
-  **only when a valid order zone setup is present** — the agent is penalised for
-  ignoring a good setup, not for patiently waiting when no setup exists.
+  **only when a valid order zone setup is present AND no pending order is already active**
+  — the agent is penalised for ignoring a good setup, not for patiently waiting when
+  no setup exists or correctly waiting for a pending limit to fill.
 
 - **Pending limit order entry**: agent places a limit at the zone edge (demand bottom /
   supply top); filled on the bar that trades through the limit price, cancelled at session
@@ -324,6 +329,25 @@ metrics and log results without writing any model files (useful for exploration 
 
 - **VecNormalize**: Normalises observations only (`norm_reward=False`). Stats are saved
   alongside every checkpoint so evaluation always uses matched normalisation.
+
+- **ATR period**: 14-day Wilder's smoothed ATR (corrected from 1-day). Single-day range
+  was too noisy as an entry gate; 14-day smoothing gives a stable measure of recent
+  daily range for the ATR exhaustion filter and stop/target sizing.
+
+- **Zone selection by edge proximity**: `_build_state()` selects the supply zone whose
+  `top` edge is nearest to current price (SHORT limit placed at supply.top), and the
+  demand zone whose `bottom` edge is nearest (LONG limit placed at demand.bottom).
+  Previously used midpoint distance, which could miss tighter edge setups.
+
+- **Impulse-extreme take-profit**: each detected zone stores the `impulse_extreme` — the
+  actual high (supply) or low (demand) of the impulse bar that confirmed the zone. This
+  swing extreme is used as the primary take-profit target, replacing the ATR-projection
+  approximation. Falls back to ATR projection only when `impulse_extreme` is absent.
+
+- **Dollar-based Profit Factor** (`profit_factor_usd`): `test_fold` scoring uses
+  gross-profit-dollars / gross-loss-dollars as the primary metric. R-based PF can show
+  positive values (e.g. 1.27) on a net-negative dollar run when confluence-graded sizing
+  puts larger positions on losing trades. Dollar PF correctly reflects actual P&L.
 
 - **Performance optimisations** (applied to hot paths):
   - `ATRCalculator.get_atr_for_date()`: O(n) pandas filter → O(log n) `bisect` on sorted list.

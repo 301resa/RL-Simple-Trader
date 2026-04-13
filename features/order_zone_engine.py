@@ -28,8 +28,9 @@ from features.atr_calculator import ATRState
 from features.zone_detector import ZoneState, ZoneType
 from features.trend_classifier import TrendSnapshot
 
-# Fixed stop buffer in points (placed beyond zone boundary)
-FIXED_STOP_BUFFER_PTS: float = 1.5
+# Stop placement constants
+FIXED_STOP_BUFFER_PTS: float = 1.5   # buffer beyond zone edge
+MIN_STOP_PTS: float = 3.0            # floor so 1R is never trivially small
 
 
 class OrderZoneType(Enum):
@@ -140,9 +141,11 @@ class OrderZoneEngine:
                 if s.bottom - atr * 0.05 <= current_price <= s.top + atr * 0.05:
                     in_supply = True
                     zone_score_bearish = 1.0
-                    # Stop: zone top + 1.5 pts (fixed buffer)
-                    stop_pts_bearish = (s.top - current_price) + FIXED_STOP_BUFFER_PTS
-                    stop_pts_bearish = max(stop_pts_bearish, FIXED_STOP_BUFFER_PTS)
+                    # Stop is zone-geometry based: half-width + buffer, floored at MIN_STOP_PTS.
+                    # Entry is at zone.top (edge); stop goes above zone.top by half_width+buffer
+                    # so that 1R reflects the actual zone's significance, not just a 1.5-pt tick.
+                    half_width = (s.top - s.bottom) / 2.0
+                    stop_pts_bearish = max(half_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
                 else:
                     prox = max(0.0, 1.0 - abs(current_price - s.midpoint) / max(atr, 1.0))
                     zone_score_bearish = prox * 0.5
@@ -152,9 +155,10 @@ class OrderZoneEngine:
                 if d.bottom - atr * 0.05 <= current_price <= d.top + atr * 0.05:
                     in_demand = True
                     zone_score_bullish = 1.0
-                    # Stop: zone bottom - 1.5 pts (fixed buffer)
-                    stop_pts_bullish = (current_price - d.bottom) + FIXED_STOP_BUFFER_PTS
-                    stop_pts_bullish = max(stop_pts_bullish, FIXED_STOP_BUFFER_PTS)
+                    # Stop is zone-geometry based: half-width + buffer, floored at MIN_STOP_PTS.
+                    # Entry is at zone.bottom (edge); stop goes below zone.bottom by half_width+buffer.
+                    half_width = (d.top - d.bottom) / 2.0
+                    stop_pts_bullish = max(half_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
                 else:
                     prox = max(0.0, 1.0 - abs(current_price - d.midpoint) / max(atr, 1.0))
                     zone_score_bullish = prox * 0.5
