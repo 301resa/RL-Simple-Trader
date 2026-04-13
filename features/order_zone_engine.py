@@ -118,12 +118,16 @@ class OrderZoneEngine:
         zone_state: Optional[ZoneState],
         liquidity_state=None,          # kept for API compatibility — ignored
         trend_snapshot: Optional[TrendSnapshot] = None,  # kept for API compatibility — ignored
+        current_price: Optional[float] = None,  # pass directly to skip bars.iloc lookup
     ) -> OrderZoneState:
         """
         Score the current setup and return an OrderZoneState.
+
+        Pass ``current_price`` directly to avoid a bars.iloc[current_bar_idx]
+        lookup — the caller usually already has this value.
         """
-        bar = bars.iloc[current_bar_idx]
-        current_price = float(bar["close"])
+        if current_price is None:
+            current_price = float(bars.iloc[current_bar_idx]["close"])
         atr = atr_state.atr_daily
 
         # ── 1. Zone proximity / membership ───────────────────────────────────

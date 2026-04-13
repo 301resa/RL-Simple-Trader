@@ -356,6 +356,16 @@ class TradingEnv(gym.Env):
         # Cache per-episode numpy arrays in the observation builder (once per reset)
         self.observation_builder.prepare_episode(self._combined_bars)
 
+        # Pre-extract numpy arrays from the combined bars once per episode.
+        # Passing these to zone_detector avoids repeated pandas .iloc row access
+        # inside the precompute loop (~50x faster than pandas in a tight Python loop).
+        _np_open  = self._combined_bars["open"].to_numpy()
+        _np_high  = self._combined_bars["high"].to_numpy()
+        _np_low   = self._combined_bars["low"].to_numpy()
+        _np_close = self._combined_bars["close"].to_numpy()
+        _np_atr   = self._combined_atr_series.to_numpy() if self._combined_atr_series is not None else None
+        self.zone_detector.set_bars_numpy(_np_open, _np_high, _np_low, _np_close, _np_atr)
+
         self._precomputed_states: list = []
         for bar_idx in range(self._n_steps):
             atr_s = atr_states[bar_idx] if bar_idx < len(atr_states) else atr_states[-1]
@@ -369,12 +379,14 @@ class TradingEnv(gym.Env):
             )
             # Filter wide zones before scoring — agent cannot trade them, so
             # confluence scores must not reflect their presence.
+            current_price = float(_np_close[combined_idx])
             oz_s = self.order_zone_engine.compute(
                 bars=self._combined_bars,
                 current_bar_idx=combined_idx,
                 atr_state=atr_s,
                 zone_state=_filter_wide_zones(zone_s),
                 trend_snapshot=None,
+                current_price=current_price,
             )
             # Freeze ZoneState: Zone objects in the detector's lists are mutable
             # and will be updated by future bars — snapshot them cheaply with

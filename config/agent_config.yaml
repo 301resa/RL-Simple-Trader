@@ -13,9 +13,9 @@ device: auto          # "auto", "cpu", or "cuda"
 ppo:
   learning_rate: 3.0e-4
   learning_rate_schedule: linear   # "linear", "cosine", or "constant"
-  n_steps: 512                     # rollout buffer size — 512×16 envs×2528 obs ≈ 80 MB
-  batch_size: 64                   # mini-batch size (must be <= n_steps); stable LSTM steps
-  n_epochs: 10                     # gradient update epochs per rollout
+  n_steps: 2048                    # rollout buffer per env — larger rollout amortises reset overhead
+  batch_size: 256                  # mini-batch (must divide n_steps); larger = better GPU utilisation
+  n_epochs: 6                      # gradient passes per rollout (fewer = faster; 6 balances quality/speed)
   gamma: 0.99                      # discount factor
   gae_lambda: 0.95                 # GAE lambda
   clip_range: 0.2                  # PPO clip range

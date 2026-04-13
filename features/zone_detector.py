@@ -130,11 +130,43 @@ class ZoneDetector:
         self._demand_zones: List[Zone] = []
         self._last_scanned_idx: int = -1
 
+        # Numpy array cache — set via set_bars_numpy() before the precompute loop.
+        # Using numpy indexing instead of pandas .iloc is ~50x faster in tight loops.
+        self._np_open:  Optional[np.ndarray] = None
+        self._np_high:  Optional[np.ndarray] = None
+        self._np_low:   Optional[np.ndarray] = None
+        self._np_close: Optional[np.ndarray] = None
+        self._np_atr:   Optional[np.ndarray] = None
+
     def reset(self) -> None:
         """Reset zone lists for a new episode."""
         self._supply_zones = []
         self._demand_zones = []
         self._last_scanned_idx = -1
+        # Numpy cache is invalidated each episode — caller must call set_bars_numpy()
+        # again after reset() if they want fast path for the new episode's bars.
+        self._np_open = self._np_high = self._np_low = self._np_close = self._np_atr = None
+
+    def set_bars_numpy(
+        self,
+        open_arr: np.ndarray,
+        high_arr: np.ndarray,
+        low_arr: np.ndarray,
+        close_arr: np.ndarray,
+        atr_arr: Optional[np.ndarray] = None,
+    ) -> None:
+        """
+        Cache numpy arrays extracted from the bars DataFrame.
+
+        Call this once per episode (after reset) with the combined-bars arrays
+        so that _try_detect_zone and scan_and_update use direct array indexing
+        instead of pandas .iloc row access (~50x faster in tight loops).
+        """
+        self._np_open  = open_arr
+        self._np_high  = high_arr
+        self._np_low   = low_arr
+        self._np_close = close_arr
+        self._np_atr   = atr_arr
 
     def scan_and_update(
         self,
@@ -148,8 +180,12 @@ class ZoneDetector:
 
         No lookahead — only bars up to current_bar_idx are used.
         """
-        current_price = float(bars.iloc[current_bar_idx]["close"])
-        atr = float(atr_series.iloc[current_bar_idx]) if atr_series is not None else 100.0
+        if self._np_close is not None:
+            current_price = float(self._np_close[current_bar_idx])
+            atr = float(self._np_atr[current_bar_idx]) if self._np_atr is not None else 100.0
+        else:
+            current_price = float(bars.iloc[current_bar_idx]["close"])
+            atr = float(atr_series.iloc[current_bar_idx]) if atr_series is not None else 100.0
 
         for i in range(max(0, self._last_scanned_idx + 1), current_bar_idx + 1):
             self._try_detect_zone(bars, atr_series, i)
@@ -206,6 +242,46 @@ class ZoneDetector:
         if impulse_idx < self.consolidation_min_bars:
             return
 
+        # Use numpy cache if available (set via set_bars_numpy) — ~50x faster than
+        # pandas .iloc in tight loops.
+        if self._np_close is not None:
+            atr = float(self._np_atr[impulse_idx]) if self._np_atr is not None else 100.0
+            if atr <= 0:
+                return
+            close_i = float(self._np_close[impulse_idx])
+            open_i  = float(self._np_open[impulse_idx])
+            body = abs(close_i - open_i)
+            if body < atr * self.impulse_min_body_atr_pct:
+                return
+            is_bearish = close_i < open_i
+            impulse_extreme = float(self._np_low[impulse_idx]) if is_bearish else float(self._np_high[impulse_idx])
+
+            for n in range(self.consolidation_min_bars, self.consolidation_max_bars + 1):
+                start = impulse_idx - n
+                if start < 0:
+                    break
+                base_high_max = float(self._np_high[start:impulse_idx].max())
+                base_low_min  = float(self._np_low[start:impulse_idx].min())
+                base_range = base_high_max - base_low_min
+                if base_range > atr * self.consolidation_range_atr_pct:
+                    break
+                zone = Zone(
+                    top=base_high_max,
+                    bottom=base_low_min,
+                    zone_type=ZoneType.SUPPLY if is_bearish else ZoneType.DEMAND,
+                    bar_formed_idx=impulse_idx,
+                    impulse_extreme=impulse_extreme,
+                )
+                if is_bearish:
+                    self._supply_zones.append(zone)
+                    self._prune(self._supply_zones)
+                else:
+                    self._demand_zones.append(zone)
+                    self._prune(self._demand_zones)
+                return
+            return  # no consolidation window found
+
+        # ── Pandas fallback (used when numpy cache is not set) ────────────────
         atr = float(atr_series.iloc[impulse_idx]) if atr_series is not None else 100.0
         if atr <= 0:
             return
