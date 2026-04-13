@@ -86,6 +86,7 @@ def build_components(
     data_dir: str,
     train_start: str | None = None,
     train_end: str | None = None,
+    val_weeks: int = 5,
 ):
     """
     Instantiate all components from config.
@@ -147,23 +148,50 @@ def build_components(
         and atr_calculator.get_atr_for_date(d) is not None  # ATR warmup complete
     ]
 
-    # Optional date-range clip (--train-start / --train-end)
-    if train_start:
-        trading_days = [d for d in trading_days if d >= train_start]
+    # ── Train/val/test split ──────────────────────────────────
+    # Date-based split: when --train-start/--train-end are provided the user
+    # defines the exact training window.  Val is the next val_weeks*5 trading
+    # days after train_end; test is everything that follows.
+    # Fallback: fixed-count split (252 train, 26 val) using the full day pool.
+    n_val_days = val_weeks * 5
+
     if train_end:
-        trading_days = [d for d in trading_days if d <= train_end]
+        # Clip pool start when requested
+        pool = [d for d in trading_days if (not train_start or d >= train_start)]
+        train_days_list = [d for d in pool if d <= train_end]
+        post_train      = [d for d in pool if d >  train_end]
+        val_days_list   = post_train[:n_val_days]
+        test_days_list  = post_train[n_val_days:]
 
-    log.info(
-        "Valid trading days after filtering",
-        total=len(all_days),
-        valid=len(trading_days),
-        date_range=f"{trading_days[0]} → {trading_days[-1]}" if trading_days else "empty",
-    )
+        if not train_days_list:
+            raise ValueError(
+                f"No trading days found in train window "
+                f"[{train_start or 'start'} → {train_end}]. "
+                f"Check --train-start / --train-end and your CSV date range."
+            )
+        if not val_days_list:
+            raise ValueError(
+                f"No trading days available for validation after {train_end}. "
+                f"Extend --train-end or reduce --val-weeks."
+            )
+        if not test_days_list:
+            log.warning(
+                "No test days after validation window — test set is empty.",
+                val_end=val_days_list[-1],
+            )
 
-    # Fixed-count chronological split: 252 trading days (~12 months) train,
-    # 26 days (~5 weeks) validation, remainder held out as test.
-    # No lookahead — val/test data is strictly after all training dates.
-    split = DataSplitter.split_by_counts(trading_days, n_train=252, n_val=26)
+        from data.data_splitter import DataSplit
+        split = DataSplit(
+            train=train_days_list,
+            validation=val_days_list,
+            test=test_days_list,
+        )
+    else:
+        # Legacy fixed-count split: first 252 days train, next 26 val, rest test
+        if train_start:
+            trading_days = [d for d in trading_days if d >= train_start]
+        split = DataSplitter.split_by_counts(trading_days, n_train=252, n_val=n_val_days)
+
     log.info(
         "Data split",
         train_days=len(split.train),
@@ -171,6 +199,7 @@ def build_components(
         test_days=len(split.test),
         train_range=f"{split.train[0]} → {split.train[-1]}",
         val_range=f"{split.validation[0]} → {split.validation[-1]}",
+        test_range=f"{split.test[0]} → {split.test[-1]}" if split.test else "none",
     )
 
     # ── Zone Detector ─────────────────────────────────────────
@@ -454,7 +483,12 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
 
     log.info("Mode: TRAIN")
 
-    c = build_components(configs, args.data, train_start=args.train_start, train_end=args.train_end)
+    c = build_components(
+        configs, args.data,
+        train_start=args.train_start,
+        train_end=args.train_end,
+        val_weeks=args.val_weeks,
+    )
 
     agent_cfg = configs["agent"]
     ppo_cfg = agent_cfg.get("ppo", {})
@@ -577,7 +611,12 @@ def run_evaluate(args: argparse.Namespace, configs: dict) -> None:
         sys.exit(1)
 
     log.info("Mode: EVALUATE", checkpoint=args.checkpoint)
-    c = build_components(configs, args.data, train_start=args.train_start, train_end=args.train_end)
+    c = build_components(
+        configs, args.data,
+        train_start=args.train_start,
+        train_end=args.train_end,
+        val_weeks=args.val_weeks,
+    )
 
     # Load VecNormalize stats so the agent receives the same scaled observations
     # it was trained with.  The filename depends on which checkpoint is loaded:
@@ -700,7 +739,8 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     train_months   = int(wf_cfg.get("train_months", 12))
     val_weeks      = int(wf_cfg.get("val_weeks", 5))
     n_train_days   = train_months * 21      # approx trading days per month
-    n_val_days     = val_weeks * 5          # approx trading days per week
+    # CLI --val-weeks overrides the config value when provided
+    n_val_days     = getattr(args, "val_weeks", val_weeks) * 5
     output_root    = Path(wf_cfg.get("output_dir", "logs/walk_forward"))
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -751,7 +791,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         trading_days = [d for d in trading_days if d <= args.train_end]
 
     log.info(
-        "Valid trading days",
+        "Valid trading days for walk-forward pool",
         total=len(trading_days),
         date_range=f"{trading_days[0]} → {trading_days[-1]}" if trading_days else "empty",
     )
@@ -1114,8 +1154,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         dest="train_end",
         metavar="YYYY-MM-DD",
-        help="Latest date to include in the day pool (inclusive). "
-             "Filters all modes — train, evaluate, walk_forward.",
+        help="Last date of the training window (inclusive). When provided together "
+             "with --train-start, the splitter uses exact date boundaries instead of "
+             "fixed day counts. Val is the next --val-weeks trading days; test follows.",
+    )
+    parser.add_argument(
+        "--val-weeks",
+        default=5,
+        type=int,
+        dest="val_weeks",
+        metavar="N",
+        help="Number of weeks (× 5 trading days) allocated to validation. Default: 5.",
     )
     return parser.parse_args()
 
