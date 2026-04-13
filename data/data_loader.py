@@ -199,6 +199,9 @@ class DataLoader:
         """Read raw CSV — no date parsing yet, just load strings."""
         df = pd.read_csv(path, dtype=str)
         df.columns = df.columns.str.strip()  # remove any accidental whitespace
+        # NinjaTrader exports 'Last' instead of 'Close' — normalise before column check
+        if "Last" in df.columns and "Close" not in df.columns:
+            df = df.rename(columns={"Last": "Close"})
         return df
 
     def _process(self, raw: pd.DataFrame) -> pd.DataFrame:
