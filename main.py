@@ -81,7 +81,12 @@ def load_configs(config_dir: str) -> dict:
 
 # ── Factory functions (wire components together) ──────────────────────────────
 
-def build_components(configs: dict, data_dir: str):
+def build_components(
+    configs: dict,
+    data_dir: str,
+    train_start: str | None = None,
+    train_end: str | None = None,
+):
     """
     Instantiate all components from config.
 
@@ -141,7 +146,19 @@ def build_components(configs: dict, data_dir: str):
         if _pd.Timestamp(d).weekday() < 5                  # Mon–Fri only
         and atr_calculator.get_atr_for_date(d) is not None  # ATR warmup complete
     ]
-    log.info("Valid trading days after filtering", total=len(all_days), valid=len(trading_days))
+
+    # Optional date-range clip (--train-start / --train-end)
+    if train_start:
+        trading_days = [d for d in trading_days if d >= train_start]
+    if train_end:
+        trading_days = [d for d in trading_days if d <= train_end]
+
+    log.info(
+        "Valid trading days after filtering",
+        total=len(all_days),
+        valid=len(trading_days),
+        date_range=f"{trading_days[0]} → {trading_days[-1]}" if trading_days else "empty",
+    )
 
     # Fixed-count chronological split: 252 trading days (~12 months) train,
     # 26 days (~5 weeks) validation, remainder held out as test.
@@ -437,7 +454,7 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
 
     log.info("Mode: TRAIN")
 
-    c = build_components(configs, args.data)
+    c = build_components(configs, args.data, train_start=args.train_start, train_end=args.train_end)
 
     agent_cfg = configs["agent"]
     ppo_cfg = agent_cfg.get("ppo", {})
@@ -560,7 +577,7 @@ def run_evaluate(args: argparse.Namespace, configs: dict) -> None:
         sys.exit(1)
 
     log.info("Mode: EVALUATE", checkpoint=args.checkpoint)
-    c = build_components(configs, args.data)
+    c = build_components(configs, args.data, train_start=args.train_start, train_end=args.train_end)
 
     # Load VecNormalize stats so the agent receives the same scaled observations
     # it was trained with.  The filename depends on which checkpoint is loaded:
@@ -726,7 +743,18 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         if _pd.Timestamp(d).weekday() < 5
         and atr_calculator.get_atr_for_date(d) is not None
     ]
-    log.info("Valid trading days", total=len(trading_days))
+
+    # Optional date-range clip (--train-start / --train-end)
+    if getattr(args, "train_start", None):
+        trading_days = [d for d in trading_days if d >= args.train_start]
+    if getattr(args, "train_end", None):
+        trading_days = [d for d in trading_days if d <= args.train_end]
+
+    log.info(
+        "Valid trading days",
+        total=len(trading_days),
+        date_range=f"{trading_days[0]} → {trading_days[-1]}" if trading_days else "empty",
+    )
 
     # ── Build walk-forward folds ──────────────────────────────
     folds = DataSplitter.walk_forward_splits(
@@ -1072,6 +1100,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         dest="no_clean",
         help="Skip wiping output dirs at run start (use when resuming from --checkpoint).",
+    )
+    parser.add_argument(
+        "--train-start",
+        default=None,
+        dest="train_start",
+        metavar="YYYY-MM-DD",
+        help="Earliest date to include in the day pool (inclusive). "
+             "Filters all modes — train, evaluate, walk_forward.",
+    )
+    parser.add_argument(
+        "--train-end",
+        default=None,
+        dest="train_end",
+        metavar="YYYY-MM-DD",
+        help="Latest date to include in the day pool (inclusive). "
+             "Filters all modes — train, evaluate, walk_forward.",
     )
     return parser.parse_args()
 
