@@ -145,11 +145,10 @@ class OrderZoneEngine:
                 if s.bottom - atr * 0.05 <= current_price <= s.top + atr * 0.05:
                     in_supply = True
                     zone_score_bearish = 1.0
-                    # Stop is zone-geometry based: half-width + buffer, floored at MIN_STOP_PTS.
-                    # Entry is at zone.top (edge); stop goes above zone.top by half_width+buffer
-                    # so that 1R reflects the actual zone's significance, not just a 1.5-pt tick.
-                    half_width = (s.top - s.bottom) / 2.0
-                    stop_pts_bearish = max(half_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
+                    # Stop above entire zone: entry at zone.bottom, stop at zone.top + buffer.
+                    # stop_dist = zone_width + 1.5 pts, floored at MIN_STOP_PTS.
+                    zone_width = s.top - s.bottom
+                    stop_pts_bearish = max(zone_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
                 else:
                     prox = max(0.0, 1.0 - abs(current_price - s.midpoint) / max(atr, 1.0))
                     zone_score_bearish = prox * 0.5
@@ -159,10 +158,10 @@ class OrderZoneEngine:
                 if d.bottom - atr * 0.05 <= current_price <= d.top + atr * 0.05:
                     in_demand = True
                     zone_score_bullish = 1.0
-                    # Stop is zone-geometry based: half-width + buffer, floored at MIN_STOP_PTS.
-                    # Entry is at zone.bottom (edge); stop goes below zone.bottom by half_width+buffer.
-                    half_width = (d.top - d.bottom) / 2.0
-                    stop_pts_bullish = max(half_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
+                    # Stop below entire zone: entry at zone.top, stop at zone.bottom - buffer.
+                    # stop_dist = zone_width + 1.5 pts, floored at MIN_STOP_PTS.
+                    zone_width = d.top - d.bottom
+                    stop_pts_bullish = max(zone_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
                 else:
                     prox = max(0.0, 1.0 - abs(current_price - d.midpoint) / max(atr, 1.0))
                     zone_score_bullish = prox * 0.5

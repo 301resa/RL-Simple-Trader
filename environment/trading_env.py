@@ -731,10 +731,20 @@ class TradingEnv(gym.Env):
     ) -> None:
         """
         Compute limit price (zone edge), stop, target and store a pending limit
-        order.  Limit is placed at the demand zone bottom (LONG) or supply zone
-        top (SHORT) — the tightest edge of the zone.  Zones wider than 10 points
-        are skipped entirely.  The order fills when price reaches the limit level
-        on a future bar; next-bar fill avoids look-ahead bias.
+        order.
+
+        Entry geometry:
+          LONG  — limit at demand.top  (first touch of zone from above)
+          SHORT — limit at supply.bottom (first touch of zone from below)
+
+        Stop geometry:
+          LONG  — stop at demand.bottom - 1.5 pts  (below entire zone)
+          SHORT — stop at supply.top   + 1.5 pts  (above entire zone)
+          stop_dist = zone_width + 1.5, floored at MIN_STOP_PTS
+
+        Target: impulse_extreme (swing high/low of the bar that created the zone).
+
+        Zones wider than 10 points are skipped — undefined risk.
         """
         from features.order_zone_engine import FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS
         from features.atr_calculator import ATRCalculator
@@ -744,30 +754,25 @@ class TradingEnv(gym.Env):
         confluence = oz_state.confluence_score if oz_state is not None else 1.0
         atr        = atr_state.atr_daily
 
-        # Limit = zone edge (tightest entry price).
-        # Stop  = zone-geometry aware: half_width + buffer, min MIN_STOP_PTS.
-        #         This makes 1R meaningful regardless of zone width, and matches
-        #         the stop_pts used in order_zone_engine for confluence/RR scoring.
-        # Wide zones (> 10 pts) are skipped — undefined risk.
         _MAX_ZONE_WIDTH = 10.0
         if direction == -1 and zone_state and zone_state.nearest_supply:
             zone = zone_state.nearest_supply
             if zone.top - zone.bottom > _MAX_ZONE_WIDTH:
                 log.debug("Pending order skipped — supply zone too wide", width=round(zone.top - zone.bottom, 2))
                 return
-            half_width  = (zone.top - zone.bottom) / 2.0
-            stop_dist   = max(half_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
-            limit_price = zone.top
-            stop_price  = zone.top + stop_dist
+            zone_width  = zone.top - zone.bottom
+            stop_dist   = max(zone_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
+            limit_price = zone.bottom          # SHORT: enter at zone bottom (first touch from below)
+            stop_price  = zone.top + stop_dist  # stop above entire zone
         elif direction == 1 and zone_state and zone_state.nearest_demand:
             zone = zone_state.nearest_demand
             if zone.top - zone.bottom > _MAX_ZONE_WIDTH:
                 log.debug("Pending order skipped — demand zone too wide", width=round(zone.top - zone.bottom, 2))
                 return
-            half_width  = (zone.top - zone.bottom) / 2.0
-            stop_dist   = max(half_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
-            limit_price = zone.bottom
-            stop_price  = zone.bottom - stop_dist
+            zone_width  = zone.top - zone.bottom
+            stop_dist   = max(zone_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
+            limit_price = zone.top             # LONG: enter at zone top (first touch from above)
+            stop_price  = zone.bottom - stop_dist  # stop below entire zone
         else:
             # No zone: fall back to current price with ATR-based stop
             stop_dist   = max(atr * 0.08, MIN_STOP_PTS)
