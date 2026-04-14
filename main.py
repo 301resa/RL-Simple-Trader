@@ -491,7 +491,7 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
         configs, args.data,
         train_start=args.train_start,
         train_end=args.train_end,
-        val_weeks=args.val_weeks,
+        val_weeks=args.val_weeks if args.val_weeks is not None else 5,
     )
 
     agent_cfg = configs["agent"]
@@ -619,7 +619,7 @@ def run_evaluate(args: argparse.Namespace, configs: dict) -> None:
         configs, args.data,
         train_start=args.train_start,
         train_end=args.train_end,
-        val_weeks=args.val_weeks,
+        val_weeks=args.val_weeks if args.val_weeks is not None else 5,
     )
 
     # Load VecNormalize stats so the agent receives the same scaled observations
@@ -743,8 +743,9 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     train_months   = int(wf_cfg.get("train_months", 12))
     val_weeks      = int(wf_cfg.get("val_weeks", 5))
     n_train_days   = train_months * 21      # approx trading days per month
-    # CLI --val-weeks overrides the config value when provided
-    n_val_days     = getattr(args, "val_weeks", val_weeks) * 5
+    # CLI --val-weeks overrides config when explicitly passed; otherwise config wins.
+    _cli_val_weeks = getattr(args, "val_weeks", None)
+    n_val_days = (_cli_val_weeks if _cli_val_weeks is not None else val_weeks) * 5
     output_root    = Path(wf_cfg.get("output_dir", "logs/walk_forward"))
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -1190,11 +1191,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--val-weeks",
-        default=5,
+        default=None,
         type=int,
         dest="val_weeks",
         metavar="N",
-        help="Number of weeks (× 5 trading days) allocated to validation. Default: 5.",
+        help="Number of weeks (× 5 trading days) allocated to validation. Default: from agent_config.yaml walk_forward.val_weeks.",
     )
     return parser.parse_args()
 
