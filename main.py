@@ -14,6 +14,10 @@ Usage:
     python main.py --mode evaluate --config config/ --data data/ \\
                    --checkpoint logs/checkpoints/best_model.zip
 
+    # train on custom date range (e.g. for walk-forward fold)
+    python main.py --mode walk_forward --config config/ --data data/\\
+        --train-start 2021-01-02 --train-end 2025-12-31
+
     # Print journal analysis for a completed backtest
     python main.py --mode analyse --journal logs/journal/
 
@@ -797,18 +801,44 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     )
 
     # ── Build walk-forward folds ──────────────────────────────
-    folds = DataSplitter.walk_forward_splits(
-        trading_days,
-        n_train_days=n_train_days,
-        n_val_days=n_val_days,
-        n_folds=n_folds_cfg,
-    )
-    log.info(
-        "Walk-forward folds",
-        n_folds=len(folds),
-        n_train_days=n_train_days,
-        n_val_days=n_val_days,
-    )
+    # When --train-end is supplied the user wants to train on the FULL date range
+    # [train_start, train_end] as a single fold, with val immediately after.
+    # Rolling walk-forward is only used when no explicit end date is given.
+    train_end_arg = getattr(args, "train_end", None)
+    if train_end_arg:
+        all_days_pool = data_loader.get_trading_days()
+        all_trading = [
+            d for d in all_days_pool
+            if _pd.Timestamp(d).weekday() < 5
+            and atr_calculator.get_atr_for_date(d) is not None
+        ]
+        train_start_arg = getattr(args, "train_start", None)
+        train_fold = [d for d in all_trading
+                      if (not train_start_arg or d >= train_start_arg)
+                      and d <= train_end_arg]
+        post_train  = [d for d in all_trading if d > train_end_arg]
+        val_fold    = post_train[:n_val_days]
+        folds = [(train_fold, val_fold)]
+        log.info(
+            "Single fold from explicit date range",
+            train_days=len(train_fold),
+            val_days=len(val_fold),
+            train_range=f"{train_fold[0]} → {train_fold[-1]}" if train_fold else "empty",
+            val_range=f"{val_fold[0]} → {val_fold[-1]}" if val_fold else "empty",
+        )
+    else:
+        folds = DataSplitter.walk_forward_splits(
+            trading_days,
+            n_train_days=n_train_days,
+            n_val_days=n_val_days,
+            n_folds=n_folds_cfg,
+        )
+        log.info(
+            "Walk-forward folds",
+            n_folds=len(folds),
+            n_train_days=n_train_days,
+            n_val_days=n_val_days,
+        )
 
     # ── Shared component factories ────────────────────────────
     real_capital = float(account_cfg.get("initial_balance", 2500))
