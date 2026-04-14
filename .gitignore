@@ -21,6 +21,8 @@ logs/
 *.pkl
 
 # ── Data (large CSV — share separately) ──────────────────────
+data/*.csv
+data/*.bak
 
 
 # ── Jupyter ───────────────────────────────────────────────────
