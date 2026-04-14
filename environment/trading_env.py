@@ -733,18 +733,20 @@ class TradingEnv(gym.Env):
         Compute limit price (zone edge), stop, target and store a pending limit
         order.
 
-        Entry geometry:
-          LONG  — limit at demand.top  (first touch of zone from above)
-          SHORT — limit at supply.bottom (first touch of zone from below)
+        Entry geometry (sweep-based — order placed only AFTER liquidity has been swept):
+          SHORT — limit at supply.top   (re-entry as price drops back below sweep level)
+          LONG  — limit at demand.bottom (re-entry as price rallies back above sweep level)
 
         Stop geometry:
-          LONG  — stop at demand.bottom - 1.5 pts  (below entire zone)
-          SHORT — stop at supply.top   + 1.5 pts  (above entire zone)
-          stop_dist = zone_width + 1.5, floored at MIN_STOP_PTS
+          SHORT — stop at supply.top   + 1.5 pts  (just above sweep level)
+          LONG  — stop at demand.bottom - 1.5 pts (just below sweep level)
 
-        Target: impulse_extreme (swing high/low of the bar that created the zone).
+        Fill direction (reversed from initial approach):
+          LONG  — fills when bar_high >= limit_price (price rallied back up)
+          SHORT — fills when bar_low  <= limit_price (price dropped back down)
 
         Zones wider than 10 points are skipped — undefined risk.
+        Order is skipped if zone has not been swept yet.
         """
         from features.order_zone_engine import FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS
         from features.atr_calculator import ATRCalculator
@@ -757,22 +759,24 @@ class TradingEnv(gym.Env):
         _MAX_ZONE_WIDTH = 10.0
         if direction == -1 and zone_state and zone_state.nearest_supply:
             zone = zone_state.nearest_supply
+            if not zone.was_swept:
+                log.debug("Pending order skipped — supply zone not yet swept")
+                return
             if zone.top - zone.bottom > _MAX_ZONE_WIDTH:
                 log.debug("Pending order skipped — supply zone too wide", width=round(zone.top - zone.bottom, 2))
                 return
-            zone_width  = zone.top - zone.bottom
-            stop_dist   = max(zone_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
-            limit_price = zone.bottom          # SHORT: enter at zone bottom (first touch from below)
-            stop_price  = zone.top + stop_dist  # stop above entire zone
+            limit_price = zone.top                              # SHORT: re-entry as price drops back to zone.top
+            stop_price  = zone.top + FIXED_STOP_BUFFER_PTS     # stop just above sweep level
         elif direction == 1 and zone_state and zone_state.nearest_demand:
             zone = zone_state.nearest_demand
+            if not zone.was_swept:
+                log.debug("Pending order skipped — demand zone not yet swept")
+                return
             if zone.top - zone.bottom > _MAX_ZONE_WIDTH:
                 log.debug("Pending order skipped — demand zone too wide", width=round(zone.top - zone.bottom, 2))
                 return
-            zone_width  = zone.top - zone.bottom
-            stop_dist   = max(zone_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
-            limit_price = zone.top             # LONG: enter at zone top (first touch from above)
-            stop_price  = zone.bottom - stop_dist  # stop below entire zone
+            limit_price = zone.bottom                           # LONG: re-entry as price rallies back to zone.bottom
+            stop_price  = zone.bottom - FIXED_STOP_BUFFER_PTS  # stop just below sweep level
         else:
             # No zone: fall back to current price with ATR-based stop
             stop_dist   = max(atr * 0.08, MIN_STOP_PTS)
@@ -798,14 +802,19 @@ class TradingEnv(gym.Env):
         )
 
     def _check_pending_fill(self, bar_high: float, bar_low: float) -> bool:
-        """Return True if the current bar's range touches the pending limit price."""
+        """Return True if the current bar's range touches the pending limit price.
+
+        After a liquidity sweep the fill direction is the reverse of the approach:
+          LONG  — placed at demand.bottom; fills when price RALLIES back up to it.
+          SHORT — placed at supply.top;    fills when price DROPS back down to it.
+        """
         po = self._pending_order
         if po is None:
             return False
-        if po["direction"] == 1:    # LONG: price must dip to or below limit
-            return bar_low <= po["limit_price"]
-        else:                       # SHORT: price must rise to or above limit
+        if po["direction"] == 1:    # LONG: price rallied back up to demand.bottom
             return bar_high >= po["limit_price"]
+        else:                       # SHORT: price dropped back down to supply.top
+            return bar_low <= po["limit_price"]
 
     def _open_from_pending(self, current_bar_idx: int) -> None:
         """Open a position at the pending limit price and clear the pending order."""

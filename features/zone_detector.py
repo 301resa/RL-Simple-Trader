@@ -44,6 +44,11 @@ class Zone:
     # For SUPPLY zones: impulse_extreme = impulse bar low   → natural SHORT target.
     # Falls back to midpoint if not set (pre-existing zones / no-zone fallback).
     impulse_extreme: float = 0.0
+    # Liquidity sweep flag — True once price has traded through the zone's liquidity level.
+    # Supply: swept when price >= zone.top  (consolidation high is the liquidity level).
+    # Demand: swept when price <= zone.bottom (consolidation low is the liquidity level).
+    # Entry is only allowed after the sweep occurs and price re-enters the zone.
+    was_swept: bool = False
 
     @property
     def midpoint(self) -> float:
@@ -208,7 +213,12 @@ class ZoneDetector:
                 continue
             if current_bar_idx - zone.bar_formed_idx > self.max_zone_age_bars:
                 zone.is_valid = False
-            elif current_price > zone.top + buffer:       # bullish breakout above supply
+                continue
+            # Sweep detection: supply liquidity level = zone.top (consolidation high).
+            # Swept when price reaches or exceeds zone.top before a full breakout.
+            if not zone.was_swept and current_price >= zone.top:
+                zone.was_swept = True
+            if current_price > zone.top + buffer:       # sustained breakout — zone dead
                 zone.is_valid = False
             elif zone.bottom <= current_price <= zone.top:
                 zone.touches += 1
@@ -220,7 +230,12 @@ class ZoneDetector:
                 continue
             if current_bar_idx - zone.bar_formed_idx > self.max_zone_age_bars:
                 zone.is_valid = False
-            elif current_price < zone.bottom - buffer:    # bearish breakout below demand
+                continue
+            # Sweep detection: demand liquidity level = zone.bottom (consolidation low).
+            # Swept when price reaches or goes below zone.bottom before a full breakout.
+            if not zone.was_swept and current_price <= zone.bottom:
+                zone.was_swept = True
+            if current_price < zone.bottom - buffer:    # sustained breakout — zone dead
                 zone.is_valid = False
             elif zone.bottom <= current_price <= zone.top:
                 zone.touches += 1

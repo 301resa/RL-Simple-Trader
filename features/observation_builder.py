@@ -6,7 +6,7 @@ Assembles the neural network observation vector from all feature states.
 The observation is a flat float32 numpy array containing:
   1. Recent OHLCV price history — 60-bar sliding window (log-returns + vol ratio)
   2. ATR features (exhaustion, remaining room)                             [4]
-  3. Zone features (distance, in-zone, width, age — supply + demand)      [8]
+  3. Zone features (distance, in-zone, width, age, swept — supply+demand) [10]
   4. Order zone / confluence features (score, R:R, pending order state)   [10]
   5. Portfolio state (position, P&L, drawdown, trade counts)              [8]
   6. Session timing + market context (elapsed, remaining, RTH flag, RTH time) [4]
@@ -16,8 +16,8 @@ The observation is a flat float32 numpy array containing:
        Volatility regime (2): short/long vol ratio, avg close-in-range
        Bar character (1): avg candle body/range ratio
 
-Total fixed features: 34 + 11 = 45
-Observation vector size: 60 × 5 + 45 = 345
+Total fixed features: 36 + 11 = 47
+Observation vector size: 60 × 5 + 47 = 347
 
 Zone width/age features give the agent context on zone quality — tight fresh zones
 trade differently from wide stale ones.  Wide zones (>10 pts) are zeroed out in
@@ -37,7 +37,7 @@ from features.zone_detector import ZoneState
 from features.order_zone_engine import OrderZoneState
 
 # Structured feature counts
-_N_STRUCTURED  = 34   # ATR(4) + Zone(8) + OrderZone(10) + Portfolio(8) + Session(4)
+_N_STRUCTURED  = 36   # ATR(4) + Zone(10) + OrderZone(10) + Portfolio(8) + Session(4)
 _N_ENGINEERED  = 11   # PriceLocation(5) + Momentum(3) + VolRegime(2) + BarCharacter(1)
 _MAX_ZONE_WIDTH = 10.0  # zones wider than this are zeroed in obs (not tradeable)
 
@@ -78,8 +78,8 @@ class ObservationBuilder:
     def obs_dim(self) -> int:
         """Total length of the observation vector (deterministic from config).
 
-        Structured features (34):
-          ATR(4) + Zone(8) + OrderZone(10) + Portfolio(8) + Session(4)
+        Structured features (36):
+          ATR(4) + Zone(10) + OrderZone(10) + Portfolio(8) + Session(4)
         Engineered features (11):
           PriceLocation(5) + Momentum(3) + VolRegime(2) + BarCharacter(1)
         Price window:
@@ -247,6 +247,9 @@ class ObservationBuilder:
                 return 1.0  # unknown age → treat as stale
             return float(np.clip((current_idx - z.bar_formed_idx) / _max_zone_age, 0.0, 1.0))
 
+        supply_swept = 1.0 if (supply and supply.is_valid and supply.was_swept) else 0.0
+        demand_swept = 1.0 if (demand and demand.is_valid and demand.was_swept) else 0.0
+
         features.extend([
             _dist_norm(supply),
             _dist_norm(demand),
@@ -256,6 +259,8 @@ class ObservationBuilder:
             _width_norm(demand),
             _age_norm(supply, current_bar_idx),   # B1: 0=fresh, 1=expired
             _age_norm(demand, current_bar_idx),
+            supply_swept,           # 1.0 once price has swept supply zone.top
+            demand_swept,           # 1.0 once price has swept demand zone.bottom
         ])
 
         # ── 4. Order zone / confluence features ──────────────────────────────

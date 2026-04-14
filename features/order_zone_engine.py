@@ -145,10 +145,8 @@ class OrderZoneEngine:
                 if s.bottom - atr * 0.05 <= current_price <= s.top + atr * 0.05:
                     in_supply = True
                     zone_score_bearish = 1.0
-                    # Stop above entire zone: entry at zone.bottom, stop at zone.top + buffer.
-                    # stop_dist = zone_width + 1.5 pts, floored at MIN_STOP_PTS.
-                    zone_width = s.top - s.bottom
-                    stop_pts_bearish = max(zone_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
+                    # Entry at zone.top (after sweep re-entry), stop 1.5 pts above zone.top.
+                    stop_pts_bearish = max(FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
                 else:
                     prox = max(0.0, 1.0 - abs(current_price - s.midpoint) / max(atr, 1.0))
                     zone_score_bearish = prox * 0.5
@@ -158,10 +156,8 @@ class OrderZoneEngine:
                 if d.bottom - atr * 0.05 <= current_price <= d.top + atr * 0.05:
                     in_demand = True
                     zone_score_bullish = 1.0
-                    # Stop below entire zone: entry at zone.top, stop at zone.bottom - buffer.
-                    # stop_dist = zone_width + 1.5 pts, floored at MIN_STOP_PTS.
-                    zone_width = d.top - d.bottom
-                    stop_pts_bullish = max(zone_width + FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
+                    # Entry at zone.bottom (after sweep re-entry), stop 1.5 pts below zone.bottom.
+                    stop_pts_bullish = max(FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
                 else:
                     prox = max(0.0, 1.0 - abs(current_price - d.midpoint) / max(atr, 1.0))
                     zone_score_bullish = prox * 0.5

@@ -58,7 +58,7 @@ R1/
 ├── features/
 │   ├── order_zone_engine.py         # Order Zone confluence score: zone (90%) + ATR room (10%)
 │   ├── zone_detector.py             # Supply/Demand zone detection (consolidation + impulse)
-│   ├── liquidity_detector.py        # Retained file — sweep logic no longer used in pipeline
+│   ├── liquidity_detector.py        # Retained for reference — sweep detection now in zone_detector.py
 │   ├── trend_classifier.py          # HH/HL/LH/LL trend structure
 │   ├── atr_calculator.py            # ATR (daily) — gates entries and sizes stops
 │   └── observation_builder.py       # Builds flat observation vector for the LSTM
@@ -110,19 +110,22 @@ A trade is only entered when the **zone pillar** is present. Weighted factors:
 | Supply/Demand Zone | 90% | Price is inside a valid consolidation-then-impulse zone |
 | ATR Room | 10% | Directional ATR move < 85% of daily ATR in the entry direction |
 
-The liquidity sweep pillar has been removed. The LSTM learns sweep context
-directly from raw price observations.
+A **liquidity sweep** is required before any entry is placed. Price must first
+trade through the zone's liquidity level (supply: `zone.top`; demand: `zone.bottom`),
+then re-enter the order block — only then is a pending limit placed.
 
 - Minimum confluence score: **0.55** (configurable in `features_config.yaml`)
 - Minimum R:R ratio: **1.5:1** before an entry is allowed
 
 ### Pending Limit Order Entry
 
-When the agent decides to enter, it places a **pending limit order at the near edge of the zone**
-— the first price level the zone touches as price approaches from outside.
+Entry requires a **liquidity sweep** first. The zone's liquidity level must be traded through
+(supply: price ≥ `zone.top`; demand: price ≤ `zone.bottom`) before any order is placed.
+Once swept, a limit is placed at the sweep level to catch the re-entry into the order block:
 
-- **LONG**: limit at `demand.top` — fills when `bar.low ≤ demand_top` (price dips into zone top)
-- **SHORT**: limit at `supply.bottom` — fills when `bar.high ≥ supply_bottom` (price pops into zone bottom)
+- **LONG**: limit at `demand.bottom` — fills when `bar.high ≥ demand.bottom` (price rallies back up)
+- **SHORT**: limit at `supply.top` — fills when `bar.low ≤ supply.top` (price drops back down)
+- **Sweep gate**: orders are skipped if `zone.was_swept == False` — no order until liquidity taken.
 - **Wide zone filter**: zones wider than **10 points** are skipped entirely.
 - **Cancellation**: all pending orders are cancelled automatically at session end, or
   when the agent places a new entry signal in any direction (cancel-and-replace).
@@ -131,16 +134,16 @@ When the agent decides to enter, it places a **pending limit order at the near e
 
 The observation vector includes pending order context: `pending_active`, `pending_direction`,
 `pending_dist_norm` (distance from current price to limit level, ATR-normalised).
+Zone features also include `supply_swept` and `demand_swept` binary flags.
 
 ### Stop Loss
 
-Stop placed **1.5 points beyond the far edge of the zone** — the entire zone body acts as
-the risk boundary. If price breaks through the whole zone the thesis is invalidated.
+Stop placed **1.5 points beyond the sweep level** — the level that was just taken as
+liquidity. If price continues through that level after filling, the thesis is invalidated.
 
 ```
-LONG:  stop = demand.bottom − 1.5 pts    stop_dist = zone_width + 1.5
-SHORT: stop = supply.top   + 1.5 pts    stop_dist = zone_width + 1.5
-                                         (floor: 3.0 pts minimum)
+LONG:  stop = demand.bottom − 1.5 pts   (just below the swept low)
+SHORT: stop = supply.top   + 1.5 pts    (just above the swept high)
 ```
 
 Stop widening is **never** allowed once placed.
@@ -300,7 +303,8 @@ metrics and log results without writing any model files (useful for exploration 
   `rth_time_pct`). An additional 11 engineered price/volatility features complete the
   vector. Wide zones (> 10 pts) are zeroed in all zone features before building the obs.
   The zone detector uses its own 500-bar history internally — this only controls the obs
-  window. Observation vector size: `60 × 5 + 34 + 11 = 345` features.
+  window. Zone features now include `supply_swept` and `demand_swept` binary flags (+2).
+  Observation vector size: `60 × 5 + 36 + 11 = 347` features.
   The LSTM (256 units) carries within-session state across steps.
 
 - **OHLCV jitter augmentation** (`data/data_augmentor.py`): Applied to every training
@@ -315,11 +319,10 @@ metrics and log results without writing any model files (useful for exploration 
 - **Annualised Sharpe**: All Sharpe calculations use `mean(pnl_r) / std(pnl_r) × √252`
   consistently across training table, eval callback, and test_fold.
 
-- **Full-zone stop**: `stop_dist = max(zone_width + 1.5, 3.0 pts)`. Entry is at the near
-  edge (demand.top / supply.bottom); stop is 1.5 points beyond the far edge (demand.bottom /
-  supply.top). The entire zone body must be violated before the stop fires — a partial
-  probe into the zone does not stop out the trade. Wider zones naturally carry a wider stop,
-  keeping 1R proportional to zone significance.
+- **Sweep-based stop**: `stop = sweep_level ± 1.5 pts`. Entry is at the sweep level
+  (supply.top or demand.bottom); stop is 1.5 points beyond that level. A sustained
+  break back through the sweep level invalidates the setup immediately. This keeps 1R
+  tight and consistent regardless of zone width.
 
 - **No hard trade cap**: `max_trades_per_day: 999` — the dual daily loss limit (−3R
   or −$1,000) is the natural brake. The reward's `hold_flat_penalty` is applied
