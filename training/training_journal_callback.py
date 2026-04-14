@@ -69,6 +69,7 @@ class TrainingJournalCallback(BaseCallback):
         self.save_every_steps = save_every_steps
         self._trades: List[dict] = []
         self._last_save_step  = 0
+        self._save_n          = 0   # snapshot counter — incremented on every save
 
     # ── SB3 hooks ─────────────────────────────────────────────────────────────
 
@@ -96,27 +97,31 @@ class TrainingJournalCallback(BaseCallback):
     def _save(self) -> None:
         if not self._trades:
             return
+        self._save_n += 1
+        snap_dir = self.journal_dir / "snapshots"
+        snap_dir.mkdir(parents=True, exist_ok=True)
         self.journal_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self._write_excel()
+            self._write_excel(snap_dir)
         except Exception as exc:
             if self.verbose:
                 print(f"[TrainingJournal] Excel write failed: {exc}")
         try:
-            self._write_plotly()
+            self._write_plotly(snap_dir)
         except Exception as exc:
             if self.verbose:
                 print(f"[TrainingJournal] Plotly write failed: {exc}")
 
     # ── Excel ─────────────────────────────────────────────────────────────────
 
-    def _write_excel(self) -> None:
+    def _write_excel(self, snap_dir: Path) -> None:
         import pandas as pd
         from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
 
         df = pd.DataFrame(self._trades)
-        path = self.journal_dir / "training_journal.xlsx"
+        stem = f"journal_s{self._save_n:04d}_step{self.num_timesteps:010d}"
+        path = snap_dir / f"{stem}.xlsx"
 
         with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
             # ── Sheet 1: Trades ───────────────────────────────
@@ -156,12 +161,17 @@ class TrainingJournalCallback(BaseCallback):
             summary_df.to_excel(writer, sheet_name="Summary", index=False)
             _style_summary_sheet(writer.sheets["Summary"])
 
+        # Also overwrite a fixed-name "latest" copy for quick access
+        import shutil
+        latest = self.journal_dir / "training_journal.xlsx"
+        shutil.copy2(str(path), str(latest))
+
         if self.verbose:
             print(f"[TrainingJournal] Excel saved → {path}  ({len(df)} trades)")
 
     # ── Plotly ────────────────────────────────────────────────────────────────
 
-    def _write_plotly(self) -> None:
+    def _write_plotly(self, snap_dir: Path) -> None:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
@@ -323,8 +333,15 @@ class TrainingJournalCallback(BaseCallback):
             fig.update_xaxes(gridcolor=_GRID, zeroline=False, row=row, col=1)
             fig.update_yaxes(gridcolor=_GRID, zeroline=False, row=row, col=1)
 
-        path = self.journal_dir / "training_journal.html"
+        stem = f"journal_s{self._save_n:04d}_step{self.num_timesteps:010d}"
+        path = snap_dir / f"{stem}.html"
         fig.write_html(str(path), include_plotlyjs="cdn")
+
+        # Also overwrite latest copy
+        import shutil
+        latest = self.journal_dir / "training_journal.html"
+        shutil.copy2(str(path), str(latest))
+
         if self.verbose:
             print(f"[TrainingJournal] Chart  saved → {path}")
 

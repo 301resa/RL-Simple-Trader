@@ -2,9 +2,9 @@
 training/training_hotsave_callback.py
 =======================================
 Saves the model mid-training when per-env rolling metrics cross one of
-two quality gates.
+three quality gates.
 
-Gate 1 — Standard PF/WR gate (as before):
+Gate 1 — Standard PF/WR gate:
   At least min_envs_passing training envs simultaneously satisfy:
     • PF  > pf_threshold   (default 1.60)
     • WR  >= wr_threshold  (default 0.40)
@@ -18,10 +18,17 @@ Gate 2 — Sharpe quality gate (high-quality saves):
     • win_loss_ratio > 1.0        (avg winner > avg loser)
     • total_pnl_r   > 0.0         (episode net positive)
 
-Each gate has its own cooldown. Gate-2 saves use the prefix "hotsave_sh_"
-to distinguish them from Gate-1 saves ("hotsave_").
+Gate 3 — Win-rate 70 gate (saves any env reaching clear positive quality):
+  Any single training env satisfies ALL of:
+    • WR  >= 0.70             (70%+ win rate)
+    • total_pnl_dollars > 0   (dollar PnL positive)
+    • trades >= 20            (statistically meaningful)
+  Saved with prefix "hotsave_wr70_".
 
-Saves: <models_dir>/hotsave[_sh]_<step>.zip  +  ..._vecnormalize.pkl
+Each gate has its own cooldown. Gate-2 saves use the prefix "hotsave_sh_",
+Gate-3 saves use "hotsave_wr70_".
+
+Saves: <models_dir>/hotsave[_sh|_wr70]_<step>.zip  +  ..._vecnormalize.pkl
 """
 
 from __future__ import annotations
@@ -78,6 +85,9 @@ class TrainingHotSaveCallback(BaseCallback):
         sharpe_threshold: float = 1.2,
         sharpe_pf_threshold: float = 1.85,
         sharpe_cooldown_steps: int = 50_000,
+        # Gate 3 — WR70 quality gate
+        wr70_min_trades: int = 20,
+        wr70_cooldown_steps: int = 50_000,
         check_every_steps: int = 4_096,
         vec_normalize=None,
         verbose: int = 1,
@@ -92,12 +102,15 @@ class TrainingHotSaveCallback(BaseCallback):
         self.sharpe_threshold     = sharpe_threshold
         self.sharpe_pf_threshold  = sharpe_pf_threshold
         self.sharpe_cooldown_steps= sharpe_cooldown_steps
+        self.wr70_min_trades      = wr70_min_trades
+        self.wr70_cooldown_steps  = wr70_cooldown_steps
         self.check_every_steps    = check_every_steps
         self.vec_normalize        = vec_normalize
 
         self._env_latest: Dict[int, dict] = {}
         self._last_save_step:        int = -cooldown_steps
         self._last_sharpe_save_step: int = -sharpe_cooldown_steps
+        self._last_wr70_save_step:   int = -wr70_cooldown_steps
 
     # ── Episode capture ───────────────────────────────────────────────────────
 
@@ -109,10 +122,11 @@ class TrainingHotSaveCallback(BaseCallback):
             if done and "profit_factor" in info:
                 self._env_latest[i] = dict(info)
 
-        # Check both gates every N steps
+        # Check all gates every N steps
         if self.num_timesteps % self.check_every_steps < self.n_envs:
             self._check_pf_gate()
             self._check_sharpe_gate()
+            self._check_wr70_gate()
 
         return True
 
@@ -182,6 +196,43 @@ class TrainingHotSaveCallback(BaseCallback):
             metrics={"avg_SH": avg_sh, "avg_PF": avg_pf, "avg_RR": avg_rr, "envs": len(passing)},
         )
         self._last_sharpe_save_step = step
+
+    # ── Gate 3 — WR70 quality gate ────────────────────────────────────────────
+
+    def _check_wr70_gate(self) -> None:
+        """Save when any single env achieves WR ≥ 70%, PnL > 0, trades ≥ 20."""
+        step = self.num_timesteps
+        if step - self._last_wr70_save_step < self.wr70_cooldown_steps:
+            return
+
+        filled = [v for v in self._env_latest.values() if v]
+        if not filled:
+            return
+
+        qualifying = [
+            d for d in filled
+            if (
+                d.get("win_rate",           0.0) >= 0.70
+                and d.get("total_pnl_dollars", d.get("total_pnl_r", 0.0)) > 0
+                and d.get("n_trades",          0)   >= self.wr70_min_trades
+            )
+        ]
+        if not qualifying:
+            return
+
+        best = max(qualifying, key=lambda d: d.get("win_rate", 0.0))
+        self._save(
+            step=step,
+            prefix="hotsave_wr70",
+            tag="WR70 gate",
+            metrics={
+                "WR":     best.get("win_rate", 0.0),
+                "PnL_$":  best.get("total_pnl_dollars", 0.0),
+                "trades": best.get("n_trades", 0),
+                "envs":   len(qualifying),
+            },
+        )
+        self._last_wr70_save_step = step
 
     # ── Shared save helper ────────────────────────────────────────────────────
 
