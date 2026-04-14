@@ -118,12 +118,12 @@ directly from raw price observations.
 
 ### Pending Limit Order Entry
 
-When the agent decides to enter, it places a **pending limit order at the zone edge**,
-rather than entering at market. This gives tighter risk and better average fill quality.
+When the agent decides to enter, it places a **pending limit order at the near edge of the zone**
+— the first price level the zone touches as price approaches from outside.
 
-- **LONG**: limit at `zone_demand.bottom` — fills when `bar.low ≤ demand_bottom`
-- **SHORT**: limit at `zone_supply.top` — fills when `bar.high ≥ supply_top`
-- **Wide zone filter**: zones wider than **10 points** are skipped entirely — too wide to define precise risk.
+- **LONG**: limit at `demand.top` — fills when `bar.low ≤ demand_top` (price dips into zone top)
+- **SHORT**: limit at `supply.bottom` — fills when `bar.high ≥ supply_bottom` (price pops into zone bottom)
+- **Wide zone filter**: zones wider than **10 points** are skipped entirely.
 - **Cancellation**: all pending orders are cancelled automatically at session end, or
   when the agent places a new entry signal in any direction (cancel-and-replace).
 - **Agent EXIT action** while flat also cancels any open pending order.
@@ -134,8 +134,15 @@ The observation vector includes pending order context: `pending_active`, `pendin
 
 ### Stop Loss
 
-Stop placed **1.5 fixed points** beyond the zone boundary (not ATR-based), measured from
-the far edge of the zone.
+Stop placed **1.5 points beyond the far edge of the zone** — the entire zone body acts as
+the risk boundary. If price breaks through the whole zone the thesis is invalidated.
+
+```
+LONG:  stop = demand.bottom − 1.5 pts    stop_dist = zone_width + 1.5
+SHORT: stop = supply.top   + 1.5 pts    stop_dist = zone_width + 1.5
+                                         (floor: 3.0 pts minimum)
+```
+
 Stop widening is **never** allowed once placed.
 
 ### Take Profit
@@ -308,10 +315,11 @@ metrics and log results without writing any model files (useful for exploration 
 - **Annualised Sharpe**: All Sharpe calculations use `mean(pnl_r) / std(pnl_r) × √252`
   consistently across training table, eval callback, and test_fold.
 
-- **Zone-geometry-aware stop**: `stop_dist = max(half_zone_width + 1.5, MIN_STOP_PTS=3.0)`.
-  The stop sits 1.5 points beyond the far edge of the zone, with a minimum distance of
-  3.0 points. Wider zones get proportionally wider stops so that 1R remains meaningful
-  relative to the zone structure, preventing inflated R multiples on tight setups.
+- **Full-zone stop**: `stop_dist = max(zone_width + 1.5, 3.0 pts)`. Entry is at the near
+  edge (demand.top / supply.bottom); stop is 1.5 points beyond the far edge (demand.bottom /
+  supply.top). The entire zone body must be violated before the stop fires — a partial
+  probe into the zone does not stop out the trade. Wider zones naturally carry a wider stop,
+  keeping 1R proportional to zone significance.
 
 - **No hard trade cap**: `max_trades_per_day: 999` — the dual daily loss limit (−3R
   or −$1,000) is the natural brake. The reward's `hold_flat_penalty` is applied
@@ -319,10 +327,10 @@ metrics and log results without writing any model files (useful for exploration 
   — the agent is penalised for ignoring a good setup, not for patiently waiting when
   no setup exists or correctly waiting for a pending limit to fill.
 
-- **Pending limit order entry**: agent places a limit at the zone edge (demand bottom /
-  supply top); filled on the bar that trades through the limit price, cancelled at session
-  end or on a new entry signal. Zones wider than 10 points are skipped. Avoids chasing
-  price, tightens risk, and improves average fill quality.
+- **Pending limit order entry**: agent places a limit at the **near edge** of the zone
+  (demand.top for LONG, supply.bottom for SHORT) — the first level touched as price
+  re-enters the zone. Filled on the bar that trades through the limit; cancelled at session
+  end or on a new entry signal. Zones wider than 10 points are skipped.
 
 - **Confluence-graded sizing**: position size scales from 0.5 to 2.5 contracts in 0.5
   increments based on the confluence score, capped by the 1%-of-capital risk constraint.
@@ -330,14 +338,15 @@ metrics and log results without writing any model files (useful for exploration 
 - **VecNormalize**: Normalises observations only (`norm_reward=False`). Stats are saved
   alongside every checkpoint so evaluation always uses matched normalisation.
 
-- **ATR period**: 14-day Wilder's smoothed ATR (corrected from 1-day). Single-day range
-  was too noisy as an entry gate; 14-day smoothing gives a stable measure of recent
-  daily range for the ATR exhaustion filter and stop/target sizing.
+- **ATR period = 1** (previous day's true range): zone detection thresholds and the ATR
+  exhaustion gate are measured against yesterday's actual range. This adapts to current
+  volatility — quiet days produce tight thresholds, volatile days produce wider ones.
+  A 14-day smooth would lag regime changes and apply stale thresholds.
 
 - **Zone selection by edge proximity**: `_build_state()` selects the supply zone whose
-  `top` edge is nearest to current price (SHORT limit placed at supply.top), and the
-  demand zone whose `bottom` edge is nearest (LONG limit placed at demand.bottom).
-  Previously used midpoint distance, which could miss tighter edge setups.
+  `bottom` edge is nearest to current price (SHORT limit placed at supply.bottom), and the
+  demand zone whose `top` edge is nearest (LONG limit placed at demand.top).
+  Selection is by the entry-side edge so the closest actionable zone is always chosen.
 
 - **Impulse-extreme take-profit**: each detected zone stores the `impulse_extreme` — the
   actual high (supply) or low (demand) of the impulse bar that confirmed the zone. This
