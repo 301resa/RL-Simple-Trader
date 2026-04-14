@@ -3,7 +3,7 @@
 # Feature engineering parameters for all signal modules.
 
 atr:
-  period: 14                      # Wilder's ATR period (days) — 14-day smoothed range
+  period: 1                       # Previous day's true range — adapts zone/gate thresholds to current volatility
   exhaustion_threshold: 0.85      # directional move >= 85% ATR → block that direction only
   danger_threshold: 0.85          # same threshold (warning = exhaustion)
 
