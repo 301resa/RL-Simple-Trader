@@ -463,13 +463,13 @@ def _build_journal(
         all_bars = pd.concat(bars_list).sort_index().reset_index()
         time_col = all_bars.columns[0]
 
-    # ── Build candlestick + equity chart ──────────────────────────────────────
+    # ── Build candlestick + PnL chart ─────────────────────────────────────────
     fig = make_subplots(
-        rows=3, cols=1,
+        rows=2, cols=1,
         shared_xaxes=True,
-        row_heights=[0.60, 0.20, 0.20],
+        row_heights=[0.70, 0.30],
         vertical_spacing=0.03,
-        subplot_titles=["Price & Trades", "Equity Curve (R)", "Drawdown (R)"],
+        subplot_titles=["Price & Trades", "PnL (R)"],
     )
 
     if has_bars:
@@ -489,9 +489,8 @@ def _build_journal(
         )
 
     # ── Trade overlays ────────────────────────────────────────────────────────
-    equity = 0.0
-    eq_times: list = []
-    eq_vals:  List[float] = []
+    pnl_times: list = []
+    pnl_vals:  List[float] = []
 
     for t in trades:
         is_long    = t["direction"].upper() == "LONG"
@@ -554,54 +553,33 @@ def _build_journal(
             line=dict(color="rgba(38,166,154,0.55)", width=1, dash="dot"),
             row=1, col=1)
 
-        equity += pnl_r
-        eq_times.append(exit_time)
-        eq_vals.append(round(equity, 4))
+        pnl_times.append(exit_time)
+        pnl_vals.append(pnl_r)
 
-    # Equity curve
-    eq_color = "#26a69a" if equity >= 0 else "#ef5350"
-    fig.add_trace(go.Scatter(
-        x=eq_times, y=eq_vals,
-        mode="lines+markers",
-        line=dict(color=eq_color, width=2),
-        marker=dict(size=4),
-        fill="tozeroy",
-        fillcolor="rgba(38,166,154,0.12)" if equity >= 0 else "rgba(239,83,80,0.12)",
+    # Per-trade PnL bars
+    bar_colors = ["#26a69a" if v >= 0 else "#ef5350" for v in pnl_vals]
+    fig.add_trace(go.Bar(
+        x=pnl_times,
+        y=pnl_vals,
+        marker_color=bar_colors,
         showlegend=False,
-        hovertemplate="Equity: %{y:+.2f}R<br>%{x}<extra></extra>",
+        hovertemplate="%{x}<br>PnL: %{y:+.2f}R<extra></extra>",
     ), row=2, col=1)
     fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.3)", width=1, dash="dash"), row=2, col=1)
 
-    # Drawdown curve
-    if eq_vals:
-        eq_arr  = np.array(eq_vals)
-        peak    = np.maximum.accumulate(eq_arr)
-        dd_arr  = eq_arr - peak
-        fig.add_trace(go.Scatter(
-            x=eq_times, y=dd_arr.tolist(),
-            mode="lines",
-            line=dict(color="#ef5350", width=1.5),
-            fill="tozeroy",
-            fillcolor="rgba(239,83,80,0.12)",
-            showlegend=False,
-            hovertemplate="DD: %{y:.2f}R<br>%{x}<extra></extra>",
-        ), row=3, col=1)
-        fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.3)", width=1, dash="dash"), row=3, col=1)
-
     fig.update_layout(
         template="plotly_dark",
-        height=1000,
+        height=900,
         dragmode="pan",
         margin=dict(l=60, r=20, t=40, b=40),
     )
-    fig.update_yaxes(title_text="Price",     row=1, col=1)
-    fig.update_yaxes(title_text="Equity (R)", row=2, col=1)
-    fig.update_yaxes(title_text="DD (R)",     row=3, col=1)
-    # Disable rangeslider on rows 1 & 2; enable on row 3 for horizontal scrolling
+    fig.update_yaxes(title_text="Price",    row=1, col=1)
+    fig.update_yaxes(title_text="PnL (R)",  row=2, col=1)
+    # Disable rangeslider on row 1; enable on row 2 for horizontal scrolling
     fig.update_xaxes(rangeslider=dict(visible=False))
     fig.update_xaxes(
         rangeslider=dict(visible=True, thickness=0.04, bgcolor="#1e222d"),
-        row=3, col=1,
+        row=2, col=1,
     )
 
     chart_html = fig.to_html(
@@ -863,7 +841,6 @@ def _build_excel_journal(
         ws_m.column_dimensions["A"].width = 24
         ws_m.column_dimensions["B"].width = 22
 
-    print(f"[TestFold] Excel saved → {out_path}")
 
 
 def _build_leaderboard_excel(
@@ -945,7 +922,6 @@ def _build_leaderboard_excel(
         for cell in ws2[1]:
             cell.font = HEADER_FONT
 
-    print(f"[TestFold] Leaderboard Excel saved → {out_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
