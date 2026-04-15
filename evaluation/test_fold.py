@@ -999,6 +999,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     out_dir = Path(args.out_dir) if args.out_dir else models_dir.parent / "test_results"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Clean previous results ────────────────────────────────────────────────
+    removed = 0
+    for pattern in ("*.xlsx", "*_journal.html"):
+        for f in out_dir.glob(pattern):
+            f.unlink()
+            removed += 1
+    if removed:
+        print(f"  Cleaned {removed} file(s) from {out_dir}\n")
+
     # ── Build environment components ─────────────────────────────────────────
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

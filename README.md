@@ -75,7 +75,7 @@ R1/
 │   └── curriculum.py                # Optional curriculum scheduler
 │
 ├── evaluation/
-│   ├── test_fold.py                 # Load all checkpoints, ranked results table + Plotly HTML
+│   ├── test_fold.py                 # Load all checkpoints; cleans previous results, parallel rollout, ranked leaderboard + per-model HTML/Excel
 │   ├── backtester.py                # Deterministic backtest on test data
 │   ├── metrics_calculator.py        # Sharpe, profit factor, drawdown, etc.
 │   ├── trade_journal.py             # Trade-level logging (Excel + CSV)
@@ -210,6 +210,21 @@ python main.py --mode evaluate --config config/ --data data/ \
 python main.py --mode walk_forward --config config/ --data data/
 ```
 
+### Test-fold evaluation (all checkpoints vs. a date range)
+```bash
+python main.py --mode test_fold \
+    --models-dir logs/walk_forward/fold_00/models \
+    --config config/ --data data/ \
+    --test-start 2026-03-01 --test-end 2026-04-09 \
+    --out-dir logs/walk_forward/fold_00/test_results \
+    --n-workers 8
+```
+Every run **automatically deletes** all `.xlsx` and `*_journal.html` files in
+`--out-dir` before writing new results. Produces:
+- Per-model Plotly HTML journal (candlestick + per-trade PnL bars + cumulative PnL)
+- Per-model Excel journal (Trades / Daily / Metrics sheets)
+- `leaderboard.xlsx` — all models ranked best-first by composite score
+
 ### Analyse a saved journal
 ```bash
 python main.py --mode analyse --journal logs/journal/
@@ -261,9 +276,9 @@ Composite score = weighted average of: Sharpe (40%), P&L in R (30%), Win/Loss ra
 A **FINAL_STEP** checkpoint is always written at the end of training as a safety net.
 
 ### 2. Training hot-saves (`TrainingHotSaveCallback`)
-Checks every ~4,096 steps (one rollout) against a **single unified gate** on live training envs:
+Checks every ~4,096 steps (one rollout) against three quality gates:
 
-At least **2 individual envs** must simultaneously satisfy **all** of:
+**Gate 1 — PF/WR** (`hotsave_NNNNNNNNNN.zip`): at least 2 envs simultaneously satisfy:
 
 | Criterion | Threshold |
 |-----------|-----------|
@@ -271,7 +286,25 @@ At least **2 individual envs** must simultaneously satisfy **all** of:
 | Win Rate | ≥ 40% |
 | Trades | ≥ 20 |
 
-Saved to `logs/models/hotsaves/`. Cooldown: 50,000 steps between saves.
+**Gate 2 — Sharpe** (`hotsave_sh_NNNNNNNNNN.zip`): at least 2 envs simultaneously satisfy:
+
+| Criterion | Threshold |
+|-----------|-----------|
+| Sharpe ratio | > 1.2 |
+| Profit Factor | > 1.85 |
+| Win/Loss ratio | > 1.0 |
+| Total PnL (R) | > 0 |
+| Trades | ≥ 20 |
+
+**Gate 3 — WR70** (`hotsave_wr70_NNNNNNNNNN.zip`): any single env satisfies all of:
+
+| Criterion | Threshold |
+|-----------|-----------|
+| Win Rate | ≥ 70% |
+| Total PnL ($) | > 0 |
+| Trades | ≥ 20 |
+
+All gates saved to `logs/models/hotsaves/`. Cooldown: 50,000 steps per gate.
 
 ### Disabling eval saves
 Set `save_enabled: false` under `evaluation:` in `agent_config.yaml` to run eval
