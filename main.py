@@ -18,6 +18,11 @@ Usage:
     python main.py --mode walk_forward --config config/ --data data/\\
         --train-start 2021-01-02 --train-end 2025-12-31
 
+    # Evaluate ALL saved checkpoints/hotsaves against a specific date range
+    python main.py --mode test_fold --config config/ --data data/ \\
+        --models-dir logs/walk_forward/fold_00/models \\
+        --test-start 2026-03-01 --test-end 2026-04-09
+
     # Print journal analysis for a completed backtest
     python main.py --mode analyse --journal logs/journal/
 
@@ -1137,7 +1142,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["train", "evaluate", "analyse", "walk_forward"],
+        choices=["train", "evaluate", "analyse", "walk_forward", "test_fold"],
         required=True,
         help="Operation mode.",
     )
@@ -1197,6 +1202,40 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help="Number of weeks (× 5 trading days) allocated to validation. Default: from agent_config.yaml walk_forward.val_weeks.",
     )
+    # ── test_fold mode args ───────────────────────────────────────────────────
+    parser.add_argument(
+        "--models-dir",
+        default=None,
+        dest="models_dir",
+        help="(test_fold) Folder containing checkpoint/hotsave .zip files.",
+    )
+    parser.add_argument(
+        "--test-start",
+        default=None,
+        dest="test_start",
+        metavar="YYYY-MM-DD",
+        help="(test_fold) Start of the evaluation date range (inclusive).",
+    )
+    parser.add_argument(
+        "--test-end",
+        default=None,
+        dest="test_end",
+        metavar="YYYY-MM-DD",
+        help="(test_fold) End of the evaluation date range (inclusive).",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default=None,
+        dest="out_dir",
+        help="(test_fold) Output directory for journals and leaderboard.",
+    )
+    parser.add_argument(
+        "--n-episodes",
+        default=0,
+        type=int,
+        dest="n_episodes",
+        help="(test_fold) Episodes per checkpoint. 0 = run every test day once.",
+    )
     return parser.parse_args()
 
 
@@ -1245,6 +1284,28 @@ def main() -> None:
         run_analyse(args)
     elif args.mode == "walk_forward":
         run_walk_forward(args, configs)
+    elif args.mode == "test_fold":
+        _run_test_fold(args)
+
+
+def _run_test_fold(args) -> None:
+    """Delegate to evaluation/test_fold.py main() with the CLI args translated."""
+    from evaluation.test_fold import main as _tf_main
+    argv = [
+        "--models-dir", args.models_dir if hasattr(args, "models_dir") and args.models_dir
+                        else str(Path(args.log_dir) / "models"),
+        "--config",     args.config,
+        "--data",       args.data,
+    ]
+    if getattr(args, "test_start", None):
+        argv += ["--test-start", args.test_start]
+    if getattr(args, "test_end", None):
+        argv += ["--test-end", args.test_end]
+    if getattr(args, "n_episodes", None):
+        argv += ["--n-episodes", str(args.n_episodes)]
+    if getattr(args, "out_dir", None):
+        argv += ["--out-dir", args.out_dir]
+    _tf_main(argv)
 
 
 if __name__ == "__main__":

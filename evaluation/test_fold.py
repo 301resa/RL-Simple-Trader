@@ -717,6 +717,227 @@ def _build_journal(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Excel journal per model
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_excel_journal(
+    ckpt_name: str,
+    trades: List[dict],
+    metrics: dict,
+    score: float,
+    test_days: List[str],
+    out_path: Path,
+) -> None:
+    """
+    Write a self-contained Excel workbook for one model checkpoint.
+
+    Sheets
+    ------
+    Trades   — one row per trade, all fields, green/red fill by win/loss
+    Daily    — per-date aggregates (trades, wins, PnL R/$)
+    Metrics  — full metric summary + score
+    """
+    import pandas as pd
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    GREEN_FILL  = PatternFill("solid", fgColor="C8E6C9")
+    RED_FILL    = PatternFill("solid", fgColor="FFCDD2")
+    HEADER_FONT = Font(bold=True)
+    CENTER      = Alignment(horizontal="center")
+
+    _TRADE_COLS = [
+        "date", "direction", "entry_time", "exit_time",
+        "entry_price", "stop_price", "initial_target", "exit_price",
+        "n_contracts", "duration_min", "exit_reason",
+        "pnl_r", "pnl_points", "pnl_dollars", "is_win", "mae_r",
+    ]
+
+    def _auto_width(ws):
+        for i, col in enumerate(ws.columns, 1):
+            w = max((len(str(c.value or "")) for c in col), default=8)
+            ws.column_dimensions[get_column_letter(i)].width = min(w + 2, 24)
+
+    with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
+
+        # ── Sheet 1: Trades ───────────────────────────────────────
+        if trades:
+            trades_for_excel = _resolve_trade_times.__wrapped__(trades) if hasattr(
+                _resolve_trade_times, "__wrapped__") else trades
+            df = pd.DataFrame(trades_for_excel)
+            cols = [c for c in _TRADE_COLS if c in df.columns]
+            # add entry/exit time columns if enriched by caller
+            for extra in ("entry_time", "exit_time"):
+                if extra in df.columns and extra not in cols:
+                    cols.insert(2, extra)
+            df_out = df[cols].copy()
+        else:
+            df_out = pd.DataFrame(columns=_TRADE_COLS)
+
+        df_out.to_excel(writer, sheet_name="Trades", index=False)
+        ws_t = writer.sheets["Trades"]
+        for cell in ws_t[1]:
+            cell.font = HEADER_FONT
+            cell.alignment = CENTER
+
+        # find is_win column index for row fills
+        is_win_col = next(
+            (i for i, cell in enumerate(ws_t[1], 1) if cell.value == "is_win"),
+            None,
+        )
+        for row in ws_t.iter_rows(min_row=2):
+            fill = GREEN_FILL if (is_win_col and row[is_win_col - 1].value) else RED_FILL
+            for cell in row:
+                cell.fill = fill
+        _auto_width(ws_t)
+
+        # ── Sheet 2: Daily ────────────────────────────────────────
+        if not df_out.empty and "date" in df_out.columns:
+            daily = (
+                df_out.groupby("date").agg(
+                    trades=("pnl_r", "count"),
+                    wins=("is_win", "sum"),
+                    total_pnl_r=("pnl_r", "sum"),
+                    total_pnl_dollars=("pnl_dollars", "sum") if "pnl_dollars" in df_out.columns else ("pnl_r", "sum"),
+                    avg_duration_min=("duration_min", "mean") if "duration_min" in df_out.columns else ("pnl_r", "count"),
+                ).reset_index()
+            )
+            daily["win_rate"] = (daily["wins"] / daily["trades"].clip(lower=1)).round(3)
+            daily.to_excel(writer, sheet_name="Daily", index=False)
+            ws_d = writer.sheets["Daily"]
+            for cell in ws_d[1]:
+                cell.font = HEADER_FONT
+            pnl_col = next(
+                (i for i, cell in enumerate(ws_d[1], 1) if cell.value == "total_pnl_r"),
+                None,
+            )
+            for row in ws_d.iter_rows(min_row=2):
+                v = row[pnl_col - 1].value if pnl_col else 0
+                fill = GREEN_FILL if (v or 0) >= 0 else RED_FILL
+                for cell in row:
+                    cell.fill = fill
+            _auto_width(ws_d)
+
+        # ── Sheet 3: Metrics ──────────────────────────────────────
+        period = f"{test_days[0]} → {test_days[-1]}" if test_days else ""
+        metric_rows = [
+            ("Model",              ckpt_name),
+            ("Test Period",        period),
+            ("Test Days",          len(test_days)),
+            ("",                   ""),
+            ("Trades",             metrics.get("n_trades", 0)),
+            ("Win Rate",           f"{metrics.get('win_rate', 0)*100:.1f}%"),
+            ("Total PnL (R)",      f"{metrics.get('total_pnl_r', 0):+.4f}"),
+            ("Total PnL ($)",      f"${metrics.get('total_pnl_dollars', 0):+,.2f}"),
+            ("Profit Factor (R)",  f"{metrics.get('profit_factor', 0):.4f}"),
+            ("Profit Factor ($)",  f"{metrics.get('profit_factor_usd', 0):.4f}"),
+            ("Sharpe Ratio",       f"{metrics.get('sharpe', 0):.4f}"),
+            ("Max Drawdown (R)",   f"{metrics.get('max_dd_r', 0):.4f}"),
+            ("Max Drawdown ($)",   f"${metrics.get('max_dd_dollars', 0):,.2f}"),
+            ("Avg Win (R)",        f"{metrics.get('avg_win_r', 0):+.4f}"),
+            ("Avg Loss (R)",       f"{metrics.get('avg_loss_r', 0):.4f}"),
+            ("Avg Win ($)",        f"${metrics.get('avg_win_dollars', 0):,.2f}"),
+            ("Avg Loss ($)",       f"${metrics.get('avg_loss_dollars', 0):,.2f}"),
+            ("Avg Duration",       f"{metrics.get('avg_duration_min', 0):.1f} min"),
+            ("",                   ""),
+            ("Composite Score",    f"{score:.4f}"),
+        ]
+        mdf = pd.DataFrame(metric_rows, columns=["Metric", "Value"])
+        mdf.to_excel(writer, sheet_name="Metrics", index=False)
+        ws_m = writer.sheets["Metrics"]
+        for cell in ws_m[1]:
+            cell.font = HEADER_FONT
+        for row in ws_m.iter_rows(min_row=2):
+            row[0].font = Font(bold=True)
+        ws_m.column_dimensions["A"].width = 24
+        ws_m.column_dimensions["B"].width = 22
+
+    print(f"[TestFold] Excel saved → {out_path}")
+
+
+def _build_leaderboard_excel(
+    results: List[Dict],
+    test_days: List[str],
+    out_path: Path,
+) -> None:
+    """
+    Write a single leaderboard Excel with all models on one sheet,
+    ranked best-first by composite score.  Top row highlighted green.
+    """
+    import pandas as pd
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    GOLD_FILL   = PatternFill("solid", fgColor="FFF9C4")
+    GREEN_FILL  = PatternFill("solid", fgColor="C8E6C9")
+    RED_FILL    = PatternFill("solid", fgColor="FFCDD2")
+    HEADER_FONT = Font(bold=True)
+
+    sorted_r = sorted(results, key=lambda r: r["score"], reverse=True)
+
+    rows = []
+    for rank, r in enumerate(sorted_r, 1):
+        m = r["metrics"]
+        rows.append({
+            "Rank":          rank,
+            "Model":         r["name"],
+            "Score":         r["score"],
+            "Trades":        m["n_trades"],
+            "WR%":           round(m["win_rate"] * 100, 1),
+            "PnL_R":         m["total_pnl_r"],
+            "PnL_$":         m["total_pnl_dollars"],
+            "PF_R":          m["profit_factor"],
+            "PF_$":          m["profit_factor_usd"],
+            "Sharpe":        m["sharpe"],
+            "MaxDD_R":       m["max_dd_r"],
+            "MaxDD_$":       m["max_dd_dollars"],
+            "AvgWin_R":      m["avg_win_r"],
+            "AvgLoss_R":     m["avg_loss_r"],
+            "AvgWin_$":      m["avg_win_dollars"],
+            "AvgLoss_$":     m["avg_loss_dollars"],
+            "AvgDur_min":    m["avg_duration_min"],
+        })
+
+    df = pd.DataFrame(rows)
+    period = f"{test_days[0]} → {test_days[-1]}" if test_days else ""
+
+    with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
+        # ── Leaderboard sheet ─────────────────────────────────────
+        df.to_excel(writer, sheet_name="Leaderboard", index=False, startrow=1)
+        ws = writer.sheets["Leaderboard"]
+
+        # Title row
+        ws["A1"] = f"Test Fold Leaderboard  —  {period}  ({len(test_days)} days)"
+        ws["A1"].font = Font(bold=True, size=12)
+
+        # Header formatting
+        for cell in ws[2]:
+            cell.font = HEADER_FONT
+            cell.alignment = Alignment(horizontal="center")
+
+        # Row fills: gold for rank-1, green for positive PnL, red for negative
+        for row_idx, r in enumerate(sorted_r, 3):
+            pnl_pos = r["metrics"]["total_pnl_dollars"] > 0
+            fill = GOLD_FILL if row_idx == 3 else (GREEN_FILL if pnl_pos else RED_FILL)
+            for cell in ws[row_idx]:
+                cell.fill = fill
+
+        # Column widths
+        ws.column_dimensions["A"].width = 6   # Rank
+        ws.column_dimensions["B"].width = 38  # Model name
+        for i in range(3, len(df.columns) + 1):
+            ws.column_dimensions[get_column_letter(i)].width = 12
+
+        # ── Per-model metrics sheet (one row per model, sorted) ───
+        df.to_excel(writer, sheet_name="AllMetrics", index=False)
+        ws2 = writer.sheets["AllMetrics"]
+        for cell in ws2[1]:
+            cell.font = HEADER_FONT
+
+    print(f"[TestFold] Leaderboard Excel saved → {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -745,12 +966,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Override test period end date (YYYY-MM-DD)",
     )
     parser.add_argument(
-        "--n-episodes", type=int, default=20,
-        help="Episodes per checkpoint (default 20)",
+        "--n-episodes", type=int, default=0,
+        help="Episodes per checkpoint. 0 (default) = run every test day exactly once.",
     )
     parser.add_argument(
         "--out-dir", default=None,
-        help="Directory to write HTML charts and results txt (default: models-dir/test_results)",
+        help="Directory to write HTML/Excel journals and results (default: models-dir/test_results)",
     )
     args = parser.parse_args(argv)
 
@@ -957,12 +1178,19 @@ def main(argv: Optional[List[str]] = None) -> None:
             zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
         )
 
+    # ── Resolve episode count ──────────────────────────────────────────────────
+    n_episodes = args.n_episodes if args.n_episodes > 0 else len(test_days)
+    _log.info("Episodes per checkpoint", n_episodes=n_episodes,
+              test_days=len(test_days))
+
     # ── Find and evaluate checkpoints ────────────────────────────────────────
     checkpoints = _find_checkpoints(models_dir)
     n_ckpt = sum(1 for c in checkpoints if "checkpoint_" in c.name)
     n_hot  = sum(1 for c in checkpoints if "hotsave_"    in c.name)
     print(f"\nFound {len(checkpoints)} model(s) in {models_dir}  "
-          f"({n_ckpt} checkpoints, {n_hot} hotsaves)\n")
+          f"({n_ckpt} checkpoints, {n_hot} hotsaves)\n"
+          f"Test period : {test_days[0]} → {test_days[-1]}  ({len(test_days)} trading days)\n"
+          f"Episodes    : {n_episodes} per model\n")
 
     results: List[Dict] = []
     sep = _separator()
@@ -978,11 +1206,17 @@ def main(argv: Optional[List[str]] = None) -> None:
         print(f"  → Evaluating {name} ...", end="", flush=True)
         try:
             trades, episodes = _run_checkpoint(
-                ckpt, vn, env_factory, n_episodes=args.n_episodes
+                ckpt, vn, env_factory, n_episodes=n_episodes
             )
         except Exception as exc:
             print(f" FAILED: {exc}")
             continue
+
+        # Enrich trades with entry/exit timestamps
+        try:
+            trades = _resolve_trade_times(trades, data_loader)
+        except Exception:
+            pass
 
         m     = _compute_metrics(trades, episodes)
         score = _composite(m)
@@ -998,13 +1232,20 @@ def main(argv: Optional[List[str]] = None) -> None:
             "episodes":  episodes,
         })
 
-        # Per-checkpoint interactive trade journal
+        # Per-checkpoint interactive trade journal (HTML)
         if PLOTLY_OK:
             journal_path = out_dir / f"{name}_journal.html"
             try:
                 _build_journal(name, trades, m, score, data_loader, test_days, journal_path)
             except Exception as exc:
-                _log.warning("Journal generation failed", ckpt=name, error=str(exc))
+                _log.warning("Journal HTML failed", ckpt=name, error=str(exc))
+
+        # Per-checkpoint Excel journal
+        excel_path = out_dir / f"{name}_journal.xlsx"
+        try:
+            _build_excel_journal(name, trades, m, score, test_days, excel_path)
+        except Exception as exc:
+            _log.warning("Journal Excel failed", ckpt=name, error=str(exc))
 
     print(sep)
 
@@ -1033,29 +1274,37 @@ def main(argv: Optional[List[str]] = None) -> None:
           f"$PF={bm['profit_factor_usd']:.2f}  "
           f"Sharpe={bm['sharpe']:.3f}")
 
+    # ── Leaderboard Excel (all models, ranked) ────────────────────────────────
+    lb_path = out_dir / "leaderboard.xlsx"
+    try:
+        _build_leaderboard_excel(results, test_days, lb_path)
+    except Exception as exc:
+        _log.warning("Leaderboard Excel failed", error=str(exc))
+
     # ── Write text results ────────────────────────────────────────────────────
     txt_path = out_dir / "test_fold_results.txt"
     lines: List[str] = [
         f"Test Fold Results",
         f"Models dir : {models_dir}",
         f"Test period: {test_days[0]} → {test_days[-1]}  ({len(test_days)} days)",
-        f"Episodes   : {args.n_episodes} per checkpoint",
+        f"Episodes   : {n_episodes} per checkpoint",
         "",
         sep,
         _header_row(),
         sep,
     ]
-    for r in results:
+    for r in sorted(results, key=lambda r: r["score"], reverse=True):
         lines.append(_data_row(r["name"], r["metrics"], r["score"]))
     lines += [sep, "", f"Best: {best['name']}  score={best['score']:.4f}"]
     txt_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"\n  Results saved → {txt_path}")
 
-    if PLOTLY_OK:
-        journals = list(out_dir.glob("*_journal.html"))
-        print(f"  Journals saved → {out_dir} ({len(journals)} file(s))")
-    else:
-        print("  (Plotly not installed — no journals generated)")
+    htmls   = list(out_dir.glob("*_journal.html"))
+    excels  = list(out_dir.glob("*_journal.xlsx"))
+    print(f"\n  Leaderboard  → {lb_path}")
+    print(f"  Results txt  → {txt_path}")
+    print(f"  HTML journals: {len(htmls)} file(s)")
+    print(f"  Excel journals: {len(excels)} file(s)")
+    print(f"\n  Output dir → {out_dir}")
 
 
 if __name__ == "__main__":
