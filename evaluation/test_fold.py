@@ -590,15 +590,26 @@ def _build_journal(
 
     fig.update_layout(
         template="plotly_dark",
-        height=900,
-        xaxis_rangeslider_visible=False,
+        height=1000,
+        dragmode="pan",
         margin=dict(l=60, r=20, t=40, b=40),
     )
     fig.update_yaxes(title_text="Price",     row=1, col=1)
     fig.update_yaxes(title_text="Equity (R)", row=2, col=1)
     fig.update_yaxes(title_text="DD (R)",     row=3, col=1)
+    # Disable rangeslider on rows 1 & 2; enable on row 3 for horizontal scrolling
+    fig.update_xaxes(rangeslider=dict(visible=False))
+    fig.update_xaxes(
+        rangeslider=dict(visible=True, thickness=0.04, bgcolor="#1e222d"),
+        row=3, col=1,
+    )
 
-    chart_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+    chart_html = fig.to_html(
+        full_html=False,
+        include_plotlyjs="cdn",
+        config={"scrollZoom": True, "displayModeBar": True,
+                "modeBarButtonsToAdd": ["pan2d", "zoom2d"]},
+    )
 
     # ── Metrics card ──────────────────────────────────────────────────────────
     m = metrics

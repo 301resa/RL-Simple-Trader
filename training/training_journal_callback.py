@@ -326,16 +326,29 @@ class TrainingJournalCallback(BaseCallback):
             plot_bgcolor=_BG,
             font=dict(color=_TEXT, family="monospace"),
             showlegend=False,
+            dragmode="pan",
             margin=dict(l=60, r=30, t=60, b=20),
             height=1100,
         )
         for row in range(1, 5):
-            fig.update_xaxes(gridcolor=_GRID, zeroline=False, row=row, col=1)
+            fig.update_xaxes(gridcolor=_GRID, zeroline=False,
+                             rangeslider=dict(visible=False),
+                             row=row, col=1)
             fig.update_yaxes(gridcolor=_GRID, zeroline=False, row=row, col=1)
+        # Rangeslider on bottom data row (row 4) for horizontal scrolling
+        fig.update_xaxes(
+            rangeslider=dict(visible=True, thickness=0.04, bgcolor=_PAPER),
+            row=4, col=1,
+        )
 
         stem = f"journal_s{self._save_n:04d}_step{self.num_timesteps:010d}"
         path = snap_dir / f"{stem}.html"
-        fig.write_html(str(path), include_plotlyjs="cdn")
+        fig.write_html(
+            str(path),
+            include_plotlyjs="cdn",
+            config={"scrollZoom": True, "displayModeBar": True,
+                    "modeBarButtonsToAdd": ["pan2d", "zoom2d"]},
+        )
 
         # Also overwrite latest copy
         import shutil

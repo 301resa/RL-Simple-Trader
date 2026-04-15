@@ -190,15 +190,25 @@ class FoldJournalCallback(BaseCallback):
         from plotly.subplots import make_subplots
 
         env_ids = sorted(self._env_trades.keys())
-        n_envs  = len(env_ids)
-        if n_envs == 0:
+        if not env_ids:
             return
 
+        # Sort all trades by global_step then env_id for a clean chronological order
+        sorted_trades = sorted(
+            all_trades,
+            key=lambda t: (t.get("global_step", 0), t.get("env_id", 0)),
+        )
+
+        agg_pnl    = [t["pnl_r"]  for t in sorted_trades]
+        agg_is_win = [t["is_win"] for t in sorted_trades]
+        n_agg      = len(agg_pnl)
+        trade_nums = list(range(1, n_agg + 1))
+
         # ── Build figure: 4 rows ──────────────────────────────
-        # Row 1: cumulative equity curves (all envs overlaid)
-        # Row 2: per-trade PnL bars (aggregate, all trades)
-        # Row 3: rolling 20-trade win rate (aggregate)
-        # Row 4: summary table
+        # Row 1: single aggregate cumulative PnL line
+        # Row 2: per-trade PnL bars
+        # Row 3: rolling 20-trade win rate
+        # Row 4: per-env summary table
         fig = make_subplots(
             rows=4, cols=1,
             row_heights=[0.30, 0.22, 0.18, 0.30],
@@ -210,44 +220,40 @@ class FoldJournalCallback(BaseCallback):
                 [{"type": "table"}],
             ],
             subplot_titles=[
-                "Cumulative Equity (R) — per env",
-                "Per-Trade PnL (R) — all envs",
-                "Rolling 20-Trade Win Rate — all envs",
+                "Cumulative PnL (R) — all envs combined",
+                "Per-Trade PnL (R)",
+                "Rolling 20-Trade Win Rate",
                 "",
             ],
         )
 
-        # ── Row 1: equity curves per env ──────────────────────
-        for i, env_idx in enumerate(env_ids):
-            trades = self._env_trades[env_idx]
-            if not trades:
-                continue
-            pnl = [t["pnl_r"] for t in trades]
-            eq  = list(np.cumsum(pnl))
-            colour = _COLOURS[i % len(_COLOURS)]
-            fig.add_trace(
-                go.Scatter(
-                    x=list(range(1, len(eq) + 1)),
-                    y=eq,
-                    mode="lines",
-                    line=dict(color=colour, width=1.5),
-                    name=f"Env {env_idx:02d}",
-                    hovertemplate=f"Env {env_idx:02d}<br>Trade %{{x}}<br>Equity: %{{y:.2f}}R<extra></extra>",
-                ),
-                row=1, col=1,
-            )
+        # ── Row 1: single cumulative PnL line ─────────────────
+        equity   = list(np.cumsum(agg_pnl))
+        eq_color = _GREEN if (equity[-1] if equity else 0) >= 0 else _RED
+        fig.add_trace(
+            go.Scatter(
+                x=trade_nums,
+                y=equity,
+                mode="lines",
+                line=dict(color=eq_color, width=2),
+                fill="tozeroy",
+                fillcolor=f"rgba(38,166,154,0.10)" if eq_color == _GREEN
+                          else "rgba(239,83,80,0.10)",
+                name="Cumulative PnL",
+                hovertemplate="Trade #%{x}<br>Cumulative PnL: %{y:+.2f}R<extra></extra>",
+            ),
+            row=1, col=1,
+        )
         fig.add_hline(y=0, line=dict(color=_GRID, width=1), row=1, col=1)
 
-        # ── Row 2: aggregate PnL bars ──────────────────────────
-        agg_pnl    = [t["pnl_r"]  for t in all_trades]
-        agg_is_win = [t["is_win"] for t in all_trades]
+        # ── Row 2: per-trade PnL bars ──────────────────────────
         bar_colors = [_GREEN if w else _RED for w in agg_is_win]
         fig.add_trace(
             go.Bar(
-                x=list(range(1, len(agg_pnl) + 1)),
+                x=trade_nums,
                 y=agg_pnl,
                 marker_color=bar_colors,
-                hovertemplate="Trade %{x}<br>PnL: %{y:.2f}R<extra></extra>",
+                hovertemplate="Trade #%{x}<br>PnL: %{y:+.2f}R<extra></extra>",
                 name="PnL",
                 showlegend=False,
             ),
@@ -256,19 +262,18 @@ class FoldJournalCallback(BaseCallback):
         fig.add_hline(y=0, line=dict(color=_GRID, width=1), row=2, col=1)
 
         # ── Row 3: rolling win rate ────────────────────────────
-        win_arr  = np.array([1.0 if w else 0.0 for w in agg_is_win])
-        n_agg    = len(win_arr)
-        roll_wr  = [
+        win_arr = np.array([1.0 if w else 0.0 for w in agg_is_win])
+        roll_wr = [
             float(np.mean(win_arr[max(0, j - 19): j + 1]))
             for j in range(n_agg)
         ]
         fig.add_trace(
             go.Scatter(
-                x=list(range(1, n_agg + 1)),
+                x=trade_nums,
                 y=[r * 100 for r in roll_wr],
                 mode="lines",
                 line=dict(color=_COLOURS[2], width=1.5),
-                hovertemplate="Trade %{x}<br>Win Rate: %{y:.1f}%<extra></extra>",
+                hovertemplate="Trade #%{x}<br>Win Rate: %{y:.1f}%<extra></extra>",
                 name="Win Rate",
                 showlegend=False,
             ),
@@ -282,12 +287,10 @@ class FoldJournalCallback(BaseCallback):
                 for ei in env_ids]
         if rows:
             tbl_df = pd.DataFrame(rows)
-            header_vals = [f"<b>{c}</b>" for c in tbl_df.columns]
-            cell_vals   = [tbl_df[c].tolist() for c in tbl_df.columns]
             fig.add_trace(
                 go.Table(
                     header=dict(
-                        values=header_vals,
+                        values=[f"<b>{c}</b>" for c in tbl_df.columns],
                         fill_color=_PAPER,
                         font=dict(color=_TEXT, size=10),
                         align="center",
@@ -295,7 +298,7 @@ class FoldJournalCallback(BaseCallback):
                         height=24,
                     ),
                     cells=dict(
-                        values=cell_vals,
+                        values=[tbl_df[c].tolist() for c in tbl_df.columns],
                         fill_color=_BG,
                         font=dict(color=_TEXT, size=10),
                         align=["center"] * len(tbl_df.columns),
@@ -307,39 +310,44 @@ class FoldJournalCallback(BaseCallback):
             )
 
         # ── Layout ────────────────────────────────────────────
-        n_total  = len(all_trades)
-        n_wins   = sum(agg_is_win)
-        wr_pct   = 100 * n_wins / n_total if n_total else 0.0
-        total_r  = sum(agg_pnl)
-        color_r  = _GREEN if total_r >= 0 else _RED
+        n_wins  = sum(agg_is_win)
+        wr_pct  = 100 * n_wins / n_agg if n_agg else 0.0
+        total_r = sum(agg_pnl)
+        clr     = _GREEN if total_r >= 0 else _RED
 
         title = (
             f"Fold {fold_id:02d} — Training Journal  |  "
-            f"{n_total} trades  |  WR {wr_pct:.0f}%  |  "
-            f"<span style='color:{color_r}'>{total_r:+.2f}R</span>"
+            f"{n_agg} trades  |  WR {wr_pct:.0f}%  |  "
+            f"<span style='color:{clr}'>{total_r:+.2f}R</span>"
         )
         fig.update_layout(
             title=dict(text=title, font=dict(size=14, color=_TEXT), x=0.5),
             paper_bgcolor=_PAPER,
             plot_bgcolor=_BG,
             font=dict(color=_TEXT, family="monospace"),
-            showlegend=True,
-            legend=dict(
-                bgcolor=_PAPER,
-                bordercolor=_GRID,
-                font=dict(color=_TEXT, size=9),
-                orientation="v",
-                x=1.01, y=0.98,
-            ),
-            margin=dict(l=60, r=160, t=60, b=20),
+            showlegend=False,
+            dragmode="pan",
+            margin=dict(l=60, r=30, t=60, b=60),
             height=1200,
         )
-        for row in range(1, 4):
-            fig.update_xaxes(gridcolor=_GRID, zeroline=False, row=row, col=1)
-            fig.update_yaxes(gridcolor=_GRID, zeroline=False, row=row, col=1)
+        # Range slider on bottom subplot for horizontal scrolling
+        fig.update_xaxes(
+            gridcolor=_GRID, zeroline=False,
+            rangeslider=dict(visible=False),
+        )
+        fig.update_xaxes(
+            rangeslider=dict(visible=True, thickness=0.04, bgcolor=_PAPER),
+            row=3, col=1,
+        )
+        fig.update_yaxes(gridcolor=_GRID, zeroline=False)
 
         path = fold_dir / f"fold_{fold_id:02d}_training_journal.html"
-        fig.write_html(str(path), include_plotlyjs="cdn")
+        fig.write_html(
+            str(path),
+            include_plotlyjs="cdn",
+            config={"scrollZoom": True, "displayModeBar": True,
+                    "modeBarButtonsToAdd": ["pan2d", "zoom2d"]},
+        )
         if self.verbose:
             print(f"[FoldJournal] Chart  saved → {path}")
 
