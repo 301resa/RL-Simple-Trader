@@ -464,14 +464,13 @@ def _build_journal(
         time_col = all_bars.columns[0]
 
     # ── Build candlestick + PnL chart ─────────────────────────────────────────
-    # Row 2 uses trade-index x-axis (not shared) so bars are always visible
+    # Rows 2 & 3 use trade-index x-axis (not shared) so bars always fill width
     fig = make_subplots(
-        rows=2, cols=1,
+        rows=3, cols=1,
         shared_xaxes=False,
-        row_heights=[0.65, 0.35],
-        vertical_spacing=0.06,
-        subplot_titles=["Price & Trades", "Per-Trade PnL (R)  +  Cumulative PnL (R)"],
-        specs=[[{}], [{"secondary_y": True}]],
+        row_heights=[0.55, 0.22, 0.23],
+        vertical_spacing=0.05,
+        subplot_titles=["Price & Trades", "Per-Trade PnL (R)", "Cumulative PnL (R)"],
     )
 
     if has_bars:
@@ -564,46 +563,46 @@ def _build_journal(
     bar_colors = ["#26a69a" if v >= 0 else "#ef5350" for v in pnl_vals]
     cum_color  = "#26a69a" if (cum_pnl[-1] if cum_pnl else 0) >= 0 else "#ef5350"
 
-    # Per-trade PnL bars (primary y)
+    # Per-trade PnL bars — row 2
     fig.add_trace(go.Bar(
         x=trade_idx,
         y=pnl_vals,
         marker_color=bar_colors,
         marker_line_width=0,
         name="Trade PnL",
-        showlegend=True,
+        showlegend=False,
         hovertemplate="Trade #%{x}<br>PnL: %{y:+.2f}R<extra></extra>",
-    ), row=2, col=1, secondary_y=False)
+    ), row=2, col=1)
+    fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dash"), row=2, col=1)
 
-    # Cumulative PnL line (secondary y)
+    # Cumulative PnL line — row 3
     fig.add_trace(go.Scatter(
         x=trade_idx,
         y=cum_pnl,
         mode="lines",
         line=dict(color=cum_color, width=2),
         fill="tozeroy",
-        fillcolor="rgba(38,166,154,0.10)" if cum_color == "#26a69a" else "rgba(239,83,80,0.10)",
+        fillcolor="rgba(38,166,154,0.12)" if cum_color == "#26a69a" else "rgba(239,83,80,0.12)",
         name="Cumulative PnL",
-        showlegend=True,
+        showlegend=False,
         hovertemplate="Trade #%{x}<br>Cumulative: %{y:+.2f}R<extra></extra>",
-    ), row=2, col=1, secondary_y=True)
-
-    fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dash"), row=2, col=1)
+    ), row=3, col=1)
+    fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dash"), row=3, col=1)
 
     fig.update_layout(
         template="plotly_dark",
-        height=950,
+        height=1050,
         dragmode="pan",
-        legend=dict(x=0.01, y=0.32, bgcolor="rgba(0,0,0,0.4)", font=dict(size=11)),
-        margin=dict(l=60, r=60, t=40, b=40),
+        margin=dict(l=60, r=20, t=40, b=40),
     )
-    fig.update_yaxes(title_text="Price",             row=1, col=1)
-    fig.update_yaxes(title_text="Trade PnL (R)",     row=2, col=1, secondary_y=False)
-    fig.update_yaxes(title_text="Cumulative PnL (R)", row=2, col=1, secondary_y=True,
-                     showgrid=False)
-    fig.update_xaxes(title_text="Trade #",           row=2, col=1,
-                     rangeslider=dict(visible=True, thickness=0.04, bgcolor="#1e222d"))
+    fig.update_yaxes(title_text="Price",              row=1, col=1)
+    fig.update_yaxes(title_text="PnL (R)",            row=2, col=1)
+    fig.update_yaxes(title_text="Cumulative PnL (R)", row=3, col=1)
     fig.update_xaxes(rangeslider=dict(visible=False), row=1, col=1)
+    fig.update_xaxes(rangeslider=dict(visible=False), row=2, col=1)
+    fig.update_xaxes(title_text="Trade #",
+                     rangeslider=dict(visible=True, thickness=0.04, bgcolor="#1e222d"),
+                     row=3, col=1)
 
     chart_html = fig.to_html(
         full_html=False,
