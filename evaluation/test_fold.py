@@ -151,25 +151,30 @@ def _run_checkpoint(
     vn_path: Optional[Path],
     env_factory,
     n_episodes: int = 20,
+    n_workers: int = 8,
 ) -> Tuple[List[dict], List[dict]]:
     """
     Load checkpoint + VecNormalize, run n_episodes deterministically.
+
+    Uses SubprocVecEnv with n_workers parallel envs so episodes execute
+    in parallel rather than one-by-one, matching training throughput.
 
     Returns
     -------
     trades   : list of trade dicts (raw, from _episode_summary)
     episodes : list of episode-level summary dicts
     """
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    import multiprocessing
+    from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
     from sb3_contrib import RecurrentPPO
 
-    # Build a fresh single-env VecNormalize
-    vec_env = DummyVecEnv([env_factory])
+    n_workers = min(n_workers, n_episodes, multiprocessing.cpu_count())
+
+    vec_env = SubprocVecEnv([env_factory] * n_workers, start_method="spawn")
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False,
                            clip_obs=10.0, training=False)
 
     if vn_path is not None:
-        # Load running stats (mean/var) into the wrapper
         vec_env = VecNormalize.load(str(vn_path), vec_env)
         vec_env.training = False
         vec_env.norm_reward = False
@@ -178,27 +183,29 @@ def _run_checkpoint(
 
     all_trades: List[dict] = []
     all_episodes: List[dict] = []
+    completed = 0
 
-    for _ in range(n_episodes):
-        obs = vec_env.reset()
-        done = False
-        lstm_states = None
-        episode_start = np.ones((vec_env.num_envs,), dtype=bool)
+    obs = vec_env.reset()
+    lstm_states = None
+    episode_starts = np.ones((n_workers,), dtype=bool)
 
-        while not done:
-            action, lstm_states = model.predict(
-                obs,
-                state=lstm_states,
-                episode_start=episode_start,
-                deterministic=True,
-            )
-            obs, _reward, dones, infos = vec_env.step(action)
-            episode_start = dones
-            done = bool(dones[0])
-            if done and infos[0]:
-                info = infos[0]
+    while completed < n_episodes:
+        action, lstm_states = model.predict(
+            obs,
+            state=lstm_states,
+            episode_start=episode_starts,
+            deterministic=True,
+        )
+        obs, _reward, dones, infos = vec_env.step(action)
+        episode_starts = dones.copy()
+
+        for done, info in zip(dones, infos):
+            if done and info:
                 all_episodes.append(info)
                 all_trades.extend(info.get("trades_list", []))
+                completed += 1
+                if completed >= n_episodes:
+                    break
 
     vec_env.close()
     return all_trades, all_episodes
@@ -979,6 +986,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Episodes per checkpoint. 0 (default) = run every test day exactly once.",
     )
     parser.add_argument(
+        "--n-workers", type=int, default=8,
+        help="Parallel envs per checkpoint evaluation (default: 8).",
+    )
+    parser.add_argument(
         "--out-dir", default=None,
         help="Directory to write HTML/Excel journals and results (default: models-dir/test_results)",
     )
@@ -1215,7 +1226,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         print(f"  → Evaluating {name} ...", end="", flush=True)
         try:
             trades, episodes = _run_checkpoint(
-                ckpt, vn, env_factory, n_episodes=n_episodes
+                ckpt, vn, env_factory,
+                n_episodes=n_episodes,
+                n_workers=args.n_workers,
             )
         except Exception as exc:
             print(f" FAILED: {exc}")
