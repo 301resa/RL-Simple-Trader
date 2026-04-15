@@ -116,7 +116,6 @@ class OrderZoneEngine:
         current_bar_idx: int,
         atr_state: ATRState,
         zone_state: Optional[ZoneState],
-        liquidity_state=None,          # kept for API compatibility — ignored
         trend_snapshot: Optional[TrendSnapshot] = None,  # kept for API compatibility — ignored
         current_price: Optional[float] = None,  # pass directly to skip bars.iloc lookup
     ) -> OrderZoneState:

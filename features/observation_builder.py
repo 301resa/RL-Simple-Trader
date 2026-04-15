@@ -128,7 +128,6 @@ class ObservationBuilder:
         order_zone_state: OrderZoneState,
         portfolio_state: dict,
         session_info: dict,
-        liquidity_state=None,       # kept for API compatibility — ignored
         pending_order: dict | None = None,
     ) -> np.ndarray:
         """

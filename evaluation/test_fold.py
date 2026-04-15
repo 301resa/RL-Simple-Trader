@@ -1070,7 +1070,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     atr_calc = ATRCalculator(
         atr_period=atr_cfg.get("period", 14),
         exhaustion_threshold=atr_cfg.get("exhaustion_threshold", 0.95),
-        warning_threshold=atr_cfg.get("danger_threshold", 0.85),
     )
     atr_calc.fit(data_loader.daily)
 

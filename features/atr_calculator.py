@@ -93,9 +93,8 @@ class ATRCalculator:
     atr_period : int
         Number of days for ATR computation (Wilder's smoothing).
     exhaustion_threshold : float
-        Fraction of daily ATR at which session is considered exhausted.
-    warning_threshold : float
-        Fraction at which a warning is raised.
+        Fraction of daily ATR at which session is considered exhausted
+        in either direction (blocks new entries).
     profit_target_atr_pct : float
         Default fraction of ATR remaining used as profit target.
     """
@@ -104,12 +103,10 @@ class ATRCalculator:
         self,
         atr_period: int = 14,
         exhaustion_threshold: float = 0.85,
-        warning_threshold: float = 0.85,  # kept for API compat, same as exhaustion
         profit_target_atr_pct: float = 0.75,
     ) -> None:
         self.atr_period = atr_period
         self.exhaustion_threshold = exhaustion_threshold
-        self.warning_threshold = warning_threshold
         self.profit_target_atr_pct = profit_target_atr_pct
 
         self._atr_series: Optional[pd.Series] = None   # date_str → atr_value

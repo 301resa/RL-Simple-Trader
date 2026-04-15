@@ -145,7 +145,6 @@ def build_components(
     atr_calculator = ATRCalculator(
         atr_period=atr_cfg.get("period", 14),
         exhaustion_threshold=atr_cfg.get("exhaustion_threshold", 0.95),
-        warning_threshold=atr_cfg.get("danger_threshold", 0.85),
     )
     atr_calculator.fit(data_loader.daily)
 
@@ -783,7 +782,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     atr_calculator = ATRCalculator(
         atr_period=atr_cfg.get("period", 14),
         exhaustion_threshold=atr_cfg.get("exhaustion_threshold", 0.95),
-        warning_threshold=atr_cfg.get("danger_threshold", 0.85),
     )
     atr_calculator.fit(data_loader.daily)
 

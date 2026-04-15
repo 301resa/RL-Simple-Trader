@@ -209,7 +209,6 @@ def _cli() -> None:
     atr = ATRCalculator(
         atr_period=atr_cfg.get("period", 14),
         exhaustion_threshold=atr_cfg.get("exhaustion_threshold", 0.95),
-        warning_threshold=atr_cfg.get("danger_threshold", 0.85),
     )
     atr.fit(dl.daily)
 

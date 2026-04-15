@@ -329,15 +329,13 @@ metrics and log results without writing any model files (useful for exploration 
 
 - **60-candle sliding window + 11 engineered features**: `lookback_bars: 60` — the last
   60 bars of OHLCV (log-returns + volume ratio) form the price block. Structured features
-  (34) cover: price location (5: drift from session open/high/low, prior-day high/low),
-  portfolio state (6: account metrics, position info), order zone signals (8: dist_norm×2,
-  in_zone×2, zone_width_norm×2, zone_age_norm×2), action mask (5), pending order context
-  (3), and session timing (4: session_time_pct, bars_remaining_pct, `is_rth`,
-  `rth_time_pct`). An additional 11 engineered price/volatility features complete the
-  vector. Wide zones (> 10 pts) are zeroed in all zone features before building the obs.
-  The zone detector uses its own 500-bar history internally — this only controls the obs
-  window. Zone features now include `supply_swept` and `demand_swept` binary flags (+2).
-  Observation vector size: `60 × 5 + 36 + 11 = 347` features.
+  (36) cover: ATR (4), zone signals (10: dist_norm×2, in_zone×2, width_norm×2,
+  age_norm×2, swept×2), order zone / confluence (10), portfolio state (8), session timing
+  (4: session_time_pct, bars_remaining_pct, `is_rth`, `rth_time_pct`). An additional 11
+  engineered price/volatility features complete the vector. Wide zones (> 10 pts) are
+  zeroed in all zone features before building the obs. The zone detector uses its own
+  500-bar history internally. Zone features include `supply_swept` and `demand_swept`
+  binary flags. Observation vector size: `60 × 5 + 36 + 11 = 347` features.
   The LSTM (256 units) carries within-session state across steps.
 
 - **OHLCV jitter augmentation** (`data/data_augmentor.py`): Applied to every training
@@ -405,6 +403,17 @@ metrics and log results without writing any model files (useful for exploration 
     (~10–50× faster) for Zone snapshots; `ATRState`/`OrderZoneState` stored directly.
   - `TradingEnv.step()`: `atr_series.iloc[]` lookup replaced with already-loaded
     `atr_state.atr_daily`; `current_price` reused for session-end force-close.
+  - `DataLoader.get_bars_before()`: O(n\_total\_bars) full-dataset boolean scan replaced
+    with bisect on sorted day list + day-index walk (~7 day lookups instead of 120k rows).
+  - `TradingEnv.reset()` history ATR: 500-iteration Python loop replaced with vectorised
+    `unique-date → bisect map` (≈7 bisect calls per reset instead of 500).
+  - `TradingEnv` RTH time constants (`_rth_start_time`, `_rth_end_time`,
+    `_rth_total_secs`) pre-computed once in `__init__` — eliminates 2 `pd.Timestamp`
+    allocations and 1 `timedelta.total_seconds()` call every step.
+  - `TradingEnv._compute_action_mask()` accepts optional `portfolio_state` — avoids
+    a redundant `get_portfolio_state()` call and a pandas `.iloc` lookup per step.
+  - `ZoneState` and `FIXED_STOP_BUFFER_PTS`/`MIN_STOP_PTS` moved to module-level imports
+    in `trading_env.py`; removed repeated function-level import calls in hot paths.
 
 ---
 

@@ -36,9 +36,9 @@ from environment.position_manager import ExitReason, PositionDirection, Position
 from environment.reward_calculator import RewardCalculator, RewardBreakdown
 from features.atr_calculator import ATRCalculator, ATRState
 from features.observation_builder import ObservationBuilder
-from features.order_zone_engine import OrderZoneEngine, OrderZoneState
+from features.order_zone_engine import FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS, OrderZoneEngine, OrderZoneState
 from features.trend_classifier import TrendClassifier
-from features.zone_detector import ZoneDetector
+from features.zone_detector import ZoneDetector, ZoneState
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -53,7 +53,6 @@ def _filter_wide_zones(zs) -> object:
     Wide zones are never traded (skipped in _place_pending_order) so their signals
     must not influence confluence scoring or observation features.
     """
-    from features.zone_detector import ZoneState
     supply = zs.nearest_supply if (
         zs.nearest_supply is not None
         and (zs.nearest_supply.top - zs.nearest_supply.bottom) <= _MAX_ZONE_WIDTH_ENV
@@ -75,7 +74,6 @@ def _freeze_zone_state(zs) -> object:
     """
     supply = _dc_replace(zs.nearest_supply) if zs.nearest_supply is not None else None
     demand = _dc_replace(zs.nearest_demand) if zs.nearest_demand is not None else None
-    from features.zone_detector import ZoneState
     return ZoneState(nearest_supply=supply, nearest_demand=demand)
 
 
@@ -175,6 +173,13 @@ class TradingEnv(gym.Env):
         self.action_masker = action_masker
         self.rth_start = rth_start
         self.rth_end = rth_end
+        # Pre-compute RTH time constants once — avoids pd.Timestamp allocation per step
+        _rth_start_ts = pd.Timestamp(f"2000-01-01 {rth_start}")
+        _rth_end_ts   = pd.Timestamp(f"2000-01-01 {rth_end}")
+        self._rth_start_time  = _rth_start_ts.time()
+        self._rth_end_time    = _rth_end_ts.time()
+        self._rth_total_secs  = (_rth_end_ts - _rth_start_ts).total_seconds()
+        self._rth_start_secs  = _rth_start_ts.timestamp() % 86400  # seconds since midnight
         self.no_entry_last_n_bars = no_entry_last_n_bars
         self.early_terminate_on_max_dd = early_terminate_on_max_dd
         self.point_value = point_value
@@ -285,13 +290,18 @@ class TradingEnv(gym.Env):
             self._current_day, self.zone_lookback_bars
         )
         if not history_bars.empty:
-            # Per-date daily ATR for history bars (falls back to today's ATR)
-            history_atr_vals = []
-            for ts in history_bars.index:
-                d = ts.strftime("%Y-%m-%d")
-                v = self.atr_calculator.get_atr_for_date(d)
-                history_atr_vals.append(float(v) if v is not None else daily_atr)
-            history_atr = pd.Series(history_atr_vals, index=history_bars.index)
+            # Vectorised per-date ATR for history bars — deduplicate dates first so
+            # bisect is called once per unique date (~7) instead of once per bar (~500).
+            date_strs = history_bars.index.strftime("%Y-%m-%d")
+            unique_dates = date_strs.unique()
+            atr_map = {
+                d: (self.atr_calculator.get_atr_for_date(d) or daily_atr)
+                for d in unique_dates
+            }
+            history_atr = pd.Series(
+                date_strs.map(atr_map).astype(float).values,
+                index=history_bars.index,
+            )
             combined_raw   = pd.concat([history_bars, self._session_bars])
             combined_atr_raw = pd.concat([history_atr, self._atr_series])
         else:
@@ -318,7 +328,7 @@ class TradingEnv(gym.Env):
             # there are always enough bars for a meaningful episode.
             max_offset = max(1, int(n_bars * 0.75))
             start_offset = int(self._rng.integers(0, max_offset))
-            self._session_bars = self._session_bars.iloc[start_offset:].reset_index(drop=False)
+            self._session_bars = self._session_bars.iloc[start_offset:].reset_index(drop=True)
             self._atr_series   = self._atr_series.iloc[start_offset:].reset_index(drop=True)
 
         # Offset into _combined_bars where the agent's episode begins
@@ -402,10 +412,6 @@ class TradingEnv(gym.Env):
         # Build initial observation
         obs, info = self._build_obs_and_info()
 
-        # Lazily define spaces after first observation is built
-        if not self._spaces_defined:
-            self._define_spaces(obs)
-
         log.debug("Episode reset", date=self._current_day, n_bars=self._n_steps)
         return obs, info
 
@@ -440,14 +446,14 @@ class TradingEnv(gym.Env):
                 self._open_from_pending(current_bar_idx=self._current_step)
 
         # ── Validate action against mask ──────────────────────
-        mask = self._compute_action_mask(atr_state)
+        # Compute portfolio_state once and reuse for both mask validation and reward.
+        portfolio_state = self.position_manager.get_portfolio_state(current_price)
+        is_open = self.position_manager.state.is_open
+        mask = self._compute_action_mask(atr_state, portfolio_state=portfolio_state)
         if mask[action] == 0.0:
             # Agent chose a masked action — treat as HOLD
             log.debug("Masked action overridden to HOLD", action=Action(action).name)
             action = Action.HOLD
-
-        portfolio_state = self.position_manager.get_portfolio_state(current_price)
-        is_open = self.position_manager.state.is_open
 
         # ── Execute action ────────────────────────────────────
         reward_breakdown = RewardBreakdown(total=0.0)
@@ -593,17 +599,6 @@ class TradingEnv(gym.Env):
 
     # ── Private helpers ───────────────────────────────────────
 
-    def _define_spaces(self, sample_obs: np.ndarray) -> None:
-        self._obs_dim = len(sample_obs)
-        self._observation_space = spaces.Box(
-            low=-self.observation_builder.clip_value,
-            high=self.observation_builder.clip_value,
-            shape=(self._obs_dim,),
-            dtype=np.float32,
-        )
-        self._spaces_defined = True
-        log.info("Spaces defined", obs_dim=self._obs_dim, n_actions=Action.n_actions())
-
     def _build_obs_and_info(self) -> Tuple[np.ndarray, dict]:
         """Build the observation vector and info dict for the current step."""
         step = min(self._current_step, self._n_steps - 1)
@@ -629,26 +624,19 @@ class TradingEnv(gym.Env):
         # RTH context: tells the agent whether it is in Regular Trading Hours
         # (09:30–16:00 ET) vs Globex/pre-market.  RTH price action is structurally
         # different (higher volume, tighter spreads, cleaner zone reactions).
+        # Time constants are pre-computed once in __init__ — no allocation per step.
         is_rth = 0.0
         rth_time_pct = 0.0
-        try:
-            bar_ts = self._session_bars.index[step]
-            bar_time = bar_ts.time()
-            rth_s = pd.Timestamp(f"2000-01-01 {self.rth_start}").time()
-            rth_e = pd.Timestamp(f"2000-01-01 {self.rth_end}").time()
-            if rth_s <= bar_time <= rth_e:
-                is_rth = 1.0
-                rth_total_secs = (
-                    pd.Timestamp(f"2000-01-01 {self.rth_end}")
-                    - pd.Timestamp(f"2000-01-01 {self.rth_start}")
-                ).total_seconds()
-                elapsed_secs = (
-                    pd.Timestamp(f"2000-01-01 {bar_time}")
-                    - pd.Timestamp(f"2000-01-01 {self.rth_start}")
-                ).total_seconds()
-                rth_time_pct = float(np.clip(elapsed_secs / max(rth_total_secs, 1.0), 0.0, 1.0))
-        except Exception:
-            pass
+        bar_time = self._session_bars.index[step].time()
+        if self._rth_start_time <= bar_time <= self._rth_end_time:
+            is_rth = 1.0
+            elapsed_secs = (
+                pd.Timestamp(f"2000-01-01 {bar_time}")
+                - pd.Timestamp(f"2000-01-01 {self.rth_start}")
+            ).total_seconds()
+            rth_time_pct = float(np.clip(
+                elapsed_secs / max(self._rth_total_secs, 1.0), 0.0, 1.0
+            ))
 
         session_info = {
             "session_time_pct":   step / max(self._n_steps - 1, 1),
@@ -682,7 +670,7 @@ class TradingEnv(gym.Env):
             "atr_pct_used": atr_state.atr_pct_used,
             "trades_today": portfolio_state.get("trades_today", 0),
             "daily_pnl_r": portfolio_state.get("daily_pnl_r", 0.0),
-            "action_mask": self._compute_action_mask(atr_state).tolist(),
+            "action_mask": self._compute_action_mask(atr_state, portfolio_state=portfolio_state).tolist(),
         }
         return obs, info
 
@@ -699,11 +687,17 @@ class TradingEnv(gym.Env):
                 trend_snapshot=None,
             )
 
-    def _compute_action_mask(self, atr_state: ATRState) -> np.ndarray:
+    def _compute_action_mask(
+        self, atr_state: ATRState, portfolio_state: Optional[dict] = None
+    ) -> np.ndarray:
         step = min(self._current_step, self._n_steps - 1)
-        portfolio_state = self.position_manager.get_portfolio_state(
-            float(self._session_bars.iloc[step]["close"])
-        )
+        if portfolio_state is None:
+            portfolio_state = self.position_manager.get_portfolio_state(
+                float(self.observation_builder._cached_closes[
+                    self._combined_session_offset + step
+                ]) if self.observation_builder._cached_closes is not None
+                else float(self._session_bars.iloc[step]["close"])
+            )
         order_zone_state = (
             self._precomputed_states[step]["oz"]
             if (hasattr(self, "_precomputed_states") and self._precomputed_states)
@@ -748,9 +742,6 @@ class TradingEnv(gym.Env):
         Zones wider than 10 points are skipped — undefined risk.
         Order is skipped if zone has not been swept yet.
         """
-        from features.order_zone_engine import FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS
-        from features.atr_calculator import ATRCalculator
-
         zone_state = self._last_zone_state if hasattr(self, "_last_zone_state") else None
         oz_state   = self._last_order_zone_state if hasattr(self, "_last_order_zone_state") else None
         confluence = oz_state.confluence_score if oz_state is not None else 1.0
@@ -870,8 +861,6 @@ class TradingEnv(gym.Env):
         If the impulse extreme fails validation (e.g. zone formed from a small bar),
         we fall back to the ATR projection.
         """
-        from features.atr_calculator import ATRCalculator
-
         zone = None
         if direction == 1 and zone_state and zone_state.nearest_demand:
             zone = zone_state.nearest_demand
@@ -886,7 +875,6 @@ class TradingEnv(gym.Env):
             if direction == -1 and extreme < entry_price:
                 return extreme
 
-        # Fallback: ATR remaining projection
         return ATRCalculator.compute_atr_target_price(entry_price, direction, atr_state)
 
     def _sample_episode_day(self) -> str:

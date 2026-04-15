@@ -17,6 +17,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import bisect
 import glob
 import os
 from pathlib import Path
@@ -122,6 +123,10 @@ class DataLoader:
         Return the last ``n_bars`` intraday bars that are strictly before
         ``date`` (i.e. from prior trading sessions).
 
+        Uses bisect on the sorted trading-day list and the pre-built day index
+        so only the required prior days are touched — O(n_prior_days) instead
+        of O(n_total_bars).
+
         Parameters
         ----------
         date : str
@@ -137,11 +142,26 @@ class DataLoader:
         chronologically.  Empty DataFrame when no prior data exists.
         """
         self._assert_loaded()
-        cutoff = pd.Timestamp(date).date()
-        prior = self._intraday[self._intraday.index.date < cutoff]
-        if prior.empty:
+        days = self.get_trading_days()          # sorted list, O(1) cached
+        cutoff_idx = bisect.bisect_left(days, date)
+        if cutoff_idx == 0:
             return pd.DataFrame(columns=self._intraday.columns)
-        return prior.iloc[-n_bars:]
+
+        # Walk backwards through prior days collecting bars until we have n_bars
+        collected: List[pd.DataFrame] = []
+        total = 0
+        for i in range(cutoff_idx - 1, -1, -1):
+            day_bars = self._day_index[days[i]]
+            collected.append(day_bars)
+            total += len(day_bars)
+            if total >= n_bars:
+                break
+
+        if not collected:
+            return pd.DataFrame(columns=self._intraday.columns)
+
+        combined = pd.concat(reversed(collected))
+        return combined.iloc[-n_bars:]
 
     def get_daily_bar(self, date: str) -> Optional[pd.Series]:
         """
