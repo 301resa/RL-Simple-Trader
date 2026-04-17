@@ -3,16 +3,15 @@
 # PPO agent and neural network configuration.
 
 # RecurrentPPO uses an LSTM hidden state that carries within-session memory.
-# The observation includes a 500-candle sliding price window (set via
-# lookback_bars in environment_config.yaml). Obs size: 500×5 + 28 = 2,528.
-# n_steps=512 and batch_size=64 keep rollout buffer memory at ~80 MB for 2,528-dim obs.
+# Obs: 60-bar OHLCV window (300) + structured (36) + engineered (17) = 353 features.
+# HTF context (1h/2h range position, momentum coherence) is in the engineered block.
 algorithm: RecurrentPPO
 seed: 42
 device: auto          # "auto", "cpu", or "cuda"
 
 ppo:
   learning_rate: 3.0e-4
-  learning_rate_schedule: linear   # "linear", "cosine", or "constant"
+  learning_rate_schedule: cosine   # "linear", "cosine", or "constant"
   n_steps: 2048                    # rollout buffer per env — larger rollout amortises reset overhead
   batch_size: 256                  # mini-batch (must divide n_steps); larger = better GPU utilisation
   n_epochs: 6                      # gradient passes per rollout (fewer = faster; 6 balances quality/speed)
@@ -43,7 +42,7 @@ exploration:
 
 checkpointing:
   save_freq: 100_000               # periodic checkpoint every N steps
-  keep_n_checkpoints: 5            # keep only the N most recent rolling checkpoints
+  keep_n_checkpoints: 30            # keep only the N most recent rolling checkpoints
 
 evaluation:
   eval_freq: 100_000               # run val metrics every N training steps
@@ -65,6 +64,6 @@ multiprocessing:
 walk_forward:
   n_folds: 1                       # folds to train (-1 = all possible)
   train_months: 12                 # training window (~252 trading days)
-  val_weeks: 5                     # validation window (~25 trading days)
+  val_weeks: 2                    # validation window (~80 trading days)
   output_dir: logs/walk_forward    # root directory for all fold outputs
 

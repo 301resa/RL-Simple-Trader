@@ -18,20 +18,25 @@ entry_bonuses:
   full_order_zone_confluence: 0.50      # price inside a valid zone with ATR room
   in_supply_demand_zone: 0.25          # price is inside a valid zone
   atr_has_room: 0.15                   # ATR not yet in warning territory
-  high_rr_ratio: 0.20                  # R:R >= minimum
+  high_rr_ratio: 0.40                  # R:R >= minimum
   # liquidity_sweep_present removed — sweep pillar removed from system
   # rejection_candle_present removed — Pillar 3 not used
 
 entry_penalties:
   # ── Entry cost ────────────────────────────────────────────────────────────
-  # Keep very small — we want the agent to trade; cost comes from outcome.
-  entry_cost: -0.005                    # near-zero: don't penalise exploration
+  entry_cost: 0                         # near-zero: don't penalise exploration
 
   # ── Zone/setup penalties ──────────────────────────────────────────────────
-  no_zone_present: -0.05
+  no_zone_present: -0.20               # increased: entering outside a zone is a clear mistake
   atr_exhausted: -0.40
-  rr_below_minimum: -0.08
-  overtrading: 0.0                      # removed — daily loss limit (-3R) is the brake
+  rr_below_minimum: -0.25             # increased: bad R:R is a sniper failure
+  overtrading: 0.0                      # daily loss limit (-3R) is the brake
+
+  # ── MAE (max adverse excursion) ───────────────────────────────────────────
+  # Penalises entries where price moved significantly against before resolving.
+  # Good entries (sniper) should have minimal adverse excursion before working.
+  mae_penalty_weight: 0.40             # weight × max(0, mae_r - mae_threshold_r)
+  mae_threshold_r: 0.40               # MAE below this is acceptable (R multiples)
 
 exit_rewards:
   trailing_stop_correctly: 0.30       # used trail stop before exit
@@ -44,8 +49,8 @@ exit_penalties:
 
 violations:
   max_drawdown_breach: -2.00          # hard guardrail breach
-  daily_loss_limit_breach: -1.00      # daily loss limit hit
+  daily_loss_limit_breach: -1.50      # daily loss limit hit
 
 discipline:
-  re_entry_after_loss_streak_penalty: -0.20
-  loss_streak_threshold: 3
+  re_entry_after_loss_streak_penalty: -0.5
+  loss_streak_threshold: 4

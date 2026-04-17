@@ -190,7 +190,7 @@ class TradingEvalCallback(BaseCallback):
 
         # State
         self._best_score:      float = float("-inf")
-        self._best_score_step: int   = 0
+        self._best_score_step: int   = warmup_steps   # patience clock starts at warmup, not step 0
         self._last_eval_step:  int   = 0
         self._eval_history:    List[ValMetrics] = []
         self._early_stopped:   bool  = False

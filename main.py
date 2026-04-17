@@ -41,7 +41,7 @@ from pathlib import Path
 
 import yaml
 
-from utils.logger import configure_logging, get_logger
+from utils.logger import configure_logging, get_logger, tee_stdout
 from utils.metrics_printer import init_console
 from utils.validators import validate_all_configs, assert_instrument_allowed
 
@@ -1260,6 +1260,12 @@ def main() -> None:
         log_file=metrics_log_path,
         rich_formatting=log_cfg.get("outputs", {}).get("console", {}).get("rich_formatting", True),
     )
+
+    # Mirror all stdout (print + log) to a timestamped console transcript
+    from datetime import datetime as _dt
+    _run_ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+    _console_log_dir = Path(metrics_log_path).parent if metrics_log_path else Path("logs")
+    tee_stdout(_console_log_dir / f"console_{args.mode}_{_run_ts}.log")
 
     # Initialise the shared Rich console (dual terminal + file output for tables)
     init_console(log_path=metrics_log_path)

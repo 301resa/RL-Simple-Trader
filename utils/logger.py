@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import io
 import logging
 import sys
 from pathlib import Path
@@ -25,6 +26,61 @@ import structlog
 
 
 _configured = False
+_tee_file: Optional[io.TextIOWrapper] = None
+
+
+class _Tee(io.TextIOBase):
+    """Write to both the original stream and a file simultaneously."""
+
+    def __init__(self, original: io.TextIOBase, file_path: Path) -> None:
+        super().__init__()
+        self._orig = original
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = open(file_path, "a", encoding="utf-8", buffering=1)
+
+    def write(self, s: str) -> int:
+        self._orig.write(s)
+        self._file.write(s)
+        return len(s)
+
+    def flush(self) -> None:
+        self._orig.flush()
+        self._file.flush()
+
+    # Delegate terminal-detection methods to the original stream so that
+    # tqdm/SB3 still renders its progress bar correctly.
+    def isatty(self) -> bool:
+        return getattr(self._orig, "isatty", lambda: False)()
+
+    def fileno(self) -> int:
+        return self._orig.fileno()  # type: ignore[attr-defined]
+
+    @property
+    def encoding(self) -> str:  # type: ignore[override]
+        return getattr(self._orig, "encoding", "utf-8")
+
+    def close_tee(self) -> None:
+        """Close only the log file; leave the original stream open."""
+        self._file.flush()
+        self._file.close()
+
+
+def tee_stdout(log_path: str | Path) -> None:
+    """
+    Mirror all stdout (including print() calls) to *log_path* in addition
+    to the terminal.  Call once at startup; the file stays open for the
+    lifetime of the process.
+
+    Parameters
+    ----------
+    log_path : str | Path
+        Destination file.  Parent directories are created automatically.
+    """
+    global _tee_file
+    log_path = Path(log_path)
+    tee = _Tee(sys.stdout, log_path)
+    sys.stdout = tee  # type: ignore[assignment]
+    _tee_file = tee  # keep reference so it isn't GC'd
 
 
 def configure_logging(

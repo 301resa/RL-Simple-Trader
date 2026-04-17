@@ -319,16 +319,39 @@ class TradingEnv(gym.Env):
         self.reward_calculator.reset_episode_stats()
 
         # Random start: agent begins at a random bar within the session.
-        # Drawn from the env's seeded RNG so it is deterministic and
-        # consistent for a given worker, but differs across workers.
+        # 70% of episodes use zone-biased start (begins near a price extreme /
+        # zone area); 30% are purely random.  Both respect the 75% cap so
+        # there are always enough bars for a meaningful episode.
         n_bars = len(self._session_bars)
         start_offset = 0
         if self.random_start and n_bars > 5:
-            # Allow start anywhere in the first 75% of the session so
-            # there are always enough bars for a meaningful episode.
             max_offset = max(1, int(n_bars * 0.75))
-            start_offset = int(self._rng.integers(0, max_offset))
-            self._session_bars = self._session_bars.iloc[start_offset:].reset_index(drop=True)
+
+            if self._rng.random() < 0.70:
+                # Zone-biased: pick a start within 5 bars before a price extreme.
+                # Uses session high/low as a proxy for zone areas — ES tends to
+                # form supply/demand zones near intraday extremes.
+                closes = self._session_bars["close"].to_numpy()
+                highs  = self._session_bars["high"].to_numpy()
+                lows   = self._session_bars["low"].to_numpy()
+                s_high = float(highs.max())
+                s_low  = float(lows.min())
+                zone_range = daily_atr * 0.18   # within 18% ATR of extremes
+                near_zone  = (
+                    (closes >= s_high - zone_range) |
+                    (closes <= s_low  + zone_range)
+                )
+                candidates = np.where(near_zone)[0]
+                candidates = candidates[candidates < max_offset]
+                if len(candidates) > 0:
+                    target_bar  = int(self._rng.choice(candidates))
+                    start_offset = max(0, target_bar - 5)
+                else:
+                    start_offset = int(self._rng.integers(0, max_offset))
+            else:
+                start_offset = int(self._rng.integers(0, max_offset))
+
+            self._session_bars = self._session_bars.iloc[start_offset:]   # preserve DatetimeIndex
             self._atr_series   = self._atr_series.iloc[start_offset:].reset_index(drop=True)
 
         # Offset into _combined_bars where the agent's episode begins
@@ -1001,20 +1024,7 @@ class TradingEnv(gym.Env):
                 rth_e = pd.Timestamp(f"2000-01-01 {self.rth_end}").time()
                 for t in trades:
                     idx = min(t.entry_bar_idx, len(self._session_bars) - 1)
-                    row = self._session_bars.iloc[idx]
-                    # After random_start reset_index(drop=False) the DatetimeIndex
-                    # becomes integers and the timestamp moves to a "datetime" column.
-                    if hasattr(self._session_bars.index, "hour"):
-                        bar_ts = self._session_bars.index[idx]
-                    elif "datetime" in self._session_bars.columns:
-                        bar_ts = pd.Timestamp(row["datetime"])
-                    else:
-                        bar_ts = None
-                    if bar_ts is None:
-                        rth_trades_n += 1
-                        rth_wins_n   += int(t.is_win)
-                        continue
-                    bar_time = bar_ts.time()
+                    bar_time = self._session_bars.index[idx].time()
                     if rth_s <= bar_time <= rth_e:
                         rth_trades_n += 1
                         rth_wins_n   += int(t.is_win)

@@ -110,11 +110,15 @@ class RewardCalculator:
         discipline: Optional[dict] = None,
         entry_cost: float = -0.05,
         gave_back_profit_weight: float = 0.30,
+        mae_penalty_weight: float = 0.40,
+        mae_threshold_r: float = 0.40,
     ) -> None:
         self.core_scale = core_scale
         self.hold_flat_penalty = hold_flat_penalty
         self.entry_cost = entry_cost
         self.gave_back_profit_weight = gave_back_profit_weight
+        self.mae_penalty_weight = mae_penalty_weight
+        self.mae_threshold_r = mae_threshold_r
 
         # Shaping scale: 1.0 = full shaping, 0.0 = pure P&L only.
         # Decayed externally by ShapingDecayCallback during training.
@@ -365,6 +369,14 @@ class RewardCalculator:
             exit_penalty -= self.gave_back_profit_weight * r_given_back * self.shaping_scale
             note += f"gave_back_{r_given_back:.1f}r "
 
+        # ── MAE penalty: sniper entries should have minimal adverse excursion ──
+        # Good entry = price immediately moves in direction → low MAE.
+        # Bad entry = price first moves against → high MAE, even if trade wins.
+        mae_excess = max(0.0, trade.max_adverse_excursion - self.mae_threshold_r)
+        if mae_excess > 0.0:
+            exit_penalty -= self.mae_penalty_weight * mae_excess * self.shaping_scale
+            note += f"mae_{trade.max_adverse_excursion:.2f}r "
+
         # core_r is NEVER scaled — always full P&L signal
         total = (core_r + exit_bonus + exit_penalty) * self.core_scale
 
@@ -409,15 +421,18 @@ class RewardCalculator:
     @classmethod
     def from_config(cls, cfg: dict) -> "RewardCalculator":
         """Construct from a parsed reward_config.yaml dict."""
+        ep = cfg.get("entry_penalties", {})
         return cls(
             core_scale=cfg.get("core", {}).get("scale", 1.0),
             hold_flat_penalty=cfg.get("step", {}).get("hold_flat_penalty", -0.001),
             entry_bonuses=cfg.get("entry_bonuses", {}),
-            entry_penalties=cfg.get("entry_penalties", {}),
+            entry_penalties=ep,
             exit_bonuses=cfg.get("exit_rewards", {}),
             exit_penalties=cfg.get("exit_penalties", {}),
             violations=cfg.get("violations", {}),
             discipline=cfg.get("discipline", {}),
-            entry_cost=cfg.get("entry_penalties", {}).get("entry_cost", -0.05),
+            entry_cost=ep.get("entry_cost", -0.05),
             gave_back_profit_weight=cfg.get("exit_penalties", {}).get("gave_back_profit_pct", 0.30),
+            mae_penalty_weight=ep.get("mae_penalty_weight", 0.40),
+            mae_threshold_r=ep.get("mae_threshold_r", 0.40),
         )

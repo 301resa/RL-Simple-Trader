@@ -10,14 +10,16 @@ The observation is a flat float32 numpy array containing:
   4. Order zone / confluence features (score, R:R, pending order state)   [10]
   5. Portfolio state (position, P&L, drawdown, trade counts)              [8]
   6. Session timing + market context (elapsed, remaining, RTH flag, RTH time) [4]
-  7. Engineered features — 11 pre-computed signals:                       [11]
+  7. Engineered features — 17 pre-computed signals:                       [17]
        Price location (5): session drift, dist from session high/low, prior day high/low
-       Momentum (3): 5-bar, 15-bar, 30-bar log-returns
+       Momentum (4): 5-bar, 12-bar (1h), 15-bar, 30-bar log-returns
        Volatility regime (2): short/long vol ratio, avg close-in-range
        Bar character (1): avg candle body/range ratio
+       HTF context (5): 1h close-in-range, 2h close-in-range, prior day range position,
+                        multi-TF momentum coherence, HTF vol expansion
 
-Total fixed features: 36 + 11 = 47
-Observation vector size: 60 × 5 + 47 = 347
+Total fixed features: 36 + 17 = 53
+Observation vector size: 60 × 5 + 53 = 353
 
 Zone width/age features give the agent context on zone quality — tight fresh zones
 trade differently from wide stale ones.  Wide zones (>10 pts) are zeroed out in
@@ -38,7 +40,7 @@ from features.order_zone_engine import OrderZoneState
 
 # Structured feature counts
 _N_STRUCTURED  = 36   # ATR(4) + Zone(10) + OrderZone(10) + Portfolio(8) + Session(4)
-_N_ENGINEERED  = 11   # PriceLocation(5) + Momentum(3) + VolRegime(2) + BarCharacter(1)
+_N_ENGINEERED  = 17   # PriceLocation(5) + Momentum(4) + VolRegime(2) + BarCharacter(1) + HTFContext(5)
 _MAX_ZONE_WIDTH = 10.0  # zones wider than this are zeroed in obs (not tradeable)
 
 
@@ -80,8 +82,8 @@ class ObservationBuilder:
 
         Structured features (36):
           ATR(4) + Zone(10) + OrderZone(10) + Portfolio(8) + Session(4)
-        Engineered features (11):
-          PriceLocation(5) + Momentum(3) + VolRegime(2) + BarCharacter(1)
+        Engineered features (17):
+          PriceLocation(5) + Momentum(4) + VolRegime(2) + BarCharacter(1) + HTFContext(5)
         Price window:
           lookback_bars × 5 OHLCV log-returns
         """
@@ -324,7 +326,7 @@ class ObservationBuilder:
             float(np.clip((current_close - atr_state.prior_day_low)   / atr, -2.0, 2.0)),
         ])
 
-        # — Momentum (3): multi-timeframe log-returns (5 / 15 / 30 bars back)
+        # — Momentum (4): multi-timeframe log-returns (5 / 12(1h) / 15 / 30 bars back)
         def _multi_bar_return(lookback: int) -> float:
             past_idx = max(current_bar_idx - lookback, 0)
             past_close = float(closes_np[past_idx])
@@ -332,11 +334,11 @@ class ObservationBuilder:
                 return 0.0
             return float(np.clip(np.log(max(current_close, 1e-6) / past_close), -cv, cv))
 
-        features.extend([
-            _multi_bar_return(5),
-            _multi_bar_return(15),
-            _multi_bar_return(30),
-        ])
+        r5  = _multi_bar_return(5)
+        r12 = _multi_bar_return(12)   # 1h (12 × 5min)
+        r15 = _multi_bar_return(15)
+        r30 = _multi_bar_return(30)
+        features.extend([r5, r12, r15, r30])
 
         # — Volatility regime (2): short-vol / long-vol expansion ratio + close-in-range
         i = current_bar_idx
@@ -363,6 +365,47 @@ class ObservationBuilder:
         w5_o = opens_np[w5_start:i + 1]
         body_ratio = float(np.mean(np.abs(w5_c - w5_o) / np.maximum(w5_h - w5_l, 1e-6)))
         features.append(float(np.clip(body_ratio, 0.0, 1.0)))
+
+        # — HTF context (5): higher-timeframe structure derived from 5-min bars ──
+        #   Gives the agent multi-hour context without requiring separate HTF data.
+
+        # 1h close-in-range: where is price in the last 12 bars' H-L range?
+        #   1.0 = at top (bullish), 0.0 = at bottom (bearish)
+        w12_start = max(i - 11, 0)
+        w12_h = highs_np[w12_start:i + 1].max()
+        w12_l = lows_np[w12_start:i + 1].min()
+        cir_1h = float((current_close - w12_l) / max(w12_h - w12_l, 1e-6))
+        cir_1h = float(np.clip(cir_1h, 0.0, 1.0))
+
+        # 2h close-in-range: same over last 24 bars
+        w24_start = max(i - 23, 0)
+        w24_h = highs_np[w24_start:i + 1].max()
+        w24_l = lows_np[w24_start:i + 1].min()
+        cir_2h = float((current_close - w24_l) / max(w24_h - w24_l, 1e-6))
+        cir_2h = float(np.clip(cir_2h, 0.0, 1.0))
+
+        # Prior day range position: where is price relative to yesterday's H-L?
+        #   0.5 = midpoint, >0.5 = upper half (bullish bias), <0.5 = lower half
+        prior_range = max(atr_state.prior_day_range, 1e-6)
+        prior_range_pos = float(np.clip(
+            (current_close - atr_state.prior_day_low) / prior_range, 0.0, 1.0
+        ))
+
+        # Multi-TF momentum coherence: are 5-bar, 12-bar and 30-bar returns aligned?
+        #   +1 = all three pointing same direction (strong trend)
+        #    0 = mixed signals
+        #   -1 = all three pointing same direction (strong counter-trend context)
+        signs = np.sign([r5, r12, r30])
+        coherence = float(np.sum(signs)) / 3.0   # range [-1, 1]
+
+        # HTF volatility expansion: 1h vol vs 2h vol (is the market accelerating?)
+        returns_12 = np.diff(np.log(np.maximum(closes_np[w12_start:i + 1], 1e-6)))
+        returns_24 = np.diff(np.log(np.maximum(closes_np[w24_start:i + 1], 1e-6)))
+        htf_vol_12 = float(np.std(returns_12)) if len(returns_12) > 1 else 0.0
+        htf_vol_24 = float(np.std(returns_24)) if len(returns_24) > 1 else 0.0
+        htf_vol_expansion = float(np.clip(htf_vol_12 / max(htf_vol_24, 1e-8), 0.0, 4.0)) / 4.0
+
+        features.extend([cir_1h, cir_2h, prior_range_pos, coherence, htf_vol_expansion])
 
         # ── Assemble and sanitise ─────────────────────────────────────────────
         obs = np.array(features, dtype=np.float32)
