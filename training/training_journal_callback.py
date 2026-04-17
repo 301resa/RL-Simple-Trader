@@ -20,7 +20,7 @@ Plotly chart
 ------------
   Row 1: Cumulative equity curve (R)
   Row 2: Per-trade PnL bar chart (green=win, red=loss)
-  Row 3: Rolling 20-trade win rate
+  Row 3: Cumulative drawdown (R)
   Row 4: Trade duration histogram
   Bottom: summary stats table
 """
@@ -112,15 +112,35 @@ class TrainingJournalCallback(BaseCallback):
             if self.verbose:
                 print(f"[TrainingJournal] Plotly write failed: {exc}")
 
+    # ── Public snapshot API (called by hotsave callback) ─────────────────────
+
+    def write_snapshot(self, output_dir: Path, stem: str) -> None:
+        """Write Excel + HTML to output_dir/<stem>.{xlsx,html} without touching 'latest'."""
+        if not self._trades:
+            return
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._write_excel(output_dir, stem=stem, copy_latest=False)
+        except Exception as exc:
+            if self.verbose:
+                print(f"[TrainingJournal] Hotsave Excel write failed: {exc}")
+        try:
+            self._write_plotly(output_dir, stem=stem, copy_latest=False)
+        except Exception as exc:
+            if self.verbose:
+                print(f"[TrainingJournal] Hotsave Plotly write failed: {exc}")
+
     # ── Excel ─────────────────────────────────────────────────────────────────
 
-    def _write_excel(self, snap_dir: Path) -> None:
+    def _write_excel(self, snap_dir: Path, stem: str | None = None, copy_latest: bool = True) -> None:
         import pandas as pd
         from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
 
         df = pd.DataFrame(self._trades)
-        stem = f"journal_s{self._save_n:04d}_step{self.num_timesteps:010d}"
+        if stem is None:
+            stem = f"journal_s{self._save_n:04d}_step{self.num_timesteps:010d}"
         path = snap_dir / f"{stem}.xlsx"
 
         with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
@@ -161,17 +181,17 @@ class TrainingJournalCallback(BaseCallback):
             summary_df.to_excel(writer, sheet_name="Summary", index=False)
             _style_summary_sheet(writer.sheets["Summary"])
 
-        # Also overwrite a fixed-name "latest" copy for quick access
-        import shutil
-        latest = self.journal_dir / "training_journal.xlsx"
-        shutil.copy2(str(path), str(latest))
+        if copy_latest:
+            import shutil
+            latest = self.journal_dir / "training_journal.xlsx"
+            shutil.copy2(str(path), str(latest))
 
         if self.verbose:
             print(f"[TrainingJournal] Excel saved → {path}  ({len(df)} trades)")
 
     # ── Plotly ────────────────────────────────────────────────────────────────
 
-    def _write_plotly(self, snap_dir: Path) -> None:
+    def _write_plotly(self, snap_dir: Path, stem: str | None = None, copy_latest: bool = True) -> None:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
@@ -188,14 +208,11 @@ class TrainingJournalCallback(BaseCallback):
 
         n = len(pnl_r)
         trade_nums = list(range(1, n + 1))
-        equity     = list(np.cumsum(pnl_r))
+        equity     = np.cumsum(pnl_r)
 
-        # Rolling 20-trade win rate
-        win_arr    = np.array([1.0 if w else 0.0 for w in is_win])
-        roll_wr    = [
-            float(np.mean(win_arr[max(0, i - 19): i + 1]))
-            for i in range(n)
-        ]
+        # Cumulative drawdown: equity − running peak (always ≤ 0)
+        peak       = np.maximum.accumulate(equity)
+        drawdown   = list(equity - peak)
 
         total_r   = sum(pnl_r)
         n_wins    = sum(is_win)
@@ -216,7 +233,7 @@ class TrainingJournalCallback(BaseCallback):
             subplot_titles=[
                 "Cumulative Equity (R)",
                 "Per-Trade PnL (R)",
-                "Rolling 20-Trade Win Rate",
+                "Cumulative Drawdown (R)",
                 "Trade Duration Distribution (min)",
                 "",
             ],
@@ -255,18 +272,20 @@ class TrainingJournalCallback(BaseCallback):
         )
         fig.add_hline(y=0, line=dict(color=_GRID, width=1), row=2, col=1)
 
-        # ── Row 3: Rolling win rate ───────────────────────────
+        # ── Row 3: Cumulative drawdown ────────────────────────
         fig.add_trace(
             go.Scatter(
-                x=trade_nums, y=[r * 100 for r in roll_wr],
+                x=trade_nums, y=drawdown,
                 mode="lines",
-                line=dict(color=_GOLD, width=1.5),
-                hovertemplate="Trade %{x}<br>Win Rate: %{y:.1f}%<extra></extra>",
-                name="Win Rate",
+                line=dict(color=_RED, width=1.5),
+                fill="tozeroy",
+                fillcolor="rgba(239,83,80,0.15)",
+                hovertemplate="Trade %{x}<br>Drawdown: %{y:.2f}R<extra></extra>",
+                name="Drawdown",
             ),
             row=3, col=1,
         )
-        fig.add_hline(y=50, line=dict(color=_GRID, width=1, dash="dot"), row=3, col=1)
+        fig.add_hline(y=0, line=dict(color=_GRID, width=1, dash="dot"), row=3, col=1)
 
         # ── Row 4: Duration histogram ─────────────────────────
         fig.add_trace(
@@ -341,7 +360,8 @@ class TrainingJournalCallback(BaseCallback):
             row=4, col=1,
         )
 
-        stem = f"journal_s{self._save_n:04d}_step{self.num_timesteps:010d}"
+        if stem is None:
+            stem = f"journal_s{self._save_n:04d}_step{self.num_timesteps:010d}"
         path = snap_dir / f"{stem}.html"
         fig.write_html(
             str(path),
@@ -350,10 +370,10 @@ class TrainingJournalCallback(BaseCallback):
                     "modeBarButtonsToAdd": ["pan2d", "zoom2d"]},
         )
 
-        # Also overwrite latest copy
-        import shutil
-        latest = self.journal_dir / "training_journal.html"
-        shutil.copy2(str(path), str(latest))
+        if copy_latest:
+            import shutil
+            latest = self.journal_dir / "training_journal.html"
+            shutil.copy2(str(path), str(latest))
 
         if self.verbose:
             print(f"[TrainingJournal] Chart  saved → {path}")

@@ -12,7 +12,7 @@ which writes:
   <fold_dir>/fold_<N>_training_journal.html
       — equity curves for every env overlaid on one chart
       — per-env PnL bar chart
-      — per-env rolling win rate
+      — cumulative drawdown (R)
       — aggregate stats table
 
 Usage
@@ -207,7 +207,7 @@ class FoldJournalCallback(BaseCallback):
         # ── Build figure: 4 rows ──────────────────────────────
         # Row 1: single aggregate cumulative PnL line
         # Row 2: per-trade PnL bars
-        # Row 3: rolling 20-trade win rate
+        # Row 3: cumulative drawdown
         # Row 4: per-env summary table
         fig = make_subplots(
             rows=4, cols=1,
@@ -222,7 +222,7 @@ class FoldJournalCallback(BaseCallback):
             subplot_titles=[
                 "Cumulative PnL (R) — all envs combined",
                 "Per-Trade PnL (R)",
-                "Rolling 20-Trade Win Rate",
+                "Cumulative Drawdown (R)",
                 "",
             ],
         )
@@ -261,25 +261,25 @@ class FoldJournalCallback(BaseCallback):
         )
         fig.add_hline(y=0, line=dict(color=_GRID, width=1), row=2, col=1)
 
-        # ── Row 3: rolling win rate ────────────────────────────
-        win_arr = np.array([1.0 if w else 0.0 for w in agg_is_win])
-        roll_wr = [
-            float(np.mean(win_arr[max(0, j - 19): j + 1]))
-            for j in range(n_agg)
-        ]
+        # ── Row 3: cumulative drawdown ─────────────────────────
+        equity_arr = np.array(equity)
+        peak       = np.maximum.accumulate(equity_arr)
+        drawdown   = list(equity_arr - peak)
         fig.add_trace(
             go.Scatter(
                 x=trade_nums,
-                y=[r * 100 for r in roll_wr],
+                y=drawdown,
                 mode="lines",
-                line=dict(color=_COLOURS[2], width=1.5),
-                hovertemplate="Trade #%{x}<br>Win Rate: %{y:.1f}%<extra></extra>",
-                name="Win Rate",
+                line=dict(color=_RED, width=1.5),
+                fill="tozeroy",
+                fillcolor="rgba(239,83,80,0.15)",
+                hovertemplate="Trade #%{x}<br>Drawdown: %{y:.2f}R<extra></extra>",
+                name="Drawdown",
                 showlegend=False,
             ),
             row=3, col=1,
         )
-        fig.add_hline(y=50, line=dict(color=_GRID, width=1, dash="dot"), row=3, col=1)
+        fig.add_hline(y=0, line=dict(color=_GRID, width=1, dash="dot"), row=3, col=1)
 
         # ── Row 4: per-env summary table ──────────────────────
         import pandas as pd

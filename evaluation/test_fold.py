@@ -780,9 +780,7 @@ def _build_excel_journal(
 
         # ── Sheet 1: Trades ───────────────────────────────────────
         if trades:
-            trades_for_excel = _resolve_trade_times.__wrapped__(trades) if hasattr(
-                _resolve_trade_times, "__wrapped__") else trades
-            df = pd.DataFrame(trades_for_excel)
+            df = pd.DataFrame(trades)
             cols = [c for c in _TRADE_COLS if c in df.columns]
             # add entry/exit time columns if enriched by caller
             for extra in ("entry_time", "exit_time"):
@@ -1097,8 +1095,6 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     # ── Build component factories ─────────────────────────────────────────────
     zones_cfg   = feat_cfg.get("zones", {})
-    swing_cfg   = feat_cfg.get("swing", {})
-    trend_cfg   = feat_cfg.get("trend", {})
     oz_cfg      = feat_cfg.get("order_zone", {})
     obs_cfg     = env_cfg.get("observation", {})
     atr_gate    = risk_cfg.get("atr_gate", {})
@@ -1109,7 +1105,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     trail_cfg   = risk_cfg.get("trailing", {})
     contracts_cfg = env_cfg.get("contracts", {}).get(instrument, {})
 
-    real_capital = float(account_cfg.get("initial_balance", 50000))
+    real_capital = float(account_cfg.get("initial_balance", 2500))
     point_value  = float(contracts_cfg.get("micro_point_value", 2.0))
 
     observation_builder = ObservationBuilder(

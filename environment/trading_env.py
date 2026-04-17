@@ -210,7 +210,6 @@ class TradingEnv(gym.Env):
             shape=(self._obs_dim,),
             dtype=np.float32,
         )
-        self._spaces_defined: bool = True
 
         # RNG
         self._rng = np.random.default_rng(seed)
@@ -602,8 +601,6 @@ class TradingEnv(gym.Env):
 
     @property
     def observation_space(self) -> spaces.Box:
-        if not self._spaces_defined:
-            raise RuntimeError("Call reset() at least once to define observation_space.")
         return self._observation_space
 
     @property
@@ -876,7 +873,7 @@ class TradingEnv(gym.Env):
         elif direction == -1 and zone_state and zone_state.nearest_supply:
             zone = zone_state.nearest_supply
 
-        if zone is not None and zone.impulse_extreme != 0.0:
+        if zone is not None and abs(zone.impulse_extreme) > 1e-6:
             extreme = zone.impulse_extreme
             # Validate direction: LONG target must be above entry, SHORT below
             if direction == 1 and extreme > entry_price:
@@ -938,7 +935,7 @@ class TradingEnv(gym.Env):
         win_rate      = n_wins / n_trades if n_trades else 0.0
 
         avg_win_r       = float(np.mean([t.pnl_r      for t in wins]))   if wins   else 0.0
-        avg_loss_r      = float(abs(np.mean([t.pnl_r  for t in losses]))) if losses else 1.0
+        avg_loss_r      = float(abs(np.mean([t.pnl_r  for t in losses]))) if losses else 0.0
         avg_win_dollars = float(np.mean([t.pnl_dollars for t in wins]))   if wins   else 0.0
         avg_loss_dollars= float(np.mean([t.pnl_dollars for t in losses])) if losses else 0.0
 
@@ -949,8 +946,8 @@ class TradingEnv(gym.Env):
         )
 
         # ── Risk/reward & expected return ─────────────────────
-        avg_rr          = avg_win_r / max(avg_loss_r, 1e-6)
-        win_loss_ratio  = avg_win_r / max(avg_loss_r, 1e-6)
+        avg_rr          = (avg_win_r / avg_loss_r) if avg_loss_r > 1e-6 else 0.0
+        win_loss_ratio  = n_wins / max(n_losses, 1)           # count ratio (matches eval_callback)
         expected_return = win_rate * avg_win_r - (1.0 - win_rate) * avg_loss_r
 
         # ── Sharpe (annualised, from per-trade returns) ───────

@@ -561,13 +561,19 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
         keep_n_checkpoints=ckpt_cfg.get("keep_n_checkpoints", 5),
     )
 
-    eval_cfg = agent_cfg.get("evaluation", {})
+    eval_cfg    = agent_cfg.get("evaluation", {})
+    hotsave_cfg = agent_cfg.get("hotsave", {})
+    n_training_days   = len(c.split.train)
+    min_trades_per_wk = hotsave_cfg.get("min_trades_per_week", 1)
+    hotsave_min_trades = max(10, n_training_days * min_trades_per_wk // 5)
+
     trainer = Trainer(
         agent=agent,
         train_env=c.train_env,
         eval_env=c.eval_env,
         checkpoint_manager=checkpoint_manager,
         curriculum_scheduler=c.curriculum_scheduler,
+        n_training_days=n_training_days,
         total_timesteps=ppo_cfg.get("total_timesteps", 2_000_000),
         eval_freq=eval_cfg.get("eval_freq",       50_000),
         n_eval_episodes=eval_cfg.get("n_eval_episodes", 20),
@@ -587,6 +593,19 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
         vec_normalize=c.vec_normalize,
         resume=bool(args.checkpoint),
         initial_capital=real_capital,
+        hotsave_pf=hotsave_cfg.get("pf_threshold",          1.60),
+        hotsave_wr=hotsave_cfg.get("wr_threshold",          0.40),
+        hotsave_min_trades=hotsave_min_trades,
+        hotsave_min_envs=hotsave_cfg.get("min_envs_passing",      2),
+        hotsave_cooldown=hotsave_cfg.get("cooldown_steps",        50_000),
+        hotsave_sharpe=hotsave_cfg.get("sharpe_threshold",      1.2),
+        hotsave_sharpe_pf=hotsave_cfg.get("sharpe_pf_threshold",   1.85),
+        hotsave_sharpe_cooldown=hotsave_cfg.get("sharpe_cooldown_steps", 50_000),
+        hotsave_wr70_cooldown=hotsave_cfg.get("wr70_cooldown_steps",        50_000),
+        hotsave_elite_pnl_multiplier=hotsave_cfg.get("elite_pnl_multiplier",   1.5),
+        hotsave_elite_wr_pf_threshold=hotsave_cfg.get("elite_wr_pf_threshold", 1.5),
+        hotsave_elite_sharpe=hotsave_cfg.get("elite_sharpe_threshold",         3.0),
+        hotsave_elite_cooldown=hotsave_cfg.get("elite_cooldown_steps",         50_000),
     )
 
     trainer.run()
@@ -728,6 +747,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     wf_cfg      = agent_cfg.get("walk_forward", {})
     eval_cfg    = agent_cfg.get("evaluation", {})
     ckpt_cfg    = agent_cfg.get("checkpointing", {})
+    hotsave_cfg = agent_cfg.get("hotsave", {})
 
     # ── Walk-forward parameters ───────────────────────────────
     n_folds_cfg    = int(wf_cfg.get("n_folds", 1))
@@ -745,8 +765,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     session_cfg  = env_cfg.get("session", {})
     atr_cfg      = feat_cfg.get("atr", {})
     zones_cfg    = feat_cfg.get("zones", {})
-    swing_cfg    = feat_cfg.get("swing", {})
-    trend_cfg    = feat_cfg.get("trend", {})
     oz_cfg       = feat_cfg.get("order_zone", {})
     obs_cfg      = env_cfg.get("observation", {})
     atr_gate_cfg = risk_cfg.get("atr_gate", {})
@@ -995,10 +1013,15 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             keep_n_checkpoints=ckpt_cfg.get("keep_n_checkpoints", 5),
         )
 
+        min_trades_per_wk  = hotsave_cfg.get("min_trades_per_week", 1)
+        fold_n_training_days = len(train_days)
+        fold_min_trades    = max(10, fold_n_training_days * min_trades_per_wk // 5)
+
         trainer = Trainer(
             agent=agent,
             train_env=train_vec_env,
             eval_env=eval_vec_env,
+            n_training_days=fold_n_training_days,
             checkpoint_manager=checkpoint_manager,
             curriculum_scheduler=None,
             total_timesteps=ppo_cfg.get("total_timesteps", 2_000_000),
@@ -1020,6 +1043,19 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             vec_normalize=train_vec_env,
             resume=False,
             initial_capital=real_capital,
+            hotsave_pf=hotsave_cfg.get("pf_threshold",          1.60),
+            hotsave_wr=hotsave_cfg.get("wr_threshold",          0.40),
+            hotsave_min_trades=fold_min_trades,
+            hotsave_min_envs=hotsave_cfg.get("min_envs_passing",      2),
+            hotsave_cooldown=hotsave_cfg.get("cooldown_steps",        50_000),
+            hotsave_sharpe=hotsave_cfg.get("sharpe_threshold",      1.2),
+            hotsave_sharpe_pf=hotsave_cfg.get("sharpe_pf_threshold",   1.85),
+            hotsave_sharpe_cooldown=hotsave_cfg.get("sharpe_cooldown_steps", 50_000),
+            hotsave_wr70_cooldown=hotsave_cfg.get("wr70_cooldown_steps",   50_000),
+            hotsave_elite_pnl_multiplier=hotsave_cfg.get("elite_pnl_multiplier",  1.5),
+            hotsave_elite_wr_pf_threshold=hotsave_cfg.get("elite_wr_pf_threshold", 1.5),
+            hotsave_elite_sharpe=hotsave_cfg.get("elite_sharpe_threshold",    3.0),
+            hotsave_elite_cooldown=hotsave_cfg.get("elite_cooldown_steps",    50_000),
         )
 
         # Inject fold_journal_cb into Trainer callbacks
@@ -1079,7 +1115,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
 
 def run_analyse(args: argparse.Namespace) -> None:
     from evaluation.trade_journal import TradeJournal
-    import glob
 
     journal_dir = Path(args.journal or (Path(args.log_dir) / "journal"))
     csv_files = list(journal_dir.glob("*.csv"))

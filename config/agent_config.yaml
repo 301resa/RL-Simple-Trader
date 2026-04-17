@@ -57,6 +57,35 @@ evaluation:
   w_wl:     0.15                   # Win / Loss ratio    (weakest signal — reduced)
   w_dd:     0.15                   # Max drawdown (penalises risk)
 
+hotsave:
+  # Gate 1 — Profit Factor / Win Rate
+  pf_threshold:          1.60      # minimum profit factor per env
+  wr_threshold:          0.40      # minimum win rate (0–1)
+  min_envs_passing:      2         # envs that must simultaneously clear Gates 1 & 2
+  cooldown_steps:        50_000    # minimum steps between Gate-1 saves
+
+  # Gate 2 — Sharpe quality
+  sharpe_threshold:      1.2       # annualised Sharpe
+  sharpe_pf_threshold:   1.85      # profit factor required alongside Sharpe
+  sharpe_cooldown_steps: 50_000    # minimum steps between Gate-2 saves
+
+  # Gate 3 — WR70 (any single env)
+  wr70_cooldown_steps:   50_000    # minimum steps between Gate-3 saves
+
+  # Gate 4 — Elite (any single env achieving exceptional quality)
+  # Criteria: cumulative PnL > elite_pnl_multiplier × initial_capital
+  #           AND WR × PF > elite_wr_pf_threshold
+  #           AND Sharpe > elite_sharpe_threshold
+  elite_pnl_multiplier:  1.5       # 150% cumulative return on initial capital
+  elite_wr_pf_threshold: 1.5       # WR × PF combined quality score
+  elite_sharpe_threshold: 3.0      # annualised Sharpe (elite tier)
+  elite_cooldown_steps:  50_000    # minimum steps between Gate-4 saves
+
+  # Minimum trade count — scaled by actual training date range length.
+  # Formula: max(10, n_trading_days * min_trades_per_week // 5)
+  # Examples: 12 months (~252 days) → 50 trades | 4 years (~1008 days) → 201 trades
+  min_trades_per_week:   1         # require at least 1 trade per trading week on average
+
 multiprocessing:
   n_envs: 16                       # parallel training environments
   use_subprocess: true             # SubprocVecEnv (true) or DummyVecEnv (false)
@@ -64,6 +93,6 @@ multiprocessing:
 walk_forward:
   n_folds: 1                       # folds to train (-1 = all possible)
   train_months: 12                 # training window (~252 trading days)
-  val_weeks: 2                    # validation window (~80 trading days)
+  val_weeks: 2                    # validation window (~10 trading days)
   output_dir: logs/walk_forward    # root directory for all fold outputs
 

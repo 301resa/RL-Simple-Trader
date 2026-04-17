@@ -110,7 +110,7 @@ class MetricsCalculator:
     # ── Private helpers ───────────────────────────────────────
 
     def _sharpe_ratio(self, df: pd.DataFrame) -> float:
-        """Sharpe ratio of daily R-multiple returns."""
+        """Annualised Sharpe ratio of daily R-multiple returns (×√252)."""
         if "entry_timestamp" not in df.columns or "pnl_r" not in df.columns:
             return 0.0
         try:
@@ -121,7 +121,7 @@ class MetricsCalculator:
                 return 0.0
             mean_r = daily.mean()
             std_r = daily.std()
-            return float(mean_r / std_r) if std_r > 1e-9 else 0.0
+            return float(mean_r / std_r * np.sqrt(252)) if std_r > 1e-9 else 0.0
         except Exception:
             return 0.0
 

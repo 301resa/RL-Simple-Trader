@@ -484,16 +484,11 @@ class TradingEvalCallback(BaseCallback):
 
     @staticmethod
     def _max_drawdown(cumulative: List[float]) -> float:
+        if not cumulative:
+            return 0.0
         arr  = np.array(cumulative, dtype=np.float64)
-        peak = arr[0]
-        max_dd = 0.0
-        for v in arr:
-            if v > peak:
-                peak = v
-            dd = peak - v
-            if dd > max_dd:
-                max_dd = dd
-        return float(max_dd)
+        peak = np.maximum.accumulate(arr)
+        return float((peak - arr).max())
 
     def _log_metrics(self, m: ValMetrics) -> None:
         step = self.num_timesteps

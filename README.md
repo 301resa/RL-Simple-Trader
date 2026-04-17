@@ -70,7 +70,7 @@ R1/
 ├── training/
 │   ├── trainer.py                   # Main training loop — wires all callbacks
 │   ├── trading_eval_callback.py     # Eval-based model saving (phase-gated composite score)
-│   ├── training_hotsave_callback.py # Training hot-save (V7-style two-tier PF/WR gate)
+│   ├── training_hotsave_callback.py # Training hot-save — four quality gates (PF/WR, Sharpe, WR70, Elite); min_trades scales with date range
 │   ├── metrics_logger_callback.py   # Per-env training table printed after each rollout
 │   ├── checkpoint_manager.py        # Periodic checkpoint saving + rotation
 │   ├── training_journal_callback.py # Excel + Plotly HTML trade journal (every 50k steps)
@@ -210,7 +210,7 @@ python main.py --mode evaluate --config config/ --data data/ \
     --checkpoint logs/models/best_model.zip
 ```
 
-### Walk-forward analysis (rolling 12-month train / 5-week val)
+### Walk-forward analysis (rolling 12-month train / 2-week val)
 ```bash
 python main.py --mode walk_forward --config config/ --data data/
 ```
@@ -251,8 +251,13 @@ logs/
 │   ├── final_model.zip                     # Safety-net checkpoint at end of training
 │   ├── vecnormalize.pkl                    # VecNormalize stats (end of training)
 │   └── hotsaves/
-│       ├── hotsave_NNNNNNNNNN.zip          # Training hot-saves (PF/WR gate)
-│       └── hotsave_NNNNNNNNNN_vecnormalize.pkl
+│       ├── hotsave_NNNNNNNNNN.zip               # Gate 1 — PF/WR
+│       ├── hotsave_sh_NNNNNNNNNN.zip            # Gate 2 — Sharpe quality
+│       ├── hotsave_wr70_NNNNNNNNNN.zip          # Gate 3 — WR ≥ 70%
+│       ├── hotsave_elite_NNNNNNNNNN.zip         # Gate 4 — Elite
+│       ├── hotsave_*_vecnormalize.pkl           # VecNormalize stats (per save)
+│       ├── hotsave_*.xlsx                       # Trade journal (per save)
+│       └── hotsave_*.html                       # Plotly chart (per save)
 ├── checkpoints/                            # Periodic SB3 checkpoints (every 100k steps)
 ├── tensorboard/                            # TensorBoard event files
 ├── journal/                                # Excel + Plotly HTML trade journals
@@ -270,18 +275,34 @@ beats the previous best AND the phase gate is cleared:
 
 | Phase | Steps | Min composite score |
 |-------|-------|---------------------|
-| 1 | 0–400k | 0.05 |
-| 2 | 400k–800k | 0.15 |
-| 3 | 800k–1.2M | 0.25 |
-| 4 | 1.2M–1.6M | 0.35 |
-| 5 | 1.6M+ | 0.45 |
+| 0 | 0–400k | 0.05 |
+| 1 | 400k–750k | 0.15 |
+| 2 | 750k–1.1M | 0.25 |
+| 3 | 1.1M–1.5M | 0.35 |
+| 4 | 1.5M+ | 0.45 |
 
-Composite score = weighted average of: Sharpe (40%), P&L in R (30%), Win/Loss ratio (15%), Max drawdown (15%).
+Composite score = weighted average of: Sharpe (30%), P&L in R (25%), Win/Loss ratio (25%), Max drawdown (20%).
 
 A **FINAL_STEP** checkpoint is always written at the end of training as a safety net.
 
 ### 2. Training hot-saves (`TrainingHotSaveCallback`)
-Checks every ~4,096 steps (one rollout) against three quality gates:
+Checks every ~4,096 steps (one rollout) against four quality gates.
+Each gate also writes a full trade journal (Excel + HTML) alongside the saved model.
+
+**Minimum trade count** scales automatically with the training date range:
+```
+min_trades = max(10, n_trading_days × min_trades_per_week ÷ 5)
+```
+Default: `min_trades_per_week = 1` (configured in `agent_config.yaml` → `hotsave:`).
+
+| Date range | Trading days | min_trades |
+|------------|-------------|-----------|
+| 6 months | ~126 | 25 |
+| 12 months | ~252 | 50 |
+| 2 years | ~504 | 100 |
+| 4 years | ~1,008 | 201 |
+
+The same threshold applies to all three gates. A model is **never saved if total PnL ≤ 0**.
 
 **Gate 1 — PF/WR** (`hotsave_NNNNNNNNNN.zip`): at least 2 envs simultaneously satisfy:
 
@@ -289,7 +310,8 @@ Checks every ~4,096 steps (one rollout) against three quality gates:
 |-----------|-----------|
 | Profit Factor | > 1.60 |
 | Win Rate | ≥ 40% |
-| Trades | ≥ 20 |
+| Total PnL (R) | > 0 |
+| Trades | ≥ min_trades |
 
 **Gate 2 — Sharpe** (`hotsave_sh_NNNNNNNNNN.zip`): at least 2 envs simultaneously satisfy:
 
@@ -299,17 +321,29 @@ Checks every ~4,096 steps (one rollout) against three quality gates:
 | Profit Factor | > 1.85 |
 | Win/Loss ratio | > 1.0 |
 | Total PnL (R) | > 0 |
-| Trades | ≥ 20 |
+| Trades | ≥ min_trades |
 
 **Gate 3 — WR70** (`hotsave_wr70_NNNNNNNNNN.zip`): any single env satisfies all of:
 
 | Criterion | Threshold |
 |-----------|-----------|
 | Win Rate | ≥ 70% |
-| Total PnL ($) | > 0 |
-| Trades | ≥ 20 |
+| Total PnL ($) | > 0.5% of initial capital |
+| Total PnL (R) | > 0 |
+| Trades | ≥ min_trades |
 
-All gates saved to `logs/models/hotsaves/`. Cooldown: 50,000 steps per gate.
+**Gate 4 — Elite** (`hotsave_elite_NNNNNNNNNN.zip`): any single env satisfies all of:
+
+| Criterion | Threshold |
+|-----------|-----------|
+| Cumulative PnL ($) | > 1.5 × initial capital (150% return) |
+| WR × PF | > 1.5 |
+| Sharpe ratio | > 3.0 |
+| Total PnL (R) | > 0 |
+| Trades | ≥ min_trades |
+
+All gates saved to `logs/models/hotsaves/`. Each save produces `.zip` + `_vecnormalize.pkl` + `.xlsx` + `.html`.
+Cooldown: 50,000 steps per gate (configurable in `agent_config.yaml` → `hotsave:`).
 
 ### Disabling eval saves
 Set `save_enabled: false` under `evaluation:` in `agent_config.yaml` to run eval
@@ -368,9 +402,9 @@ metrics and log results without writing any model files (useful for exploration 
   — the agent is penalised for ignoring a good setup, not for patiently waiting when
   no setup exists or correctly waiting for a pending limit to fill.
 
-- **Pending limit order entry**: agent places a limit at the **near edge** of the zone
-  (demand.top for LONG, supply.bottom for SHORT) — the first level touched as price
-  re-enters the zone. Filled on the bar that trades through the limit; cancelled at session
+- **Pending limit order entry**: agent places a limit at the **far edge** of the zone
+  (demand.bottom for LONG, supply.top for SHORT) — the sweep level where liquidity
+  was taken; this is where a re-entry into the zone begins. Filled on the bar that trades through the limit; cancelled at session
   end or on a new entry signal. Zones wider than 10 points are skipped.
 
 - **Confluence-graded sizing**: position size scales from 0.5 to 2.5 contracts in 0.5

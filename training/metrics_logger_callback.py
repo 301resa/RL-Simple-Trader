@@ -24,18 +24,20 @@ Output format (after every rollout):
 
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 
+from training.env_cumulative import EnvCumulative
+
 # ── Column definitions ────────────────────────────────────────────────────────
 
 _COLS = [
-    ("ENV",  4, "l"),
-    ("Tr",   4, "r"),
-    ("WR%",  6, "r"),
+    ("ENV",   4, "l"),
+    ("Tr",    4, "r"),
+    ("Tr/wk", 5, "r"),
+    ("WR%",   6, "r"),
     ("PnL",  7, "r"),
     ("PF",   5, "r"),
     ("Sh",   5, "r"),   # clamped [-9.99, 9.99] at source
@@ -96,6 +98,7 @@ def _fmt_pf(pf: float) -> str:
 
 def _row(env_idx: int | str, info: dict) -> str:
     n_trades   = int(round(info.get("n_trades", 0)))
+    tr_per_wk  = info.get("trades_per_week", 0.0)
     win_rate   = info.get("win_rate", 0.0)
     pnl_d      = info.get("total_pnl_dollars", 0.0)
     pf         = info.get("profit_factor", 0.0)
@@ -119,6 +122,7 @@ def _row(env_idx: int | str, info: dict) -> str:
     cells = [
         (env_str,               4, "l"),
         (f"{n_trades}",         4, "r"),
+        (f"{tr_per_wk:.1f}",    5, "r"),
         (f"{win_rate*100:.1f}%",6, "r"),
         (_fmt_pnl(pnl_d),       7, "r"),
         (_fmt_pf(pf),           5, "r"),
@@ -225,36 +229,41 @@ def _print_lines(lines: List[str]) -> None:
 
 class MetricsPrinterCallback(BaseCallback):
     """
-    Tracks the most recent completed episode per training environment and
-    prints a per-env summary table after every N rollouts.
+    Accumulates trading metrics per env since training start and prints
+    a per-env cumulative summary table after every N rollouts.
+
+    All displayed metrics (Tr, WR%, PF, Sharpe, DD%, …) reflect the
+    entire training duration — no rolling windows.
 
     Parameters
     ----------
     rl_diag_every : int
         Print after every N rollouts (default 1 = every rollout).
-    print_train_episodes : bool
-        If False, skip individual episode prints (table still shows).
     train_date_range : str
         Shown in the header (e.g. "2024-10-16→2025-10-03").
+    initial_capital : float
+        Used to compute DD% from the running equity drawdown.
     """
 
     def __init__(
         self,
-        print_train_episodes: bool = True,
         rl_diag_every: int = 1,
         train_date_range: str = "",
+        initial_capital: float = 2500.0,
+        n_training_days: int   = 0,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
-        self.print_train_episodes = print_train_episodes
-        self.rl_diag_every = max(1, rl_diag_every)
+        self.rl_diag_every    = max(1, rl_diag_every)
         self.train_date_range = train_date_range
-        self._rollout_count  = 0
+        self.initial_capital  = initial_capital
+        self.n_training_days  = n_training_days
+        self._rollout_count   = 0
 
-        # latest episode info per env index
-        self._env_latest: Dict[int, dict] = {}
+        # cumulative stats per env — accumulated across ALL episodes since step 0
+        self._env_cumulative: Dict[int, EnvCumulative] = {}
 
-    # ── Per step: capture latest episode per env ──────────────────────────────
+    # ── Per step: accumulate completed episodes ───────────────────────────────
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [])
@@ -262,7 +271,9 @@ class MetricsPrinterCallback(BaseCallback):
 
         for i, (info, done) in enumerate(zip(infos, dones)):
             if done and "n_trades" in info:
-                self._env_latest[i] = dict(info)
+                if i not in self._env_cumulative:
+                    self._env_cumulative[i] = EnvCumulative()
+                self._env_cumulative[i].update(info)
 
         return True
 
@@ -282,7 +293,7 @@ class MetricsPrinterCallback(BaseCallback):
 
         # ── Banner ────────────────────────────────────────────
         banner_mid = (
-            f" STEP: {step:>10,} | ALL {n_envs} ENVS"
+            f" STEP: {step:>10,} | ALL {n_envs} ENVS (CUMULATIVE)"
             + (f" | TRAIN: {self.train_date_range}" if self.train_date_range else "")
         )
         lines.append("")
@@ -305,7 +316,8 @@ class MetricsPrinterCallback(BaseCallback):
 
         env_infos: List[dict] = []
         for i in range(n_envs):
-            info = self._env_latest.get(i, {})
+            cum = self._env_cumulative.get(i)
+            info = cum.to_info_dict(self.initial_capital, self.n_training_days) if cum else {}
             env_infos.append(info)
             lines.append(f"  {_row(i, info)}")
 
@@ -348,6 +360,8 @@ _INT_KEYS = {
     "rth_trades", "rth_wins", "eth_trades", "eth_wins",
     "min_duration_minutes", "max_duration_minutes",
 }
+# Keys that must NOT be cast to int (kept as float for the AVG row)
+_FLOAT_KEYS = {"trades_per_week"}
 
 
 def _avg_info(infos: List[dict]) -> dict:
@@ -362,7 +376,7 @@ def _avg_info(infos: List[dict]) -> dict:
         vals = [d[k] for d in filled if k in d and isinstance(d[k], (int, float))]
         if vals:
             mean_val = float(np.mean(vals))
-            result[k] = int(round(mean_val)) if k in _INT_KEYS else mean_val
+            result[k] = int(round(mean_val)) if (k in _INT_KEYS and k not in _FLOAT_KEYS) else mean_val
     return result
 
 
