@@ -199,15 +199,15 @@ class FoldJournalCallback(BaseCallback):
             key=lambda t: (t.get("global_step", 0), t.get("env_id", 0)),
         )
 
-        agg_pnl    = [t["pnl_r"]  for t in sorted_trades]
+        agg_pnl_d  = [t.get("pnl_dollars", t["pnl_r"]) for t in sorted_trades]
         agg_is_win = [t["is_win"] for t in sorted_trades]
-        n_agg      = len(agg_pnl)
+        n_agg      = len(agg_pnl_d)
         trade_nums = list(range(1, n_agg + 1))
 
         # ── Build figure: 4 rows ──────────────────────────────
-        # Row 1: single aggregate cumulative PnL line
-        # Row 2: per-trade PnL bars
-        # Row 3: cumulative drawdown
+        # Row 1: single aggregate cumulative PnL line ($)
+        # Row 2: per-trade PnL bars ($)
+        # Row 3: cumulative drawdown ($)
         # Row 4: per-env summary table
         fig = make_subplots(
             rows=4, cols=1,
@@ -220,27 +220,27 @@ class FoldJournalCallback(BaseCallback):
                 [{"type": "table"}],
             ],
             subplot_titles=[
-                "Cumulative PnL (R) — all envs combined",
-                "Per-Trade PnL (R)",
-                "Cumulative Drawdown (R)",
+                "Cumulative PnL ($) — all envs combined",
+                "Per-Trade PnL ($)",
+                "Cumulative Drawdown ($)",
                 "",
             ],
         )
 
         # ── Row 1: single cumulative PnL line ─────────────────
-        equity   = list(np.cumsum(agg_pnl))
-        eq_color = _GREEN if (equity[-1] if equity else 0) >= 0 else _RED
+        equity_d = list(np.cumsum(agg_pnl_d))
+        eq_color = _GREEN if (equity_d[-1] if equity_d else 0) >= 0 else _RED
         fig.add_trace(
             go.Scatter(
                 x=trade_nums,
-                y=equity,
+                y=equity_d,
                 mode="lines",
                 line=dict(color=eq_color, width=2),
                 fill="tozeroy",
-                fillcolor=f"rgba(38,166,154,0.10)" if eq_color == _GREEN
+                fillcolor="rgba(38,166,154,0.10)" if eq_color == _GREEN
                           else "rgba(239,83,80,0.10)",
                 name="Cumulative PnL",
-                hovertemplate="Trade #%{x}<br>Cumulative PnL: %{y:+.2f}R<extra></extra>",
+                hovertemplate="Trade #%{x}<br>Cumulative PnL: $%{y:+,.0f}<extra></extra>",
             ),
             row=1, col=1,
         )
@@ -251,9 +251,9 @@ class FoldJournalCallback(BaseCallback):
         fig.add_trace(
             go.Bar(
                 x=trade_nums,
-                y=agg_pnl,
+                y=agg_pnl_d,
                 marker_color=bar_colors,
-                hovertemplate="Trade #%{x}<br>PnL: %{y:+.2f}R<extra></extra>",
+                hovertemplate="Trade #%{x}<br>PnL: $%{y:+,.0f}<extra></extra>",
                 name="PnL",
                 showlegend=False,
             ),
@@ -262,18 +262,18 @@ class FoldJournalCallback(BaseCallback):
         fig.add_hline(y=0, line=dict(color=_GRID, width=1), row=2, col=1)
 
         # ── Row 3: cumulative drawdown ─────────────────────────
-        equity_arr = np.array(equity)
-        peak       = np.maximum.accumulate(equity_arr)
-        drawdown   = list(equity_arr - peak)
+        equity_arr = np.array(equity_d)
+        peak_d     = np.maximum.accumulate(equity_arr)
+        drawdown_d = list(equity_arr - peak_d)
         fig.add_trace(
             go.Scatter(
                 x=trade_nums,
-                y=drawdown,
+                y=drawdown_d,
                 mode="lines",
                 line=dict(color=_RED, width=1.5),
                 fill="tozeroy",
                 fillcolor="rgba(239,83,80,0.15)",
-                hovertemplate="Trade #%{x}<br>Drawdown: %{y:.2f}R<extra></extra>",
+                hovertemplate="Trade #%{x}<br>Drawdown: $%{y:,.0f}<extra></extra>",
                 name="Drawdown",
                 showlegend=False,
             ),

@@ -199,25 +199,26 @@ class TrainingJournalCallback(BaseCallback):
         if not df_raw:
             return
 
-        pnl_r  = [t["pnl_r"]       for t in df_raw]
-        is_win = [t["is_win"]       for t in df_raw]
-        durs   = [t["duration_min"] for t in df_raw]
-        dates  = [t["date"]         for t in df_raw]
-        steps  = [t["global_step"]  for t in df_raw]
-        dirs   = [t["direction"]    for t in df_raw]
+        pnl_r  = [t["pnl_r"]         for t in df_raw]
+        pnl_d  = [t.get("pnl_dollars", t["pnl_r"]) for t in df_raw]
+        is_win = [t["is_win"]         for t in df_raw]
+        durs   = [t["duration_min"]   for t in df_raw]
+        dates  = [t["date"]           for t in df_raw]
+        steps  = [t["global_step"]    for t in df_raw]
+        dirs   = [t["direction"]      for t in df_raw]
 
         n = len(pnl_r)
         trade_nums = list(range(1, n + 1))
-        equity     = np.cumsum(pnl_r)
+        equity_d   = np.cumsum(pnl_d)   # dollars
 
-        # Cumulative drawdown: equity − running peak (always ≤ 0)
-        peak       = np.maximum.accumulate(equity)
-        drawdown   = list(equity - peak)
+        # Cumulative drawdown in dollars: equity − running peak (always ≤ 0)
+        peak_d     = np.maximum.accumulate(equity_d)
+        drawdown_d = list(equity_d - peak_d)
 
-        total_r   = sum(pnl_r)
+        total_d   = sum(pnl_d)
         n_wins    = sum(is_win)
         wr_pct    = 100 * n_wins / n if n else 0
-        color_r   = _GREEN if total_r >= 0 else _RED
+        color_r   = _GREEN if total_d >= 0 else _RED
 
         fig = make_subplots(
             rows=5, cols=1,
@@ -231,9 +232,9 @@ class TrainingJournalCallback(BaseCallback):
                 [{"type": "table"}],
             ],
             subplot_titles=[
-                "Cumulative Equity (R)",
-                "Per-Trade PnL (R)",
-                "Cumulative Drawdown (R)",
+                "Cumulative Equity ($)",
+                "Per-Trade PnL ($)",
+                "Cumulative Drawdown ($)",
                 "Trade Duration Distribution (min)",
                 "",
             ],
@@ -242,12 +243,12 @@ class TrainingJournalCallback(BaseCallback):
         # ── Row 1: Equity curve ───────────────────────────────
         fig.add_trace(
             go.Scatter(
-                x=trade_nums, y=equity,
+                x=trade_nums, y=equity_d,
                 mode="lines",
                 line=dict(color=_BLUE, width=2),
                 fill="tozeroy",
-                fillcolor=f"rgba(66,165,245,0.1)",
-                hovertemplate="Trade %{x}<br>Equity: %{y:.2f}R<extra></extra>",
+                fillcolor="rgba(66,165,245,0.1)",
+                hovertemplate="Trade %{x}<br>Equity: $%{y:,.0f}<extra></extra>",
                 name="Equity",
             ),
             row=1, col=1,
@@ -259,13 +260,9 @@ class TrainingJournalCallback(BaseCallback):
         fig.add_trace(
             go.Bar(
                 x=trade_nums,
-                y=pnl_r,
+                y=pnl_d,
                 marker_color=bar_colors,
-                hovertemplate=(
-                    "Trade %{x}<br>"
-                    "PnL: %{y:.2f}R<br>"
-                    "<extra></extra>"
-                ),
+                hovertemplate="Trade %{x}<br>PnL: $%{y:,.0f}<extra></extra>",
                 name="PnL",
             ),
             row=2, col=1,
@@ -275,12 +272,12 @@ class TrainingJournalCallback(BaseCallback):
         # ── Row 3: Cumulative drawdown ────────────────────────
         fig.add_trace(
             go.Scatter(
-                x=trade_nums, y=drawdown,
+                x=trade_nums, y=drawdown_d,
                 mode="lines",
                 line=dict(color=_RED, width=1.5),
                 fill="tozeroy",
                 fillcolor="rgba(239,83,80,0.15)",
-                hovertemplate="Trade %{x}<br>Drawdown: %{y:.2f}R<extra></extra>",
+                hovertemplate="Trade %{x}<br>Drawdown: $%{y:,.0f}<extra></extra>",
                 name="Drawdown",
             ),
             row=3, col=1,
