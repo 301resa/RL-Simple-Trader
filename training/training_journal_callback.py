@@ -114,31 +114,36 @@ class TrainingJournalCallback(BaseCallback):
 
     # ── Public snapshot API (called by hotsave callback) ─────────────────────
 
-    def write_snapshot(self, output_dir: Path, stem: str) -> None:
-        """Write Excel + HTML to output_dir/<stem>.{xlsx,html} without touching 'latest'."""
-        if not self._trades:
+    def write_snapshot(self, output_dir: Path, stem: str, trades: list | None = None) -> None:
+        """Write Excel + HTML to output_dir/<stem>.{xlsx,html} without touching 'latest'.
+
+        trades : if provided, use this list instead of self._trades (used by hotsave
+                 callback which maintains its own independent accumulator).
+        """
+        _trades = trades if trades is not None else self._trades
+        if not _trades:
             return
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self._write_excel(output_dir, stem=stem, copy_latest=False)
+            self._write_excel(output_dir, stem=stem, copy_latest=False, trades=_trades)
         except Exception as exc:
             if self.verbose:
                 print(f"[TrainingJournal] Hotsave Excel write failed: {exc}")
         try:
-            self._write_plotly(output_dir, stem=stem, copy_latest=False)
+            self._write_plotly(output_dir, stem=stem, copy_latest=False, trades=_trades)
         except Exception as exc:
             if self.verbose:
                 print(f"[TrainingJournal] Hotsave Plotly write failed: {exc}")
 
     # ── Excel ─────────────────────────────────────────────────────────────────
 
-    def _write_excel(self, snap_dir: Path, stem: str | None = None, copy_latest: bool = True) -> None:
+    def _write_excel(self, snap_dir: Path, stem: str | None = None, copy_latest: bool = True, trades: list | None = None) -> None:
         import pandas as pd
         from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
 
-        df = pd.DataFrame(self._trades)
+        df = pd.DataFrame(trades if trades is not None else self._trades)
         if stem is None:
             stem = f"journal_s{self._save_n:04d}_step{self.num_timesteps:010d}"
         path = snap_dir / f"{stem}.xlsx"
@@ -191,11 +196,11 @@ class TrainingJournalCallback(BaseCallback):
 
     # ── Plotly ────────────────────────────────────────────────────────────────
 
-    def _write_plotly(self, snap_dir: Path, stem: str | None = None, copy_latest: bool = True) -> None:
+    def _write_plotly(self, snap_dir: Path, stem: str | None = None, copy_latest: bool = True, trades: list | None = None) -> None:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
-        df_raw = self._trades
+        df_raw = trades if trades is not None else self._trades
         if not df_raw:
             return
 

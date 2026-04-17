@@ -133,6 +133,8 @@ class TrainingHotSaveCallback(BaseCallback):
         self._last_sharpe_save_step: int = -sharpe_cooldown_steps
         self._last_wr70_save_step:   int = -wr70_cooldown_steps
         self._last_elite_save_step:  int = -elite_cooldown_steps
+        # own trade list — used for journal snapshots, independent of journal_callback
+        self._trades: list = []
 
     # ── Episode capture ───────────────────────────────────────────────────────
 
@@ -145,6 +147,9 @@ class TrainingHotSaveCallback(BaseCallback):
                 if i not in self._env_cumulative:
                     self._env_cumulative[i] = EnvCumulative()
                 self._env_cumulative[i].update(info)
+                for t in info.get("trades_list", []):
+                    t["global_step"] = self.num_timesteps
+                    self._trades.append(t)
 
         if self.num_timesteps % self.check_every_steps < self.n_envs:
             self._check_pf_gate()
@@ -308,11 +313,12 @@ class TrainingHotSaveCallback(BaseCallback):
             vn_path = self.models_dir / f"{name}_vecnormalize.pkl"
             self.vec_normalize.save(str(vn_path))
 
-        if self._journal_callback is not None:
+        if self._journal_callback is not None and self._trades:
             try:
                 self._journal_callback.write_snapshot(
                     output_dir=self.models_dir,
                     stem=name,
+                    trades=self._trades,
                 )
             except Exception as exc:
                 if self.verbose:
