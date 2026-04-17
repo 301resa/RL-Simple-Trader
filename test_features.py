@@ -22,7 +22,6 @@ import pytest
 
 from features.atr_calculator import ATRCalculator, ATRState
 from features.order_zone_engine import OrderZoneEngine, OrderZoneType
-from features.trend_classifier import TrendClassifier, TrendState
 from features.zone_detector import ZoneDetector, ZoneType
 
 
@@ -172,74 +171,10 @@ class TestZoneDetector:
         if supply:
             # Simulate price closing above the supply zone top
             supply.touches = 4  # Exceed max_zone_touches=3
-            detector._update_zone_validity(30, supply.top + 100, 300)
+            price = supply.top + 100
+            detector._update_zone_validity(30, price, price, price - 1, 300)
             # Zone should now be invalid
             assert not supply.is_valid
-
-
-# ── Trend Classifier Tests ────────────────────────────────────────────────────
-
-class TestTrendClassifier:
-
-    def make_uptrend_bars(self) -> pd.DataFrame:
-        """Clear uptrend: consistent higher highs and higher lows."""
-        closes = [100, 102, 104, 103, 106, 105, 108, 107, 110, 109, 112, 111, 114, 113, 116]
-        rows = []
-        for i, c in enumerate(closes):
-            rows.append({
-                "open": c - 1, "high": c + 2, "low": c - 2, "close": c, "volume": 1000
-            })
-        df = pd.DataFrame(rows)
-        df.index = pd.date_range("2023-01-01", periods=len(df), freq="5min", tz="America/New_York")
-        return df
-
-    def make_downtrend_bars(self) -> pd.DataFrame:
-        """Clear downtrend: consistent lower lows and lower highs."""
-        closes = [116, 113, 111, 114, 109, 112, 107, 110, 104, 108, 102, 106, 100, 104, 98]
-        rows = []
-        for i, c in enumerate(closes):
-            rows.append({
-                "open": c + 1, "high": c + 2, "low": c - 2, "close": c, "volume": 1000
-            })
-        df = pd.DataFrame(rows)
-        df.index = pd.date_range("2023-01-01", periods=len(df), freq="5min", tz="America/New_York")
-        return df
-
-    def test_uptrend_detected(self):
-        bars = self.make_uptrend_bars()
-        classifier = TrendClassifier(swing_lookback=2, min_hh_hl_for_uptrend=1)
-        snap = classifier.classify(bars, len(bars) - 1)
-        assert snap.state in (TrendState.UPTREND, TrendState.M_UPTREND, TrendState.RANGING), \
-            f"Expected bullish or ranging state, got {snap.state}"
-        assert snap.is_bullish or snap.state == TrendState.RANGING
-
-    def test_downtrend_detected(self):
-        bars = self.make_downtrend_bars()
-        classifier = TrendClassifier(swing_lookback=2, min_ll_lh_for_downtrend=1)
-        snap = classifier.classify(bars, len(bars) - 1)
-        assert snap.state in (TrendState.DOWNTREND, TrendState.W_DOWNTREND, TrendState.RANGING), \
-            f"Expected bearish or ranging state, got {snap.state}"
-
-    def test_undefined_with_few_bars(self):
-        bars = make_bars([100, 101, 102])
-        classifier = TrendClassifier(swing_lookback=3)
-        snap = classifier.classify(bars, 2)
-        # With only 3 bars and lookback=3, cannot confirm swings
-        assert snap.state in (TrendState.UNDEFINED, TrendState.RANGING)
-
-    def test_feature_dict_has_required_keys(self):
-        bars = self.make_uptrend_bars()
-        classifier = TrendClassifier(swing_lookback=2)
-        snap = classifier.classify(bars, len(bars) - 1)
-        fd = snap.as_feature_dict()
-        required = {"trend_uptrend", "trend_downtrend", "trend_strength", "hh_count_norm"}
-        assert required.issubset(fd.keys())
-
-    def test_trend_strength_between_0_and_1(self):
-        bars = self.make_uptrend_bars()
-        classifier = TrendClassifier(swing_lookback=2)
-        snap = classifier.classify(bars, len(bars) - 1)
-        assert 0.0 <= snap.trend_strength <= 1.0
 
 
 # ── Order Zone Engine Tests ───────────────────────────────────────────────────

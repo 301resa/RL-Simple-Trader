@@ -187,23 +187,33 @@ class ZoneDetector:
         """
         if self._np_close is not None:
             current_price = float(self._np_close[current_bar_idx])
+            current_bar_high = float(self._np_high[current_bar_idx])
+            current_bar_low  = float(self._np_low[current_bar_idx])
             atr = float(self._np_atr[current_bar_idx]) if self._np_atr is not None else 100.0
         else:
-            current_price = float(bars.iloc[current_bar_idx]["close"])
+            row = bars.iloc[current_bar_idx]
+            current_price    = float(row["close"])
+            current_bar_high = float(row["high"])
+            current_bar_low  = float(row["low"])
             atr = float(atr_series.iloc[current_bar_idx]) if atr_series is not None else 100.0
 
         for i in range(max(0, self._last_scanned_idx + 1), current_bar_idx + 1):
             self._try_detect_zone(bars, atr_series, i)
         self._last_scanned_idx = current_bar_idx
 
-        self._update_zone_validity(current_bar_idx, current_price, atr)
+        self._update_zone_validity(current_bar_idx, current_price, current_bar_high, current_bar_low, atr)
         self._prune_invalid_zones()
         return self._build_state(current_price)
 
     # ── Private helpers ───────────────────────────────────────
 
     def _update_zone_validity(
-        self, current_bar_idx: int, current_price: float, atr: float
+        self,
+        current_bar_idx: int,
+        current_price: float,
+        bar_high: float,
+        bar_low: float,
+        atr: float,
     ) -> None:
         """Invalidate zones that are broken through, over-touched, or too old."""
         buffer = atr * self.zone_buffer_atr_pct
@@ -214,9 +224,8 @@ class ZoneDetector:
             if current_bar_idx - zone.bar_formed_idx > self.max_zone_age_bars:
                 zone.is_valid = False
                 continue
-            # Sweep detection: supply liquidity level = zone.top (consolidation high).
-            # Swept when price reaches or exceeds zone.top before a full breakout.
-            if not zone.was_swept and current_price >= zone.top:
+            # Sweep uses bar HIGH — wick-and-return setups must be captured.
+            if not zone.was_swept and bar_high >= zone.top:
                 zone.was_swept = True
             if current_price > zone.top + buffer:       # sustained breakout — zone dead
                 zone.is_valid = False
@@ -231,9 +240,8 @@ class ZoneDetector:
             if current_bar_idx - zone.bar_formed_idx > self.max_zone_age_bars:
                 zone.is_valid = False
                 continue
-            # Sweep detection: demand liquidity level = zone.bottom (consolidation low).
-            # Swept when price reaches or goes below zone.bottom before a full breakout.
-            if not zone.was_swept and current_price <= zone.bottom:
+            # Sweep uses bar LOW — wick-and-return setups must be captured.
+            if not zone.was_swept and bar_low <= zone.bottom:
                 zone.was_swept = True
             if current_price < zone.bottom - buffer:    # sustained breakout — zone dead
                 zone.is_valid = False

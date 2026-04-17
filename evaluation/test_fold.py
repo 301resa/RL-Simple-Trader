@@ -1049,7 +1049,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     from features.atr_calculator        import ATRCalculator
     from features.observation_builder   import ObservationBuilder
     from features.order_zone_engine     import OrderZoneEngine
-    from features.trend_classifier      import TrendClassifier
     from features.zone_detector         import ZoneDetector
 
     instrument  = env_cfg.get("instruments", {}).get("default", "NQ")
@@ -1113,27 +1112,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     real_capital = float(account_cfg.get("initial_balance", 50000))
     point_value  = float(contracts_cfg.get("micro_point_value", 2.0))
 
-    trend_classifier = TrendClassifier(
-        swing_lookback=swing_cfg.get("lookback_bars", 5),
-        min_hh_hl_for_uptrend=trend_cfg.get("min_hh_hl_for_uptrend", 2),
-        min_ll_lh_for_downtrend=trend_cfg.get("min_ll_lh_for_downtrend", 2),
-        reversal_requires_breaks=trend_cfg.get("reversal_requires_breaks", 2),
-        strength_lookback_bars=trend_cfg.get("strength_lookback_bars", 40),
-    )
     observation_builder = ObservationBuilder(
         clip_value=obs_cfg.get("clip_observations", 10.0),
         normalize_observations=obs_cfg.get("normalize_observations", True),
         lookback_bars=obs_cfg.get("lookback_bars", 20),
+        max_zone_age_bars=zones_cfg.get("max_zone_age_bars", 300),
     )
     order_zone_engine = OrderZoneEngine(
         weights=oz_cfg.get("weights"),
         min_confluence_score=oz_cfg.get("min_confluence_score", 0.60),
-        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 4.0),
-        pin_bar_wick_ratio=oz_cfg.get("rejection", {}).get("pin_bar_wick_ratio", 2.0),
-        engulfing_body_ratio=oz_cfg.get("rejection", {}).get("engulfing_body_ratio", 1.1),
+        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 1.5),
     )
     action_masker = ActionMasker(
-        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 4.0),
         atr_exhaustion_threshold=atr_gate.get("block_entries_above_pct", 0.95),
         trail_min_r=trail_cfg.get("activate_at_r", 2.0),
         max_trades_per_day=daily_lim.get("max_trades_per_day", 5),
@@ -1164,7 +1154,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             trail_lock_in_r=trail_cfg.get("lock_in_r_at_trail", 2.0),
             max_daily_loss_r=daily_lim.get("max_daily_loss_r", 3.0),
             max_daily_loss_dollars=daily_lim.get("max_daily_loss_dollars", 1000.0),
-            max_drawdown_r=5.0,
+            max_drawdown_r=risk_cfg.get("position", {}).get("max_drawdown_r", 5.0),
             pause_bars_after_loss_streak=daily_lim.get("pause_bars_after_loss_streak", 6),
             loss_streak_threshold=daily_lim.get("max_consecutive_losses_before_pause", 3),
             zone_buffer_atr_pct=risk_cfg.get("stop_loss", {}).get("zone_buffer_atr_pct", 0.03),
@@ -1188,7 +1178,6 @@ def main(argv: Optional[List[str]] = None) -> None:
                 k: zones_cfg.get(k, v)
                 for k, v in zone_detector_defaults.items()
             }),
-            trend_classifier=trend_classifier,
             order_zone_engine=order_zone_engine,
             action_masker=action_masker,
             rth_start=session_start,

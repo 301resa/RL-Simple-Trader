@@ -36,30 +36,26 @@ from environment.position_manager import ExitReason, PositionDirection, Position
 from environment.reward_calculator import RewardCalculator, RewardBreakdown
 from features.atr_calculator import ATRCalculator, ATRState
 from features.observation_builder import ObservationBuilder
-from features.order_zone_engine import FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS, OrderZoneEngine, OrderZoneState
-from features.trend_classifier import TrendClassifier
+from features.order_zone_engine import FIXED_STOP_BUFFER_PTS, MAX_ZONE_WIDTH_PTS, MIN_STOP_PTS, OrderZoneEngine, OrderZoneState
 from features.zone_detector import ZoneDetector, ZoneState
 from utils.logger import get_logger
 
 log = get_logger(__name__)
 
 
-_MAX_ZONE_WIDTH_ENV = 10.0  # matches observation_builder._MAX_ZONE_WIDTH
-
-
 def _filter_wide_zones(zs) -> object:
-    """
-    Return a ZoneState with wide zones (> _MAX_ZONE_WIDTH_ENV points) set to None.
+    """Return a ZoneState with wide zones (> MAX_ZONE_WIDTH_PTS) set to None.
+
     Wide zones are never traded (skipped in _place_pending_order) so their signals
     must not influence confluence scoring or observation features.
     """
     supply = zs.nearest_supply if (
         zs.nearest_supply is not None
-        and (zs.nearest_supply.top - zs.nearest_supply.bottom) <= _MAX_ZONE_WIDTH_ENV
+        and (zs.nearest_supply.top - zs.nearest_supply.bottom) <= MAX_ZONE_WIDTH_PTS
     ) else None
     demand = zs.nearest_demand if (
         zs.nearest_demand is not None
-        and (zs.nearest_demand.top - zs.nearest_demand.bottom) <= _MAX_ZONE_WIDTH_ENV
+        and (zs.nearest_demand.top - zs.nearest_demand.bottom) <= MAX_ZONE_WIDTH_PTS
     ) else None
     return ZoneState(nearest_supply=supply, nearest_demand=demand)
 
@@ -97,8 +93,6 @@ class TradingEnv(gym.Env):
         Pre-configured ATR feature engine.
     zone_detector : ZoneDetector
         Pre-configured S/D zone detector.
-    trend_classifier : TrendClassifier
-        Pre-configured trend engine.
     order_zone_engine : OrderZoneEngine
         Pre-configured confluence scoring engine.
     action_masker : ActionMasker
@@ -143,7 +137,6 @@ class TradingEnv(gym.Env):
         observation_builder: ObservationBuilder,
         atr_calculator: ATRCalculator,
         zone_detector: ZoneDetector,
-        trend_classifier: TrendClassifier,
         order_zone_engine: OrderZoneEngine,
         action_masker: ActionMasker,
         rth_start: str = "09:30",
@@ -168,7 +161,6 @@ class TradingEnv(gym.Env):
         self.observation_builder = observation_builder
         self.atr_calculator = atr_calculator
         self.zone_detector = zone_detector
-        self.trend_classifier = trend_classifier
         self.order_zone_engine = order_zone_engine
         self.action_masker = action_masker
         self.rth_start = rth_start
@@ -418,7 +410,6 @@ class TradingEnv(gym.Env):
                 current_bar_idx=combined_idx,
                 atr_state=atr_s,
                 zone_state=_filter_wide_zones(zone_s),
-                trend_snapshot=None,
                 current_price=current_price,
             )
             # Freeze ZoneState: Zone objects in the detector's lists are mutable
@@ -531,7 +522,6 @@ class TradingEnv(gym.Env):
                 is_position_open=self.position_manager.state.is_open,
                 atr_state=atr_state,
                 order_zone_state=order_zone_state,
-                trend_snapshot=None,
                 portfolio_state=portfolio_state,
                 pending_order=self._pending_order,
             )
@@ -653,12 +643,10 @@ class TradingEnv(gym.Env):
         bar_time = self._session_bars.index[step].time()
         if self._rth_start_time <= bar_time <= self._rth_end_time:
             is_rth = 1.0
-            elapsed_secs = (
-                pd.Timestamp(f"2000-01-01 {bar_time}")
-                - pd.Timestamp(f"2000-01-01 {self.rth_start}")
-            ).total_seconds()
+            bar_secs = bar_time.hour * 3600 + bar_time.minute * 60 + bar_time.second
+            rth_start_secs = self._rth_start_time.hour * 3600 + self._rth_start_time.minute * 60
             rth_time_pct = float(np.clip(
-                elapsed_secs / max(self._rth_total_secs, 1.0), 0.0, 1.0
+                (bar_secs - rth_start_secs) / max(self._rth_total_secs, 1.0), 0.0, 1.0
             ))
 
         session_info = {
@@ -707,7 +695,6 @@ class TradingEnv(gym.Env):
                 current_bar_idx=step,
                 atr_state=self._current_atr_state,
                 zone_state=None,
-                trend_snapshot=None,
             )
 
     def _compute_action_mask(
@@ -770,13 +757,12 @@ class TradingEnv(gym.Env):
         confluence = oz_state.confluence_score if oz_state is not None else 1.0
         atr        = atr_state.atr_daily
 
-        _MAX_ZONE_WIDTH = 10.0
         if direction == -1 and zone_state and zone_state.nearest_supply:
             zone = zone_state.nearest_supply
             if not zone.was_swept:
                 log.debug("Pending order skipped — supply zone not yet swept")
                 return
-            if zone.top - zone.bottom > _MAX_ZONE_WIDTH:
+            if zone.top - zone.bottom > MAX_ZONE_WIDTH_PTS:
                 log.debug("Pending order skipped — supply zone too wide", width=round(zone.top - zone.bottom, 2))
                 return
             limit_price = zone.top                              # SHORT: re-entry as price drops back to zone.top
@@ -786,7 +772,7 @@ class TradingEnv(gym.Env):
             if not zone.was_swept:
                 log.debug("Pending order skipped — demand zone not yet swept")
                 return
-            if zone.top - zone.bottom > _MAX_ZONE_WIDTH:
+            if zone.top - zone.bottom > MAX_ZONE_WIDTH_PTS:
                 log.debug("Pending order skipped — demand zone too wide", width=round(zone.top - zone.bottom, 2))
                 return
             limit_price = zone.bottom                           # LONG: re-entry as price rallies back to zone.bottom

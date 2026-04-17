@@ -181,7 +181,6 @@ class RewardCalculator:
         atr_state: ATRState,
         order_zone_state: OrderZoneState,
         portfolio_state: dict,
-        trend_snapshot=None,       # kept for API compatibility, unused
         min_rr_ratio: float = 2.0,
         pending_order: dict | None = None,
     ) -> RewardBreakdown:

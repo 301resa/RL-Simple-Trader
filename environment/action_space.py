@@ -65,8 +65,6 @@ class ActionMasker:
 
     Parameters
     ----------
-    min_rr_ratio : float
-        Minimum R:R ratio required to allow entry actions.
     atr_exhaustion_threshold : float
         ATR % used above which entries are blocked.
     trail_min_r : float
@@ -79,7 +77,6 @@ class ActionMasker:
 
     def __init__(
         self,
-        min_rr_ratio: float = 4.0,   # kept for API compatibility, no longer used in mask
         atr_exhaustion_threshold: float = 0.85,
         trail_min_r: float = 2.0,
         max_trades_per_day: int = 5,
@@ -113,7 +110,6 @@ class ActionMasker:
         unrealised_r : float
             Current unrealised PnL in R-multiples.
         atr_state : ATRState
-        trend_snapshot : TrendSnapshot
         order_zone_state : OrderZoneState
         trades_today : int
         in_loss_streak_pause : bool

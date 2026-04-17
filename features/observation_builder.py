@@ -36,12 +36,11 @@ import pandas as pd
 
 from features.atr_calculator import ATRState
 from features.zone_detector import ZoneState
-from features.order_zone_engine import OrderZoneState
+from features.order_zone_engine import MAX_ZONE_WIDTH_PTS, OrderZoneState
 
 # Structured feature counts
 _N_STRUCTURED  = 36   # ATR(4) + Zone(10) + OrderZone(10) + Portfolio(8) + Session(4)
 _N_ENGINEERED  = 17   # PriceLocation(5) + Momentum(4) + VolRegime(2) + BarCharacter(1) + HTFContext(5)
-_MAX_ZONE_WIDTH = 10.0  # zones wider than this are zeroed in obs (not tradeable)
 
 
 class ObservationBuilder:
@@ -65,10 +64,12 @@ class ObservationBuilder:
         normalize_observations: bool = False,
         clip_value: float = 10.0,
         lookback_bars: int = 60,
+        max_zone_age_bars: int = 300,
     ) -> None:
         self.normalize_observations = normalize_observations
         self.clip_value = clip_value
         self.price_history_len = lookback_bars
+        self._max_zone_age = float(max_zone_age_bars)
         # Per-episode numpy cache — populated by prepare_episode()
         self._cached_opens:      Optional[np.ndarray] = None
         self._cached_highs:      Optional[np.ndarray] = None
@@ -190,17 +191,7 @@ class ObservationBuilder:
         if cached_vr is not None:
             vol_ratios = np.where(valid_mask, cached_vr[safe_idx], 0.0)
         else:
-            vols_np = bars["volume"].to_numpy(dtype=np.float64) if "volume" in bars.columns else None
-            if vols_np is not None:
-                vol_ratios = np.zeros(n, dtype=np.float64)
-                for i, idx in enumerate(safe_idx):
-                    if valid_mask[i]:
-                        vol = vols_np[idx]
-                        s   = max(0, idx - 20)
-                        avg = float(np.mean(vols_np[s:idx])) if idx > s else float(vol)
-                        vol_ratios[i] = np.clip(vol / max(avg, 1.0), 0.0, 5.0)
-            else:
-                vol_ratios = np.zeros(n, dtype=np.float64)
+            vol_ratios = np.zeros(n, dtype=np.float64)
 
         price_block = np.column_stack([lr_open, lr_high, lr_low, lr_close, vol_ratios])
         features.extend(price_block.ravel().tolist())
@@ -215,17 +206,12 @@ class ObservationBuilder:
         ])
 
         # ── 3. Zone features ──────────────────────────────────────────────────
-        # Wide zones (> _MAX_ZONE_WIDTH) are zeroed out — agent can't trade them.
-        # Zone width and age give quality context (tight fresh > wide stale).
-        _max_zone_age = 300.0  # matches max_zone_age_bars in features_config
-
         supply = zone_state.nearest_supply if zone_state else None
         demand = zone_state.nearest_demand if zone_state else None
 
-        # Zero wide-zone signals to prevent phantom setup confusion (B2)
-        if supply and (supply.top - supply.bottom) > _MAX_ZONE_WIDTH:
+        if supply and (supply.top - supply.bottom) > MAX_ZONE_WIDTH_PTS:
             supply = None
-        if demand and (demand.top - demand.bottom) > _MAX_ZONE_WIDTH:
+        if demand and (demand.top - demand.bottom) > MAX_ZONE_WIDTH_PTS:
             demand = None
 
         def _dist_norm(z) -> float:
@@ -242,6 +228,8 @@ class ObservationBuilder:
             if z is None or not z.is_valid:
                 return 0.0
             return float(np.clip((z.top - z.bottom) / max(atr, 1.0), 0.0, 2.0))
+
+        _max_zone_age = self._max_zone_age  # local capture avoids repeated attr lookup
 
         def _age_norm(z, current_idx: int) -> float:
             if z is None or not z.is_valid:

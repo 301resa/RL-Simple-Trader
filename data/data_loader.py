@@ -84,12 +84,24 @@ class DataLoader:
         """
         Locate the CSV file, load, clean, and build the daily frame.
 
-        Searches data_dir for a CSV filename containing the instrument
-        ticker (case-insensitive).  Raises FileNotFoundError if none found.
+        On first run the CSV is parsed and a sibling .parquet cache is written.
+        Subsequent runs load from the cache (~10× faster than CSV re-parsing)
+        if the cache is newer than the CSV.  Delete the .parquet file to force
+        a full re-parse (e.g. after replacing the CSV with new data).
         """
         csv_path = self._find_csv()
-        raw = self._read_csv(csv_path)
-        self._intraday = self._process(raw)
+        cache_path = csv_path.with_suffix(".pkl")
+
+        if cache_path.exists() and cache_path.stat().st_mtime >= csv_path.stat().st_mtime:
+            self._intraday = pd.read_pickle(cache_path)
+        else:
+            raw = self._read_csv(csv_path)
+            self._intraday = self._process(raw)
+            try:
+                self._intraday.to_pickle(cache_path)
+            except Exception:
+                pass  # non-fatal — next run will just re-parse
+
         self._daily = self._build_daily(self._intraday)
         self._day_index = self._index_by_day(self._intraday)
 

@@ -26,11 +26,11 @@ import pandas as pd
 
 from features.atr_calculator import ATRState
 from features.zone_detector import ZoneState, ZoneType
-from features.trend_classifier import TrendSnapshot
 
 # Stop placement constants
 FIXED_STOP_BUFFER_PTS: float = 1.5   # buffer beyond zone edge
 MIN_STOP_PTS: float = 3.0            # floor so 1R is never trivially small
+MAX_ZONE_WIDTH_PTS: float = 10.0     # zones wider than this are skipped (undefined risk)
 
 
 class OrderZoneType(Enum):
@@ -92,11 +92,6 @@ class OrderZoneEngine:
         weights: Optional[dict] = None,
         zone_weight: float = 0.90,
         atr_weight: float = 0.10,
-        # Kept for API compatibility — no longer used
-        sweep_weight: float = 0.0,
-        rejection_weight: float = 0.0,
-        pin_bar_wick_ratio: float = 2.0,
-        engulfing_body_ratio: float = 0.70,
     ) -> None:
         self.min_confluence_score = min_confluence_score
         self.min_rr_ratio = min_rr_ratio
@@ -116,14 +111,11 @@ class OrderZoneEngine:
         current_bar_idx: int,
         atr_state: ATRState,
         zone_state: Optional[ZoneState],
-        trend_snapshot: Optional[TrendSnapshot] = None,  # kept for API compatibility — ignored
-        current_price: Optional[float] = None,  # pass directly to skip bars.iloc lookup
+        current_price: Optional[float] = None,
     ) -> OrderZoneState:
-        """
-        Score the current setup and return an OrderZoneState.
+        """Score the current setup and return an OrderZoneState.
 
-        Pass ``current_price`` directly to avoid a bars.iloc[current_bar_idx]
-        lookup — the caller usually already has this value.
+        Pass ``current_price`` directly to avoid a bars.iloc[current_bar_idx] lookup.
         """
         if current_price is None:
             current_price = float(bars.iloc[current_bar_idx]["close"])

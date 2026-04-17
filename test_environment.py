@@ -28,7 +28,6 @@ from environment.position_manager import (
 )
 from features.atr_calculator import ATRState
 from features.order_zone_engine import OrderZoneState, OrderZoneType
-from features.trend_classifier import TrendSnapshot, TrendState
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -43,13 +42,6 @@ def make_dummy_atr_state(pct_used: float = 0.5, atr: float = 500.0) -> ATRState:
         atr_remaining_pts=atr * (1 - pct_used),
         atr_short_exhausted=pct_used >= 0.85,
         atr_long_exhausted=pct_used >= 0.85,
-    )
-
-
-def make_dummy_trend(state: TrendState = TrendState.DOWNTREND) -> TrendSnapshot:
-    return TrendSnapshot(
-        state=state, last_swing_high=15100, last_swing_low=14900,
-        hh_count=0, hl_count=0, ll_count=2, lh_count=2, trend_strength=0.7
     )
 
 
@@ -239,7 +231,6 @@ class TestActionMasker:
 
     def make_masker(self) -> ActionMasker:
         return ActionMasker(
-            min_rr_ratio=4.0,
             atr_exhaustion_threshold=0.95,
             trail_min_r=2.0,
             max_trades_per_day=5,
@@ -249,12 +240,11 @@ class TestActionMasker:
     def test_all_actions_available_when_flat_good_setup(self):
         masker = self.make_masker()
         atr = make_dummy_atr_state(0.5)
-        trend = make_dummy_trend(TrendState.DOWNTREND)
         oz = make_dummy_oz_state(in_bearish=True, rr=5.0)
 
         mask = masker.compute_mask(
             is_position_open=False, position_direction="FLAT",
-            unrealised_r=0.0, atr_state=atr, trend_snapshot=trend,
+            unrealised_r=0.0, atr_state=atr,
             order_zone_state=oz, trades_today=0,
             in_loss_streak_pause=False, bars_remaining_in_session=20,
             max_drawdown_breached=False,
@@ -267,12 +257,11 @@ class TestActionMasker:
     def test_only_hold_when_max_drawdown_breached(self):
         masker = self.make_masker()
         atr = make_dummy_atr_state(0.5)
-        trend = make_dummy_trend()
         oz = make_dummy_oz_state()
 
         mask = masker.compute_mask(
             is_position_open=False, position_direction="FLAT",
-            unrealised_r=0.0, atr_state=atr, trend_snapshot=trend,
+            unrealised_r=0.0, atr_state=atr,
             order_zone_state=oz, trades_today=0, in_loss_streak_pause=False,
             bars_remaining_in_session=20, max_drawdown_breached=True,
         )
@@ -283,56 +272,25 @@ class TestActionMasker:
     def test_entries_blocked_when_atr_exhausted(self):
         masker = self.make_masker()
         atr = make_dummy_atr_state(1.02)  # ATR exceeded
-        trend = make_dummy_trend()
         oz = make_dummy_oz_state()
 
         mask = masker.compute_mask(
             is_position_open=False, position_direction="FLAT",
-            unrealised_r=0.0, atr_state=atr, trend_snapshot=trend,
+            unrealised_r=0.0, atr_state=atr,
             order_zone_state=oz, trades_today=0, in_loss_streak_pause=False,
             bars_remaining_in_session=20, max_drawdown_breached=False,
         )
         assert mask[Action.ENTER_SHORT] == 0.0
         assert mask[Action.ENTER_LONG] == 0.0
 
-    def test_short_blocked_in_uptrend(self):
-        masker = self.make_masker()
-        atr = make_dummy_atr_state(0.5)
-        trend = make_dummy_trend(TrendState.UPTREND)  # Uptrend
-        oz = make_dummy_oz_state(in_bearish=True, rr=5.0)
-
-        mask = masker.compute_mask(
-            is_position_open=False, position_direction="FLAT",
-            unrealised_r=0.0, atr_state=atr, trend_snapshot=trend,
-            order_zone_state=oz, trades_today=0, in_loss_streak_pause=False,
-            bars_remaining_in_session=20, max_drawdown_breached=False,
-        )
-        assert mask[Action.ENTER_SHORT] == 0.0, "Short must be blocked in uptrend"
-        assert mask[Action.ENTER_LONG] == 1.0   # Long should still be available
-
-    def test_long_blocked_in_downtrend(self):
-        masker = self.make_masker()
-        atr = make_dummy_atr_state(0.5)
-        trend = make_dummy_trend(TrendState.DOWNTREND)
-        oz = make_dummy_oz_state(in_bearish=False, rr=5.0)
-
-        mask = masker.compute_mask(
-            is_position_open=False, position_direction="FLAT",
-            unrealised_r=0.0, atr_state=atr, trend_snapshot=trend,
-            order_zone_state=oz, trades_today=0, in_loss_streak_pause=False,
-            bars_remaining_in_session=20, max_drawdown_breached=False,
-        )
-        assert mask[Action.ENTER_LONG] == 0.0, "Long must be blocked in downtrend"
-
     def test_entries_blocked_end_of_session(self):
         masker = self.make_masker()
         atr = make_dummy_atr_state(0.5)
-        trend = make_dummy_trend()
         oz = make_dummy_oz_state(in_bearish=True, rr=5.0)
 
         mask = masker.compute_mask(
             is_position_open=False, position_direction="FLAT",
-            unrealised_r=0.0, atr_state=atr, trend_snapshot=trend,
+            unrealised_r=0.0, atr_state=atr,
             order_zone_state=oz, trades_today=0, in_loss_streak_pause=False,
             bars_remaining_in_session=2,  # Last 2 bars of session
             max_drawdown_breached=False,
@@ -343,13 +301,12 @@ class TestActionMasker:
     def test_trail_available_only_with_sufficient_pnl(self):
         masker = self.make_masker()
         atr = make_dummy_atr_state(0.5)
-        trend = make_dummy_trend()
         oz = make_dummy_oz_state()
 
         # At 1R unrealised — trail should NOT be available (need >= 2R)
         mask_1r = masker.compute_mask(
             is_position_open=True, position_direction="SHORT",
-            unrealised_r=1.0, atr_state=atr, trend_snapshot=trend,
+            unrealised_r=1.0, atr_state=atr,
             order_zone_state=oz, trades_today=1, in_loss_streak_pause=False,
             bars_remaining_in_session=20, max_drawdown_breached=False,
         )
@@ -358,7 +315,7 @@ class TestActionMasker:
         # At 2.5R unrealised — trail should be available
         mask_2r = masker.compute_mask(
             is_position_open=True, position_direction="SHORT",
-            unrealised_r=2.5, atr_state=atr, trend_snapshot=trend,
+            unrealised_r=2.5, atr_state=atr,
             order_zone_state=oz, trades_today=1, in_loss_streak_pause=False,
             bars_remaining_in_session=20, max_drawdown_breached=False,
         )
@@ -367,12 +324,11 @@ class TestActionMasker:
     def test_mask_dtype_is_float32(self):
         masker = self.make_masker()
         atr = make_dummy_atr_state(0.5)
-        trend = make_dummy_trend()
         oz = make_dummy_oz_state()
 
         mask = masker.compute_mask(
             is_position_open=False, position_direction="FLAT",
-            unrealised_r=0.0, atr_state=atr, trend_snapshot=trend,
+            unrealised_r=0.0, atr_state=atr,
             order_zone_state=oz, trades_today=0, in_loss_streak_pause=False,
             bars_remaining_in_session=20, max_drawdown_breached=False,
         )

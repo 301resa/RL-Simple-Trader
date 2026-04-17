@@ -16,7 +16,6 @@ Columns exported per bar:
   atr, atr_pct, atr_short_exhausted, atr_long_exhausted,
   n_supply_zones, n_demand_zones, nearest_supply, nearest_demand,
   in_bullish_oz, in_bearish_oz, confluence_score, rr_ratio,
-  rejection_detected, rejection_strength, rejection_direction,
   zone_score_bearish, zone_score_bullish, atr_room_bearish, atr_room_bullish
 """
 
@@ -38,8 +37,6 @@ def export_features(
     trading_days: List[str],
     out_path: str = "features.xlsx",
     max_days: Optional[int] = None,
-    # kept for API compatibility — ignored
-    liquidity_detector=None,
 ) -> str:
     """
     Compute and export all features for every bar across trading_days.
@@ -99,7 +96,6 @@ def export_features(
                 current_bar_idx=bar_idx,
                 atr_state=atr_state,
                 zone_state=zone_state,
-                trend_snapshot=None,
             )
 
             rows.append({
@@ -129,9 +125,6 @@ def export_features(
                 "in_bearish_oz":     int(oz_state.in_bearish_order_zone),
                 "confluence_score":  round(oz_state.confluence_score, 4),
                 "rr_ratio":          round(oz_state.rr_ratio, 4),
-                "rejection_detected": 0,    # Pillar 3 removed
-                "rejection_strength": 0.0,  # Pillar 3 removed
-                "rejection_dir":      0,    # Pillar 3 removed
                 # Component scores
                 "zone_score_bearish":    round(getattr(oz_state, "component_scores", {}).get("zone_bearish", 0.0), 4),
                 "zone_score_bullish":    round(getattr(oz_state, "component_scores", {}).get("zone_bullish", 0.0), 4),

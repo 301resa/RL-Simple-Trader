@@ -10,10 +10,13 @@ a multi-bar lookback window in the observation vector.
 ---
 
 ## ⚠️ IMPORTANT — For AI Assistants / Low-Context Sessions
+> always start any task by refering or carefully reading readme file.
 
 > **Do NOT remove, rename, or stub out any existing function, class, method, callback,
 > or file unless the user explicitly asks you to delete it.**
->
+
+>work through this systematically, starting with a file-by-file plan. Set up the todo list and start working systematically.
+
 > This codebase is large. If you are running low on context or tokens:
 > - Edit only the specific lines/functions you were asked to change.
 > - Leave all surrounding code untouched.
@@ -22,8 +25,11 @@ a multi-bar lookback window in the observation vector.
 > - If unsure whether something is used, assume it IS used and leave it alone.
 > - before you change the code read Readme.md and if you change code update the READme.md for the change that made
 
+ > -  work through this systematically, starting with a file-by-file plan. Set up the todo list and start working systematically.  Tidy up the codes without losing functionalities or breaking the codes, make sure the speed and accuracy of the code is achieved - double checks before you go to next part of the code. everything should be clean code, fast  and performance to  highest quality
+
 >- make sure you remove the redunant codes, variables and tidy up the code without losing functionalities or breaking the codes.  make sure codes are clean, readable, professional and comply with highest coding standards.
 > - once you review the code, make a note of all the bottleknecks in the codes and let user know the effect of improving on the speed , perforamce and stabilty or anyother metric in the code execution.
+>- update the Readme file once finish 
 ---
 
 ## Project Structure
@@ -57,9 +63,7 @@ R1/
 │
 ├── features/
 │   ├── order_zone_engine.py         # Order Zone confluence score: zone (90%) + ATR room (10%)
-│   ├── zone_detector.py             # Supply/Demand zone detection (consolidation + impulse)
-│   ├── liquidity_detector.py        # Retained for reference — sweep detection now in zone_detector.py
-│   ├── trend_classifier.py          # HH/HL/LH/LL trend structure
+│   ├── zone_detector.py             # Supply/Demand zone detection; sweep via bar high/low (wick-and-return)
 │   ├── atr_calculator.py            # ATR (daily) — gates entries and sizes stops
 │   └── observation_builder.py       # Builds flat observation vector for the LSTM
 │
@@ -82,9 +86,8 @@ R1/
 │   └── journal_viewer.py            # Journal analysis viewer
 │
 ├── utils/
-│   ├── logger.py                    # Structured logging (structlog)
+│   ├── logger.py                    # Structured logging (structlog) — tees stdout to file
 │   ├── metrics_printer.py           # Console + file log helpers
-│   ├── normalizer.py                # Observation normalisation utilities
 │   ├── validators.py                # Config validation
 │   └── feature_exporter.py         # Export computed features to CSV
 │
@@ -110,9 +113,11 @@ A trade is only entered when the **zone pillar** is present. Weighted factors:
 | Supply/Demand Zone | 90% | Price is inside a valid consolidation-then-impulse zone |
 | ATR Room | 10% | Directional ATR move < 85% of daily ATR in the entry direction |
 
-A **liquidity sweep** is required before any entry is placed. Price must first
-trade through the zone's liquidity level (supply: `zone.top`; demand: `zone.bottom`),
-then re-enter the order block — only then is a pending limit placed.
+A **liquidity sweep** is required before any entry is placed. Price must first trade
+through the zone's liquidity level — sweep detection uses the **bar high/low** (not close)
+so wick-and-return setups are captured correctly: supply is swept when `bar.high ≥ zone.top`;
+demand is swept when `bar.low ≤ zone.bottom`. Once swept, a pending limit is placed to
+catch the re-entry into the order block.
 
 - Minimum confluence score: **0.55** (configurable in `features_config.yaml`)
 - Minimum R:R ratio: **1.5:1** before an entry is allowed
@@ -327,15 +332,17 @@ metrics and log results without writing any model files (useful for exploration 
 
 ## Key Design Decisions
 
-- **60-candle sliding window + 11 engineered features**: `lookback_bars: 60` — the last
+- **60-candle sliding window + 17 engineered features**: `lookback_bars: 60` — the last
   60 bars of OHLCV (log-returns + volume ratio) form the price block. Structured features
   (36) cover: ATR (4), zone signals (10: dist_norm×2, in_zone×2, width_norm×2,
   age_norm×2, swept×2), order zone / confluence (10), portfolio state (8), session timing
-  (4: session_time_pct, bars_remaining_pct, `is_rth`, `rth_time_pct`). An additional 11
-  engineered price/volatility features complete the vector. Wide zones (> 10 pts) are
+  (4: session_time_pct, bars_remaining_pct, `is_rth`, `rth_time_pct`). An additional 17
+  engineered features complete the vector: price location (5), momentum (4), volatility
+  regime (2), bar character (1), HTF context (5: 1h/2h close-in-range, prior-day range
+  position, multi-TF momentum coherence, HTF vol expansion). Wide zones (> 10 pts) are
   zeroed in all zone features before building the obs. The zone detector uses its own
   500-bar history internally. Zone features include `supply_swept` and `demand_swept`
-  binary flags. Observation vector size: `60 × 5 + 36 + 11 = 347` features.
+  binary flags. Observation vector size: `60 × 5 + 36 + 17 = 353` features.
   The LSTM (256 units) carries within-session state across steps.
 
 - **OHLCV jitter augmentation** (`data/data_augmentor.py`): Applied to every training
@@ -403,6 +410,8 @@ metrics and log results without writing any model files (useful for exploration 
     (~10–50× faster) for Zone snapshots; `ATRState`/`OrderZoneState` stored directly.
   - `TradingEnv.step()`: `atr_series.iloc[]` lookup replaced with already-loaded
     `atr_state.atr_daily`; `current_price` reused for session-end force-close.
+  - `DataLoader.load()`: processed CSV is cached as a sibling `.pkl` file on first run;
+    subsequent loads skip D/M/YYYY string parsing and tz-localization (~4× faster).
   - `DataLoader.get_bars_before()`: O(n\_total\_bars) full-dataset boolean scan replaced
     with bisect on sorted day list + day-index walk (~7 day lookups instead of 120k rows).
   - `TradingEnv.reset()` history ATR: 500-iteration Python loop replaced with vectorised
@@ -412,8 +421,12 @@ metrics and log results without writing any model files (useful for exploration 
     allocations and 1 `timedelta.total_seconds()` call every step.
   - `TradingEnv._compute_action_mask()` accepts optional `portfolio_state` — avoids
     a redundant `get_portfolio_state()` call and a pandas `.iloc` lookup per step.
-  - `ZoneState` and `FIXED_STOP_BUFFER_PTS`/`MIN_STOP_PTS` moved to module-level imports
-    in `trading_env.py`; removed repeated function-level import calls in hot paths.
+  - `ZoneState`, `FIXED_STOP_BUFFER_PTS`, `MIN_STOP_PTS`, and `MAX_ZONE_WIDTH_PTS` are
+    module-level constants in `order_zone_engine.py`; imported once by all callers.
+  - RTH elapsed-seconds computed via integer arithmetic (`bar_time.hour*3600 + min*60`)
+    instead of 2 `pd.Timestamp` allocations per step.
+  - Dead O(n×window) vol_ratios fallback loop in `ObservationBuilder.build()` removed;
+    `prepare_episode()` always pre-caches ratios so the fallback was unreachable.
 
 ---
 

@@ -48,6 +48,14 @@ from utils.validators import validate_all_configs, assert_instrument_allowed
 log = get_logger(__name__)
 
 
+# Zone detector defaults — shared by build_components() and run_walk_forward()
+_ZONE_DETECTOR_DEFAULTS: dict = {
+    "consolidation_min_bars": 2, "consolidation_max_bars": 8,
+    "consolidation_range_atr_pct": 0.20, "impulse_min_body_atr_pct": 0.15,
+    "max_zone_age_bars": 200, "max_zone_touches": 3, "zone_buffer_atr_pct": 0.02,
+}
+
+
 # ── Config loader ─────────────────────────────────────────────────────────────
 
 def load_configs(config_dir: str) -> dict:
@@ -113,7 +121,6 @@ def build_components(
     from features.atr_calculator import ATRCalculator
     from features.observation_builder import ObservationBuilder
     from features.order_zone_engine import OrderZoneEngine
-    from features.trend_classifier import TrendClassifier
     from features.zone_detector import ZoneDetector
     from training.curriculum import CurriculumScheduler
 
@@ -222,25 +229,12 @@ def build_components(
         zone_buffer_atr_pct=zones_cfg.get("zone_buffer_atr_pct", 0.02),
     )
 
-    # ── Trend Classifier ──────────────────────────────────────
-    trend_cfg = feat_cfg.get("trend", {})
-    swing_cfg = feat_cfg.get("swing", {})
-    trend_classifier = TrendClassifier(
-        swing_lookback=swing_cfg.get("lookback_bars", 5),
-        min_hh_hl_for_uptrend=trend_cfg.get("min_hh_hl_for_uptrend", 2),
-        min_ll_lh_for_downtrend=trend_cfg.get("min_ll_lh_for_downtrend", 2),
-        reversal_requires_breaks=trend_cfg.get("reversal_requires_breaks", 2),
-        strength_lookback_bars=trend_cfg.get("strength_lookback_bars", 40),
-    )
-
     # ── Order Zone Engine ─────────────────────────────────────
     oz_cfg = feat_cfg.get("order_zone", {})
     order_zone_engine = OrderZoneEngine(
         weights=oz_cfg.get("weights"),
         min_confluence_score=oz_cfg.get("min_confluence_score", 0.60),
-        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 4.0),
-        pin_bar_wick_ratio=oz_cfg.get("rejection", {}).get("pin_bar_wick_ratio", 2.0),
-        engulfing_body_ratio=oz_cfg.get("rejection", {}).get("engulfing_body_ratio", 1.1),
+        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 1.5),
     )
 
     # ── Observation Builder ───────────────────────────────────
@@ -249,6 +243,7 @@ def build_components(
         clip_value=obs_cfg.get("clip_observations", 10.0),
         normalize_observations=obs_cfg.get("normalize_observations", True),
         lookback_bars=obs_cfg.get("lookback_bars", 20),
+        max_zone_age_bars=zones_cfg.get("max_zone_age_bars", 300),
     )
 
     # ── Action Masker ─────────────────────────────────────────
@@ -256,7 +251,6 @@ def build_components(
     daily_lim_cfg = risk_cfg.get("daily_limits", {})
     session_risk_cfg = risk_cfg.get("session", {})
     action_masker = ActionMasker(
-        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 4.0),
         atr_exhaustion_threshold=atr_gate_cfg.get("block_entries_above_pct", 0.95),
         trail_min_r=risk_cfg.get("trailing", {}).get("activate_at_r", 2.0),
         max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
@@ -284,7 +278,7 @@ def build_components(
             trail_lock_in_r=trail_cfg.get("lock_in_r_at_trail", 2.0),
             max_daily_loss_r=daily_lim_cfg.get("max_daily_loss_r", 3.0),
             max_daily_loss_dollars=daily_lim_cfg.get("max_daily_loss_dollars", 1000.0),
-            max_drawdown_r=5.0,
+            max_drawdown_r=risk_cfg.get("position", {}).get("max_drawdown_r", 5.0),
             pause_bars_after_loss_streak=daily_lim_cfg.get("pause_bars_after_loss_streak", 6),
             loss_streak_threshold=daily_lim_cfg.get("max_consecutive_losses_before_pause", 3),
             zone_buffer_atr_pct=risk_cfg.get("stop_loss", {}).get("zone_buffer_atr_pct", 0.03),
@@ -313,12 +307,6 @@ def build_components(
     # Jitter is discrete: OHLC {-0.5,-0.25,0,+0.25,+0.5}, Volume {-10,-5,0,+5,+10}
     train_augmentor = OHLCVAugmentor(rng=np.random.default_rng(agent_cfg.get("seed", 42)))
 
-    zone_detector_defaults = {
-        "consolidation_min_bars": 2, "consolidation_max_bars": 8,
-        "consolidation_range_atr_pct": 0.20, "impulse_min_body_atr_pct": 0.15,
-        "max_zone_age_bars": 200, "max_zone_touches": 3, "zone_buffer_atr_pct": 0.02,
-    }
-
     bar_minutes = int(session_cfg.get("bar_timeframe_minutes", 5))
 
     def make_env(day_list, is_eval=False, worker_seed_offset=0):
@@ -331,9 +319,8 @@ def build_components(
             atr_calculator=atr_calculator,
             zone_detector=ZoneDetector(**{
                 k: zones_cfg.get(k, v)
-                for k, v in zone_detector_defaults.items()
+                for k, v in _ZONE_DETECTOR_DEFAULTS.items()
             }),
-            trend_classifier=trend_classifier,
             order_zone_engine=order_zone_engine,
             action_masker=action_masker,
             rth_start=session_start,
@@ -720,7 +707,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     from features.atr_calculator import ATRCalculator
     from features.observation_builder import ObservationBuilder
     from features.order_zone_engine import OrderZoneEngine
-    from features.trend_classifier import TrendClassifier
     from features.zone_detector import ZoneDetector
     from training.checkpoint_manager import CheckpointManager
 
@@ -854,33 +840,18 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     n_envs       = int(mp_cfg.get("n_envs", 4))
     use_subproc  = mp_cfg.get("use_subprocess", True)
 
-    zone_detector_defaults = {
-        "consolidation_min_bars": 2, "consolidation_max_bars": 8,
-        "consolidation_range_atr_pct": 0.20, "impulse_min_body_atr_pct": 0.15,
-        "max_zone_age_bars": 200, "max_zone_touches": 3, "zone_buffer_atr_pct": 0.02,
-    }
-
-    trend_classifier = TrendClassifier(
-        swing_lookback=swing_cfg.get("lookback_bars", 5),
-        min_hh_hl_for_uptrend=trend_cfg.get("min_hh_hl_for_uptrend", 2),
-        min_ll_lh_for_downtrend=trend_cfg.get("min_ll_lh_for_downtrend", 2),
-        reversal_requires_breaks=trend_cfg.get("reversal_requires_breaks", 2),
-        strength_lookback_bars=trend_cfg.get("strength_lookback_bars", 40),
-    )
     order_zone_engine = OrderZoneEngine(
         weights=oz_cfg.get("weights"),
         min_confluence_score=oz_cfg.get("min_confluence_score", 0.60),
-        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 4.0),
-        pin_bar_wick_ratio=oz_cfg.get("rejection", {}).get("pin_bar_wick_ratio", 2.0),
-        engulfing_body_ratio=oz_cfg.get("rejection", {}).get("engulfing_body_ratio", 1.1),
+        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 1.5),
     )
     observation_builder = ObservationBuilder(
         clip_value=obs_cfg.get("clip_observations", 10.0),
         normalize_observations=obs_cfg.get("normalize_observations", True),
         lookback_bars=obs_cfg.get("lookback_bars", 20),
+        max_zone_age_bars=zones_cfg.get("max_zone_age_bars", 300),
     )
     action_masker = ActionMasker(
-        min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 4.0),
         atr_exhaustion_threshold=atr_gate_cfg.get("block_entries_above_pct", 0.95),
         trail_min_r=trail_cfg.get("activate_at_r", 2.0),
         max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
@@ -902,7 +873,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             trail_lock_in_r=trail_cfg.get("lock_in_r_at_trail", 2.0),
             max_daily_loss_r=daily_lim_cfg.get("max_daily_loss_r", 3.0),
             max_daily_loss_dollars=daily_lim_cfg.get("max_daily_loss_dollars", 1000.0),
-            max_drawdown_r=5.0,
+            max_drawdown_r=risk_cfg.get("position", {}).get("max_drawdown_r", 5.0),
             pause_bars_after_loss_streak=daily_lim_cfg.get("pause_bars_after_loss_streak", 6),
             loss_streak_threshold=daily_lim_cfg.get("max_consecutive_losses_before_pause", 3),
             zone_buffer_atr_pct=risk_cfg.get("stop_loss", {}).get("zone_buffer_atr_pct", 0.03),
@@ -919,9 +890,8 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             observation_builder=observation_builder,
             atr_calculator=atr_calculator,
             zone_detector=ZoneDetector(**{
-                k: zones_cfg.get(k, v) for k, v in zone_detector_defaults.items()
+                k: zones_cfg.get(k, v) for k, v in _ZONE_DETECTOR_DEFAULTS.items()
             }),
-            trend_classifier=trend_classifier,
             order_zone_engine=order_zone_engine,
             action_masker=action_masker,
             rth_start=session_start,
@@ -971,7 +941,9 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         if use_subproc and n_envs > 1:
             try:
                 from stable_baselines3.common.vec_env import SubprocVecEnv
+                log.info("Spawning training environments — first-time PyTorch CUDA init may take several minutes", n_envs=n_envs)
                 raw_train_env = SubprocVecEnv(train_env_fns, start_method="spawn")
+                log.info("Training environments ready")
             except Exception:
                 raw_train_env = DummyVecEnv(train_env_fns)
         else:
