@@ -33,6 +33,7 @@ Saves: <models_dir>/hotsave[_sh|_wr70]_<step>.zip  +  ..._vecnormalize.pkl
 
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 from typing import Dict
 
@@ -74,6 +75,11 @@ class TrainingHotSaveCallback(BaseCallback):
         If provided, saves normalisation stats alongside each checkpoint.
     """
 
+    # Window size: aggregate this many recent episodes per env for gate checks.
+    # With ~5 trades/session, a window of 5 gives ~25 trades — enough to satisfy
+    # min_trades=20 while remaining responsive to recent policy quality.
+    EPISODE_WINDOW: int = 5
+
     def __init__(
         self,
         models_dir: str | Path,
@@ -107,7 +113,10 @@ class TrainingHotSaveCallback(BaseCallback):
         self.check_every_steps    = check_every_steps
         self.vec_normalize        = vec_normalize
 
-        self._env_latest: Dict[int, dict] = {}
+        # Rolling window of last EPISODE_WINDOW episodes per env.
+        # Gates aggregate across the window so a single short session
+        # (2-3 trades) doesn't prevent saving when recent quality is high.
+        self._env_windows: Dict[int, deque] = {}
         self._last_save_step:        int = -cooldown_steps
         self._last_sharpe_save_step: int = -sharpe_cooldown_steps
         self._last_wr70_save_step:   int = -wr70_cooldown_steps
@@ -120,7 +129,9 @@ class TrainingHotSaveCallback(BaseCallback):
 
         for i, (info, done) in enumerate(zip(infos, dones)):
             if done and "profit_factor" in info:
-                self._env_latest[i] = dict(info)
+                if i not in self._env_windows:
+                    self._env_windows[i] = deque(maxlen=self.EPISODE_WINDOW)
+                self._env_windows[i].append(dict(info))
 
         # Check all gates every N steps
         if self.num_timesteps % self.check_every_steps < self.n_envs:
@@ -130,23 +141,77 @@ class TrainingHotSaveCallback(BaseCallback):
 
         return True
 
+    # ── Window aggregation helper ─────────────────────────────────────────────
+
+    def _aggregate(self, window: deque) -> dict:
+        """Aggregate a deque of per-episode info dicts into one combined dict.
+
+        Trades, wins, losses, and dollar/R P&L are summed; ratio metrics
+        (WR, PF, Sharpe, win_loss_ratio) are recomputed from the sums so
+        they reflect the full window — not a simple average of episode values.
+        """
+        eps = list(window)
+        if not eps:
+            return {}
+
+        n_trades = sum(e.get("n_trades", 0)  for e in eps)
+        n_wins   = sum(e.get("n_wins",   0)  for e in eps)
+        n_losses = sum(e.get("n_losses", 0)  for e in eps)
+        total_pnl_r       = sum(e.get("total_pnl_r",       0.0) for e in eps)
+        total_pnl_dollars = sum(e.get("total_pnl_dollars",  0.0) for e in eps)
+
+        win_rate = n_wins / n_trades if n_trades > 0 else 0.0
+
+        # Reconstruct gross win/loss R from per-episode averages × counts
+        gross_win_r  = sum(e.get("avg_win_r",  0.0) * e.get("n_wins",   0) for e in eps)
+        gross_loss_r = sum(e.get("avg_loss_r", 0.0) * e.get("n_losses", 0) for e in eps)
+        profit_factor = min(gross_win_r / max(gross_loss_r, 1e-6), 99.99) if n_trades else 0.0
+
+        avg_win_r  = gross_win_r  / n_wins   if n_wins   else 0.0
+        avg_loss_r = gross_loss_r / n_losses if n_losses else 1.0
+        win_loss_ratio = avg_win_r / max(avg_loss_r, 1e-6)
+
+        # Sharpe from window-level per-trade returns (collect all individual pnl_r)
+        all_r = []
+        for e in eps:
+            aw, al, nw, nl = (e.get("avg_win_r",0.), e.get("avg_loss_r",0.),
+                              e.get("n_wins",0),     e.get("n_losses",0))
+            all_r.extend([aw] * nw + [-al] * nl)
+        if len(all_r) >= 5:
+            arr = np.array(all_r, dtype=np.float32)
+            std = float(np.std(arr))
+            sharpe_ratio = float(np.clip(np.mean(arr) / std * np.sqrt(252), -9.99, 9.99)) if std > 0.01 else 0.0
+        else:
+            sharpe_ratio = 0.0
+
+        return {
+            "n_trades":          n_trades,
+            "n_wins":            n_wins,
+            "n_losses":          n_losses,
+            "win_rate":          win_rate,
+            "total_pnl_r":       total_pnl_r,
+            "total_pnl_dollars": total_pnl_dollars,
+            "profit_factor":     profit_factor,
+            "win_loss_ratio":    win_loss_ratio,
+            "sharpe_ratio":      sharpe_ratio,
+        }
+
     # ── Gate 1 — PF / WR ─────────────────────────────────────────────────────
 
     def _check_pf_gate(self) -> None:
         step = self.num_timesteps
         if step - self._last_save_step < self.cooldown_steps:
             return
-
-        filled = [v for v in self._env_latest.values() if v]
-        if not filled:
+        if not self._env_windows:
             return
 
-        passing = [
-            d for d in filled
+        agg_list = [self._aggregate(w) for w in self._env_windows.values() if w]
+        passing  = [
+            d for d in agg_list
             if (
                 d.get("profit_factor", 0.0) > self.pf_threshold
-                and d.get("win_rate",      0.0) >= self.wr_threshold
-                and d.get("n_trades",      0)   >= self.min_trades
+                and d.get("win_rate",  0.0) >= self.wr_threshold
+                and d.get("n_trades",  0)   >= self.min_trades
             )
         ]
         if len(passing) < self.min_envs_passing:
@@ -168,13 +233,12 @@ class TrainingHotSaveCallback(BaseCallback):
         step = self.num_timesteps
         if step - self._last_sharpe_save_step < self.sharpe_cooldown_steps:
             return
-
-        filled = [v for v in self._env_latest.values() if v]
-        if not filled:
+        if not self._env_windows:
             return
 
-        passing = [
-            d for d in filled
+        agg_list = [self._aggregate(w) for w in self._env_windows.values() if w]
+        passing  = [
+            d for d in agg_list
             if (
                 d.get("sharpe_ratio",    0.0) > self.sharpe_threshold
                 and d.get("profit_factor", 0.0) > self.sharpe_pf_threshold
@@ -200,17 +264,16 @@ class TrainingHotSaveCallback(BaseCallback):
     # ── Gate 3 — WR70 quality gate ────────────────────────────────────────────
 
     def _check_wr70_gate(self) -> None:
-        """Save when any single env achieves WR ≥ 70%, PnL > 0, trades ≥ 20."""
+        """Save when any env's rolling window achieves WR ≥ 70%, PnL > 0, trades ≥ 20."""
         step = self.num_timesteps
         if step - self._last_wr70_save_step < self.wr70_cooldown_steps:
             return
-
-        filled = [v for v in self._env_latest.values() if v]
-        if not filled:
+        if not self._env_windows:
             return
 
+        agg_list   = [self._aggregate(w) for w in self._env_windows.values() if w]
         qualifying = [
-            d for d in filled
+            d for d in agg_list
             if (
                 d.get("win_rate",           0.0) >= 0.70
                 and d.get("total_pnl_dollars", d.get("total_pnl_r", 0.0)) > 0
