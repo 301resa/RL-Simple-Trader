@@ -248,8 +248,9 @@ class TradingEvalCallback(BaseCallback):
             min_composite = self._phase_min_composite()
             passes_phase  = metrics.composite_score >= min_composite
             passes_trades = metrics.n_trades >= MIN_TRADES_FOR_SAVE
+            passes_pnl    = metrics.total_pnl_r > 0.0   # never save on net loss
 
-            if passes_phase and passes_trades:
+            if passes_phase and passes_trades and passes_pnl:
                 self._save_checkpoint(metrics)
             else:
                 reasons = []
@@ -257,6 +258,8 @@ class TradingEvalCallback(BaseCallback):
                     reasons.append(f"composite={metrics.composite_score:.3f} < phase_min={min_composite:.2f}")
                 if not passes_trades:
                     reasons.append(f"n_trades={metrics.n_trades} < min={MIN_TRADES_FOR_SAVE}")
+                if not passes_pnl:
+                    reasons.append(f"total_pnl_r={metrics.total_pnl_r:.3f} <= 0")
                 log.info("Checkpoint not saved", reasons=", ".join(reasons))
 
         # ── Early stopping ────────────────────────────────────
@@ -319,13 +322,17 @@ class TradingEvalCallback(BaseCallback):
 
     def save_final_checkpoint(self) -> None:
         """
-        Save a FINAL_STEP checkpoint regardless of composite score.
-        Called by Trainer.run() at end of training as a safety-net so at
-        least one testable checkpoint always exists per fold.
-        Skipped when save_enabled=False.
+        Save a FINAL_STEP checkpoint at end of training.
+        Skipped if save_enabled=False or if the last eval run was net-negative.
         """
         if not self.save_enabled:
             log.info("FINAL_STEP save skipped (save_enabled=False)")
+            return
+        if self._eval_history and self._eval_history[-1].total_pnl_r <= 0.0:
+            log.info(
+                "FINAL_STEP save skipped — last eval net-negative",
+                total_pnl_r=round(self._eval_history[-1].total_pnl_r, 3),
+            )
             return
         stem      = f"checkpoint_FINAL_STEP{self.num_timesteps}"
         ckpt_path = self.save_path / f"{stem}.zip"

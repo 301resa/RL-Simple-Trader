@@ -94,6 +94,8 @@ class TrainingHotSaveCallback(BaseCallback):
         # Gate 3 — WR70 quality gate
         wr70_min_trades: int = 20,
         wr70_cooldown_steps: int = 50_000,
+        # Minimum dollar PnL for WR70 gate = 0.5% of initial capital
+        initial_capital: float = 2500.0,
         check_every_steps: int = 4_096,
         vec_normalize=None,
         verbose: int = 1,
@@ -110,6 +112,7 @@ class TrainingHotSaveCallback(BaseCallback):
         self.sharpe_cooldown_steps= sharpe_cooldown_steps
         self.wr70_min_trades      = wr70_min_trades
         self.wr70_cooldown_steps  = wr70_cooldown_steps
+        self.wr70_min_pnl_dollars = 0.005 * initial_capital  # 0.5% of capital
         self.check_every_steps    = check_every_steps
         self.vec_normalize        = vec_normalize
 
@@ -209,9 +212,10 @@ class TrainingHotSaveCallback(BaseCallback):
         passing  = [
             d for d in agg_list
             if (
-                d.get("profit_factor", 0.0) > self.pf_threshold
-                and d.get("win_rate",  0.0) >= self.wr_threshold
-                and d.get("n_trades",  0)   >= self.min_trades
+                d.get("profit_factor",   0.0) > self.pf_threshold
+                and d.get("win_rate",    0.0) >= self.wr_threshold
+                and d.get("n_trades",    0)   >= self.min_trades
+                and d.get("total_pnl_r", 0.0) > 0.0   # never save on net loss
             )
         ]
         if len(passing) < self.min_envs_passing:
@@ -275,9 +279,10 @@ class TrainingHotSaveCallback(BaseCallback):
         qualifying = [
             d for d in agg_list
             if (
-                d.get("win_rate",           0.0) >= 0.70
-                and d.get("total_pnl_dollars", d.get("total_pnl_r", 0.0)) > 0
+                d.get("win_rate",            0.0) >= 0.70
+                and d.get("total_pnl_dollars", d.get("total_pnl_r", 0.0)) >= self.wr70_min_pnl_dollars
                 and d.get("n_trades",          0)   >= self.wr70_min_trades
+                and d.get("total_pnl_r",       0.0) > 0.0   # R-based sanity guard
             )
         ]
         if not qualifying:

@@ -206,6 +206,8 @@ class Trainer:
         hotsave_sharpe: float = 1.2,
         hotsave_sharpe_pf: float = 1.85,
         hotsave_sharpe_cooldown: int = 50_000,
+        # Initial capital — used to compute minimum PnL threshold for WR70 gate
+        initial_capital: float = 2500.0,
     ) -> None:
         self.agent = agent
         self.train_env = train_env
@@ -237,9 +239,10 @@ class Trainer:
         self.hotsave_min_trades   = hotsave_min_trades
         self.hotsave_min_envs     = hotsave_min_envs
         self.hotsave_cooldown     = hotsave_cooldown
-        self.hotsave_sharpe       = hotsave_sharpe
-        self.hotsave_sharpe_pf    = hotsave_sharpe_pf
+        self.hotsave_sharpe          = hotsave_sharpe
+        self.hotsave_sharpe_pf       = hotsave_sharpe_pf
         self.hotsave_sharpe_cooldown = hotsave_sharpe_cooldown
+        self.initial_capital         = initial_capital
 
     def run(self) -> PPOAgent:
         """
@@ -376,6 +379,7 @@ class Trainer:
                 sharpe_threshold=self.hotsave_sharpe,
                 sharpe_pf_threshold=self.hotsave_sharpe_pf,
                 sharpe_cooldown_steps=self.hotsave_sharpe_cooldown,
+                initial_capital=self.initial_capital,
                 vec_normalize=self.vec_normalize,
                 verbose=1,
             )

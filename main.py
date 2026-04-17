@@ -586,6 +586,7 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
         train_date_range=f"{c.split.train[0]}→{c.split.train[-1]}",
         vec_normalize=c.vec_normalize,
         resume=bool(args.checkpoint),
+        initial_capital=real_capital,
     )
 
     trainer.run()
@@ -1018,6 +1019,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             train_date_range=f"{train_days[0]}→{train_days[-1]}",
             vec_normalize=train_vec_env,
             resume=False,
+            initial_capital=real_capital,
         )
 
         # Inject fold_journal_cb into Trainer callbacks
