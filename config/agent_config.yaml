@@ -86,6 +86,11 @@ hotsave:
   # Examples: 12 months (~252 days) → 50 trades | 4 years (~1008 days) → 201 trades
   min_trades_per_week:   1         # require at least 1 trade per trading week on average
 
+augmentation:
+  max_jitter_pts: 2.0    # OHLC bar-level jitter ±N pts (2.0 = ±8 ticks for ES)
+  trend_scale:    0.15   # session return scaling ±15%  (e.g. 1.0% move → 0.85–1.15%)
+  volume_scale:   0.30   # session volume multiplicative ±30%
+
 multiprocessing:
   n_envs: 16                       # parallel training environments
   use_subprocess: true             # SubprocVecEnv (true) or DummyVecEnv (false)

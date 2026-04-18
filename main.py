@@ -303,13 +303,20 @@ def build_components(
     session_end     = session_cfg.get("rth_end_utc",   "15:00")
     session_type    = session_cfg.get("session_type", "RTH").upper()
 
-    # ── OHLCV Augmentor (training only) ──────────────────────
-    # Jitter is discrete: OHLC {-0.5,-0.25,0,+0.25,+0.5}, Volume {-10,-5,0,+5,+10}
-    train_augmentor = OHLCVAugmentor(rng=np.random.default_rng(agent_cfg.get("seed", 42)))
-
     bar_minutes = int(session_cfg.get("bar_timeframe_minutes", 5))
+    aug_cfg     = agent_cfg.get("augmentation", {})
+    base_seed   = int(agent_cfg.get("seed", 42))
 
     def make_env(day_list, is_eval=False, worker_seed_offset=0):
+        env_seed = base_seed + worker_seed_offset + (100 if is_eval else 0)
+        # Each training env gets its own augmentor seeded uniquely so all 16
+        # parallel workers apply independent jitter sequences every episode.
+        augmentor = None if is_eval else OHLCVAugmentor(
+            rng=np.random.default_rng(env_seed),
+            max_jitter_pts=float(aug_cfg.get("max_jitter_pts", 2.0)),
+            trend_scale=float(aug_cfg.get("trend_scale",    0.15)),
+            volume_scale=float(aug_cfg.get("volume_scale",  0.30)),
+        )
         return TradingEnv(
             data_loader=data_loader,
             trading_days=day_list,
@@ -330,10 +337,10 @@ def build_components(
             point_value=point_value,
             bar_minutes=bar_minutes,
             curriculum_filter_fn=None,
-            augmentor=None if is_eval else train_augmentor,
+            augmentor=augmentor,
             session_type=session_type,
             random_start=not is_eval,
-            seed=agent_cfg.get("seed", 42) + worker_seed_offset + (100 if is_eval else 0),
+            seed=env_seed,
             zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
         )
 

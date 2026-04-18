@@ -379,14 +379,22 @@ metrics and log results without writing any model files (useful for exploration 
   binary flags. Observation vector size: `60 × 5 + 36 + 17 = 353` features.
   The LSTM (256 units) carries within-session state across steps.
 
-- **OHLCV jitter augmentation** (`data/data_augmentor.py`): Applied to every training
-  episode to prevent the agent memorising price-to-outcome mappings. Each bar receives
-  an independent discrete offset sampled uniformly from `{−0.5, −0.25, 0, +0.25, +0.5}`
-  points for OHLC and `{−10, −5, 0, +5, +10}` contracts for volume. OHLC integrity is
-  enforced after jittering (`high ≥ max(open, close)`, `low ≤ min(open, close)`).
-  Each of the 16 parallel workers is seeded differently so every env sees a unique
-  jitter sequence. Augmentation is **training-only** — evaluation and backtest use
-  clean unadjusted bars.
+- **OHLCV augmentation** (`data/data_augmentor.py`): Three-stage augmentation applied
+  to every training episode to prevent the agent memorising price-to-outcome mappings:
+  1. **Session-level return scaling** — a factor f ~ U(0.85, 1.15) is drawn per episode;
+     all OHLC bars are re-expressed as ratios relative to the session open, raised to
+     the power f, then converted back to prices.  This compresses or expands intraday
+     moves (±15%) so the agent encounters different volatility regimes on each replay.
+  2. **Bar-level OHLC jitter** — each bar's O/H/L/C receives an independent continuous
+     offset drawn from U(−2.0, +2.0) pts (±8 ticks for ES).
+  3. **Volume multiplicative scaling** — volume for the entire session is multiplied by
+     a factor drawn from U(0.70, 1.30).
+  OHLC integrity is enforced after every step (`high ≥ max(open, close)`,
+  `low ≤ min(open, close)`).  Each of the 16 parallel workers receives its own
+  `OHLCVAugmentor` seeded with `base_seed + worker_id` so every env sees a fully
+  independent augmentation sequence.  Augmentation is **training-only** — evaluation
+  and backtest always use clean unadjusted bars.  Parameters are configurable in
+  `agent_config.yaml` under `augmentation:`.
 
 - **Annualised Sharpe**: All Sharpe calculations use `mean(pnl_r) / std(pnl_r) × √252`
   consistently across training table, eval callback, and test_fold.
