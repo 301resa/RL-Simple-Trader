@@ -95,46 +95,30 @@ class TrainingJournalCallback(BaseCallback):
                     t["global_step"] = self.num_timesteps
                     t["env_id"]      = env_idx
                     self._trades.append(t)
-
-        if (self.num_timesteps - self._last_save_step) >= self.save_every_steps:
-            self._save()
-            self._last_save_step = self.num_timesteps
-
         return True
 
     def _on_training_end(self) -> None:
-        if self._trades:
-            self._save()
+        pass  # no file output during training
 
     # ── Save ──────────────────────────────────────────────────────────────────
 
     def _save(self) -> None:
-        if not self._trades:
-            return
-        self._save_n += 1
-        snap_dir = self.journal_dir / "snapshots"
-        snap_dir.mkdir(parents=True, exist_ok=True)
-        self.journal_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"journal_s{self._save_n:04d}_step{self.num_timesteps:010d}"
-        try:
-            self._write_excel(snap_dir, stem=stem)
-        except Exception as exc:
-            if self.verbose:
-                print(f"[TrainingJournal] Excel write failed: {exc}")
-        try:
-            self._write_plotly(snap_dir, stem=stem)
-        except Exception as exc:
-            if self.verbose:
-                print(f"[TrainingJournal] Plotly write failed: {exc}")
-        self._write_trade_chart(snap_dir, stem=stem)
+        pass  # file output disabled during training — call write_snapshot() post-training
 
     # ── Public snapshot API (called by hotsave callback) ─────────────────────
 
-    def write_snapshot(self, output_dir: Path, stem: str, trades: list | None = None) -> None:
-        """Write Excel + HTML to output_dir/<stem>.{xlsx,html} without touching 'latest'.
+    def write_snapshot(
+        self,
+        output_dir: Path,
+        stem: str,
+        trades: list | None = None,
+        include_ohlc_chart: bool = False,
+    ) -> None:
+        """Write Excel + equity-curve HTML to output_dir/<stem>.{xlsx,html}.
 
-        trades : if provided, use this list instead of self._trades (used by hotsave
-                 callback which maintains its own independent accumulator).
+        include_ohlc_chart : False by default for hotsaves because training
+            envs use augmented prices (jitter + scaling) which don't align with
+            real OHLC bars — the OHLC overlay would be misleading.
         """
         _trades = trades if trades is not None else self._trades
         if not _trades:
@@ -142,16 +126,12 @@ class TrainingJournalCallback(BaseCallback):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self._write_excel(output_dir, stem=stem, copy_latest=False, trades=_trades)
-        except Exception as exc:
-            if self.verbose:
-                print(f"[TrainingJournal] Hotsave Excel write failed: {exc}")
-        try:
             self._write_plotly(output_dir, stem=stem, copy_latest=False, trades=_trades)
         except Exception as exc:
             if self.verbose:
                 print(f"[TrainingJournal] Hotsave Plotly write failed: {exc}")
-        self._write_trade_chart(output_dir, stem=stem, trades=_trades)
+        if include_ohlc_chart:
+            self._write_trade_chart(output_dir, stem=stem, trades=_trades)
 
     # ── Trade chart (OHLC + annotations) ─────────────────────────────────────
 
@@ -268,7 +248,7 @@ class TrainingJournalCallback(BaseCallback):
                         row["eth_pf"]    = round(_pf(eth_g), 2)
                     return pd.Series(row)
 
-                daily = df.groupby("date").apply(_daily_row).reset_index()
+                daily = df.groupby("date").apply(_daily_row, include_groups=False).reset_index()
                 daily.to_excel(writer, sheet_name="Daily", index=False)
                 _style_daily_sheet(writer.sheets["Daily"], daily)
 
@@ -278,20 +258,11 @@ class TrainingJournalCallback(BaseCallback):
             summary_df.to_excel(writer, sheet_name="Summary", index=False)
             _style_summary_sheet(writer.sheets["Summary"])
 
-            # ── Sheets 4+: Per-env ────────────────────────────
+            # ── Sheets 4+: Per-env (summary block + trades) ──
             if "env_id" in df.columns:
-                _TRADE_COLS = [
-                    "global_step", "date", "direction",
-                    "entry_price", "stop_price", "initial_target", "exit_price",
-                    "pnl_r", "pnl_dollars", "pnl_points",
-                    "n_contracts", "duration_min", "exit_reason",
-                    "is_win", "is_rth", "mae_r",
-                ]
                 for env_id, env_df in df.groupby("env_id"):
                     sheet = f"Env_{int(env_id):02d}"
-                    ecols = [c for c in _TRADE_COLS if c in env_df.columns]
-                    env_df[ecols].to_excel(writer, sheet_name=sheet, index=False)
-                    _style_trades_sheet(writer.sheets[sheet], env_df[ecols])
+                    _write_env_sheet(writer, sheet, env_df, int(env_id), self.num_timesteps)
 
         if copy_latest:
             import shutil
@@ -328,6 +299,7 @@ class TrainingJournalCallback(BaseCallback):
         drawdown_d = list(equity_d - peak_d)
 
         total_d   = sum(pnl_d)
+        total_r   = sum(pnl_r)
         n_wins    = sum(is_win)
         wr_pct    = 100 * n_wins / n if n else 0
         color_r   = _GREEN if total_d >= 0 else _RED
@@ -599,6 +571,119 @@ def _compute_summary(df: Any, step: int) -> dict:
         "Total Wins":       len(wins),
         "Total Losses":     len(losses),
     }
+
+
+_ENV_TRADE_COLS = [
+    "global_step", "date", "direction",
+    "entry_price", "stop_price", "initial_target", "exit_price",
+    "pnl_r", "pnl_dollars", "pnl_points",
+    "n_contracts", "duration_min", "exit_reason",
+    "is_win", "is_rth", "mae_r",
+]
+
+
+def _write_env_sheet(writer: Any, sheet_name: str, env_df: Any, env_id: int, num_timesteps: int) -> None:
+    """Write a per-env sheet: summary metrics block at top, then full trade list."""
+    import pandas as pd
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    n      = len(env_df)
+    wins   = env_df[env_df["is_win"]] if "is_win" in env_df.columns else env_df.iloc[:0]
+    losses = env_df[~env_df["is_win"]] if "is_win" in env_df.columns else env_df.iloc[:0]
+    wr     = len(wins) / n if n else 0.0
+    total_r   = float(env_df["pnl_r"].sum())       if "pnl_r"      in env_df.columns else 0.0
+    total_usd = float(env_df["pnl_dollars"].sum())  if "pnl_dollars" in env_df.columns else 0.0
+    avg_win_r  = float(wins["pnl_r"].mean())  if len(wins)   else 0.0
+    avg_loss_r = float(losses["pnl_r"].mean()) if len(losses) else 0.0
+    gross_w = float(wins["pnl_r"].sum())             if len(wins)   else 0.0
+    gross_l = abs(float(losses["pnl_r"].sum()))      if len(losses) else 1e-6
+    pf_val  = min(gross_w / max(gross_l, 1e-6), 99.99)
+    avg_dur = float(env_df["duration_min"].mean())   if "duration_min" in env_df.columns else 0.0
+    max_dd_usd = 0.0
+    if "pnl_dollars" in env_df.columns and n:
+        eq_d   = np.cumsum(env_df["pnl_dollars"].values.astype(float))
+        peak_d = np.maximum.accumulate(eq_d)
+        max_dd_usd = float((peak_d - eq_d).max())
+    tr_arr = env_df["pnl_r"].values if "pnl_r" in env_df.columns else np.array([])
+    if len(tr_arr) >= 5 and tr_arr.std() > 0.01:
+        sharpe = float(np.clip(tr_arr.mean() / tr_arr.std() * np.sqrt(252), -9.99, 9.99))
+    else:
+        sharpe = 0.0
+    rth_pf_v = eth_pf_v = rth_wr = eth_wr = 0.0
+    rth_n = eth_n = 0
+    if "is_rth" in env_df.columns:
+        rth_df   = env_df[env_df["is_rth"]]
+        eth_df   = env_df[~env_df["is_rth"]]
+        rth_n    = len(rth_df)
+        eth_n    = len(eth_df)
+        rth_pf_v = _pf(rth_df)
+        eth_pf_v = _pf(eth_df)
+        rth_wins = rth_df[rth_df["is_win"]] if "is_win" in rth_df.columns else rth_df.iloc[:0]
+        eth_wins = eth_df[eth_df["is_win"]] if "is_win" in eth_df.columns else eth_df.iloc[:0]
+        rth_wr   = len(rth_wins) / rth_n if rth_n else 0.0
+        eth_wr   = len(eth_wins) / eth_n if eth_n else 0.0
+
+    summary_rows = [
+        ("Metric",          "Value"),
+        ("Env ID",          env_id),
+        ("Total Trades",    n),
+        ("Win Rate",        f"{wr*100:.1f}%"),
+        ("Total PnL (R)",   f"{total_r:+.2f}"),
+        ("Total PnL ($)",   f"${total_usd:+,.0f}"),
+        ("Profit Factor",   f"{pf_val:.2f}"),
+        ("Sharpe (ann.)",   f"{sharpe:.2f}"),
+        ("Avg Win (R)",     f"{avg_win_r:+.3f}"),
+        ("Avg Loss (R)",    f"{avg_loss_r:+.3f}"),
+        ("Avg Duration",    f"{avg_dur:.0f} min"),
+        ("Max DD ($)",      f"${max_dd_usd:,.0f}"),
+        ("RTH Trades",      rth_n),
+        ("RTH WR",          f"{rth_wr*100:.1f}%"),
+        ("RTH PF",          f"{rth_pf_v:.2f}"),
+        ("ETH Trades",      eth_n),
+        ("ETH WR",          f"{eth_wr*100:.1f}%"),
+        ("ETH PF",          f"{eth_pf_v:.2f}"),
+    ]
+    n_summary = len(summary_rows) - 1  # exclude header row (written separately)
+    summary_df = pd.DataFrame(summary_rows[1:], columns=["Metric", "Value"])
+    summary_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
+
+    ecols = [c for c in _ENV_TRADE_COLS if c in env_df.columns]
+    trades_startrow = n_summary + 2
+    env_df[ecols].to_excel(writer, sheet_name=sheet_name, index=False, startrow=trades_startrow)
+
+    ws = writer.sheets[sheet_name]
+    blue_hdr   = PatternFill("solid", fgColor="BBDEFB")
+    blue_fill  = PatternFill("solid", fgColor="E3F2FD")
+    green_fill = PatternFill("solid", fgColor="C8E6C9")
+    red_fill   = PatternFill("solid", fgColor="FFCDD2")
+    bold       = Font(bold=True)
+
+    # Style summary block
+    ws[1][0].font = bold
+    ws[1][1].font = bold
+    ws[1][0].fill = blue_hdr
+    ws[1][1].fill = blue_hdr
+    for row in ws.iter_rows(min_row=2, max_row=n_summary + 1):
+        row[0].font = bold
+        for cell in row:
+            cell.fill = blue_fill
+
+    # Style trades header and rows
+    hdr_row = trades_startrow + 1
+    for cell in ws[hdr_row]:
+        cell.font = bold
+    if "is_win" in ecols:
+        win_ci = ecols.index("is_win") + 1
+        for row in ws.iter_rows(min_row=hdr_row + 1, max_row=ws.max_row):
+            fill = green_fill if row[win_ci - 1].value else red_fill
+            for cell in row:
+                cell.fill = fill
+
+    # Auto column widths
+    for i, col in enumerate(ws.columns, 1):
+        max_len = max((len(str(cell.value or "")) for cell in col), default=8)
+        ws.column_dimensions[get_column_letter(i)].width = min(max_len + 2, 22)
 
 
 def _style_trades_sheet(ws: Any, df: Any) -> None:

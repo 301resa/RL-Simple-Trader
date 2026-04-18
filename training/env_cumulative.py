@@ -28,6 +28,11 @@ class EnvCumulative:
         "gross_win_r", "gross_loss_r",
         "gross_win_dollars", "gross_loss_dollars",
         "rth_trades", "rth_wins", "eth_trades", "eth_wins",
+        # RTH/ETH breakdown — for PF, RR and Dur per session type
+        "rth_gross_win_r", "rth_gross_loss_r", "rth_n_losses",
+        "eth_gross_win_r", "eth_gross_loss_r", "eth_n_losses",
+        "rth_total_duration", "rth_n_dur",
+        "eth_total_duration", "eth_n_dur",
         "max_win_dollars", "max_loss_dollars",
         "total_duration_minutes",
         "min_duration_minutes", "max_duration_minutes",
@@ -45,6 +50,12 @@ class EnvCumulative:
         self.gross_win_dollars = self.gross_loss_dollars = 0.0
         self.rth_trades = self.rth_wins = 0
         self.eth_trades = self.eth_wins = 0
+        self.rth_gross_win_r  = self.rth_gross_loss_r = 0.0
+        self.rth_n_losses     = 0
+        self.eth_gross_win_r  = self.eth_gross_loss_r = 0.0
+        self.eth_n_losses     = 0
+        self.rth_total_duration = self.rth_n_dur = 0.0
+        self.eth_total_duration = self.eth_n_dur = 0.0
         self.max_win_dollars  = 0.0
         self.max_loss_dollars = 0.0
         self.total_duration_minutes = 0.0
@@ -89,6 +100,28 @@ class EnvCumulative:
         self.rth_wins   += ep.get("rth_wins",   0)
         self.eth_trades += ep.get("eth_trades", 0)
         self.eth_wins   += ep.get("eth_wins",   0)
+
+        # RTH/ETH PF, RR, Dur from per-trade list (O(trades_per_episode))
+        for t in ep.get("trades_list", []):
+            t_pnl_r = float(t.get("pnl_r", 0.0))
+            t_dur   = float(t.get("duration_min", 0.0))
+            t_win   = bool(t.get("is_win", False))
+            if t.get("is_rth", True):
+                if t_win:
+                    self.rth_gross_win_r += t_pnl_r
+                else:
+                    self.rth_gross_loss_r += abs(t_pnl_r)
+                    self.rth_n_losses     += 1
+                self.rth_total_duration += t_dur
+                self.rth_n_dur          += 1
+            else:
+                if t_win:
+                    self.eth_gross_win_r += t_pnl_r
+                else:
+                    self.eth_gross_loss_r += abs(t_pnl_r)
+                    self.eth_n_losses     += 1
+                self.eth_total_duration += t_dur
+                self.eth_n_dur          += 1
 
         mw = ep.get("max_win_dollars",  0.0)
         ml = ep.get("max_loss_dollars", 0.0)
@@ -166,6 +199,24 @@ class EnvCumulative:
             if initial_capital > 0 else 0.0
         )
 
+        # RTH breakdown
+        rth_nl = self.rth_n_losses
+        rth_nw = self.rth_wins
+        rth_pf = min(self.rth_gross_win_r / max(self.rth_gross_loss_r, 1e-6), 99.99)
+        rth_aw = self.rth_gross_win_r  / max(rth_nw, 1)
+        rth_al = self.rth_gross_loss_r / max(rth_nl, 1)
+        rth_rr = rth_aw / max(rth_al, 1e-6) if rth_nl > 0 else 0.0
+        rth_dur = self.rth_total_duration / max(self.rth_n_dur, 1)
+
+        # ETH breakdown
+        eth_nl = self.eth_n_losses
+        eth_nw = self.eth_wins
+        eth_pf = min(self.eth_gross_win_r / max(self.eth_gross_loss_r, 1e-6), 99.99)
+        eth_aw = self.eth_gross_win_r  / max(eth_nw, 1)
+        eth_al = self.eth_gross_loss_r / max(eth_nl, 1)
+        eth_rr = eth_aw / max(eth_al, 1e-6) if eth_nl > 0 else 0.0
+        eth_dur = self.eth_total_duration / max(self.eth_n_dur, 1)
+
         # Trades per week normalised by the FULL training range, not elapsed episodes.
         # E.g. 98 trades over 6 years (312 weeks) = 0.31 trades/week.
         weeks = (n_training_days / 5.0) if n_training_days > 0 else max(self.n_episodes / 5.0, 1.0)
@@ -187,8 +238,14 @@ class EnvCumulative:
             "max_drawdown_pct":     max_dd_pct,
             "rth_trades":           self.rth_trades,
             "rth_wins":             self.rth_wins,
+            "rth_pf":               rth_pf,
+            "rth_rr":               rth_rr,
+            "rth_avg_duration":     rth_dur,
             "eth_trades":           self.eth_trades,
             "eth_wins":             self.eth_wins,
+            "eth_pf":               eth_pf,
+            "eth_rr":               eth_rr,
+            "eth_avg_duration":     eth_dur,
             "max_win_dollars":      self.max_win_dollars,
             "max_loss_dollars":     self.max_loss_dollars,
             "avg_win_dollars":      avg_win_d,

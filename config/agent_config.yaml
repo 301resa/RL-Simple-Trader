@@ -75,7 +75,7 @@ hotsave:
   elite_pnl_multiplier:   1.5      # required cumulative return multiple
   elite_wr_pf_threshold:  1.5      # WR × PF combined quality score
   elite_sharpe_threshold: 3.0      # annualised Sharpe (elite tier)
-  elite_cooldown_steps:   4_000    # minimum steps between Gate-3 saves
+  elite_cooldown_steps:   50_000    # minimum steps between Gate-3 saves
 
   # Minimum trade count — scaled by training date range length.
   # Formula: max(10, n_trading_days × min_trades_per_week ÷ 5)

@@ -348,6 +348,9 @@ class TradingEnv(gym.Env):
         # Offset into _combined_bars where the agent's episode begins
         self._combined_session_offset = history_len + start_offset
 
+        # Cache bar timestamps once per episode — avoids pandas index access per step
+        self._session_times = [ts.time() for ts in self._session_bars.index]
+
         self._current_step = 0
         self._n_steps = len(self._session_bars)
         self._episode_rewards = []
@@ -445,11 +448,18 @@ class TradingEnv(gym.Env):
         """
         assert self._session_bars is not None, "Call reset() before step()."
 
-        # Single .iloc lookup — reuse values throughout the step
-        current_bar   = self._session_bars.iloc[self._current_step]
-        current_price = float(current_bar["close"])
-        current_high  = float(current_bar["high"])
-        current_low   = float(current_bar["low"])
+        # O(1) numpy lookup — avoids pandas .iloc overhead in the hot path
+        _combined_step = self._combined_session_offset + self._current_step
+        _ob = self.observation_builder
+        if _ob._cached_closes is not None:
+            current_price = float(_ob._cached_closes[_combined_step])
+            current_high  = float(_ob._cached_highs[_combined_step])
+            current_low   = float(_ob._cached_lows[_combined_step])
+        else:
+            current_bar   = self._session_bars.iloc[self._current_step]
+            current_price = float(current_bar["close"])
+            current_high  = float(current_bar["high"])
+            current_low   = float(current_bar["low"])
         atr_state     = self._current_atr_state
 
         # ── Check pending limit order fill ────────────────────
@@ -637,7 +647,7 @@ class TradingEnv(gym.Env):
         # Time constants are pre-computed once in __init__ — no allocation per step.
         is_rth = 0.0
         rth_time_pct = 0.0
-        bar_time = self._session_bars.index[step].time()
+        bar_time = self._session_times[step]
         if self._rth_start_time <= bar_time <= self._rth_end_time:
             is_rth = 1.0
             bar_secs = bar_time.hour * 3600 + bar_time.minute * 60 + bar_time.second
@@ -713,6 +723,13 @@ class TradingEnv(gym.Env):
 
         bars_remaining = self._n_steps - 1 - self._current_step
 
+        _s = min(self._current_step, self._n_steps - 1)
+        _ob = self.observation_builder
+        _close_now = (
+            float(_ob._cached_closes[self._combined_session_offset + _s])
+            if _ob._cached_closes is not None
+            else float(self._session_bars.iloc[_s]["close"])
+        )
         return self.action_masker.compute_mask(
             is_position_open=portfolio_state["position_open"],
             position_direction=portfolio_state["position_direction"],
@@ -722,9 +739,7 @@ class TradingEnv(gym.Env):
             trades_today=portfolio_state.get("trades_today", 0),
             in_loss_streak_pause=self.position_manager.state.in_loss_streak_pause,
             bars_remaining_in_session=bars_remaining,
-            max_drawdown_breached=self.position_manager.is_max_drawdown_breached(
-                float(self._session_bars.iloc[min(self._current_step, self._n_steps - 1)]["close"])
-            ),
+            max_drawdown_breached=self.position_manager.is_max_drawdown_breached(_close_now),
         )
 
     def _place_pending_order(

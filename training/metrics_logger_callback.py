@@ -32,28 +32,31 @@ from stable_baselines3.common.callbacks import BaseCallback
 from training.env_cumulative import EnvCumulative
 
 # ── Column definitions ────────────────────────────────────────────────────────
+# Total width ≈ 148 chars — fits a standard 16-inch VS Code terminal.
 
 _COLS = [
-    ("ENV",   4, "l"),
-    ("Tr",    4, "r"),
-    ("Tr/wk", 5, "r"),
-    ("WR%",   6, "r"),
+    ("ENV",  3, "l"),
+    ("Tr",   4, "r"),
+    ("WR%",  5, "r"),
     ("PnL",  7, "r"),
     ("PF",   5, "r"),
-    ("Sh",   5, "r"),   # clamped [-9.99, 9.99] at source
+    ("Sh",   5, "r"),
     ("DD%",  5, "r"),
+    # ── RTH ──
     ("RTr",  4, "r"),
-    ("RWR%", 5, "r"),
+    ("RWR",  4, "r"),
+    ("RPF",  5, "r"),
+    ("RRR",  4, "r"),
+    # ── ETH ──
     ("ETr",  4, "r"),
-    ("EWR%", 5, "r"),
-    ("MaxW", 7, "r"),
-    ("MaxL", 7, "r"),
+    ("EWR",  4, "r"),
+    ("EPF",  5, "r"),
+    ("ERR",  4, "r"),
+    # ── Trade stats ──
     ("AvgW", 6, "r"),
     ("AvgL", 6, "r"),
     ("RR",   4, "r"),
     ("Dur",  4, "r"),
-    ("Min",  4, "r"),
-    ("Max",  4, "r"),
 ]
 
 _SEP  = "+"
@@ -76,14 +79,26 @@ def _header() -> str:
 
 
 def _fmt_pnl(v: float) -> str:
+    """Format PnL for width-7 column; switches to K/M to prevent overflow."""
+    av = abs(v)
+    sign = "+" if v >= 0 else ""
+    if av >= 1_000_000:
+        return f"{sign}{v / 1_000_000:.1f}M"
+    if av >= 100_000:
+        return f"{sign}{v / 1_000:.0f}K"
     if v >= 0:
         return f"+{v:,.0f}"
     return f"{v:,.0f}"
 
 
 def _fmt_dollars(v: float) -> str:
+    """Format avg win/loss for width-6 column; switches to K to prevent overflow."""
     if v == 0:
-        return "    +0"
+        return "+0"
+    av = abs(v)
+    sign = "+" if v >= 0 else ""
+    if av >= 10_000:
+        return f"{sign}{v / 1_000:.0f}K"
     if v >= 0:
         return f"+{v:,.0f}"
     return f"{v:,.0f}"
@@ -97,49 +112,47 @@ def _fmt_pf(pf: float) -> str:
 
 
 def _row(env_idx: int | str, info: dict) -> str:
-    n_trades   = int(round(info.get("n_trades", 0)))
-    tr_per_wk  = info.get("trades_per_week", 0.0)
-    win_rate   = info.get("win_rate", 0.0)
-    pnl_d      = info.get("total_pnl_dollars", 0.0)
-    pf         = info.get("profit_factor", 0.0)
-    sh         = info.get("sharpe_ratio", 0.0)
-    dd_pct     = info.get("max_drawdown_pct", 0.0)
-    rth_tr     = int(round(info.get("rth_trades", 0)))
-    rth_wr     = info.get("rth_wins", 0) / max(rth_tr, 1)
-    eth_tr     = int(round(info.get("eth_trades", 0)))
-    eth_wr     = info.get("eth_wins", 0) / max(eth_tr, 1)
-    max_w      = info.get("max_win_dollars", 0.0)
-    max_l      = info.get("max_loss_dollars", 0.0)
-    avg_w      = info.get("avg_win_dollars", 0.0)
-    avg_l      = info.get("avg_loss_dollars", 0.0)
-    rr         = info.get("avg_rr", 0.0)
-    dur        = info.get("avg_duration_minutes", 0.0)
-    dur_min    = int(round(info.get("min_duration_minutes", 0)))
-    dur_max    = int(round(info.get("max_duration_minutes", 0)))
+    n_trades = int(round(info.get("n_trades", 0)))
+    win_rate = info.get("win_rate", 0.0)
+    pnl_d    = info.get("total_pnl_dollars", 0.0)
+    pf       = info.get("profit_factor", 0.0)
+    sh       = info.get("sharpe_ratio", 0.0)
+    dd_pct   = info.get("max_drawdown_pct", 0.0)
+    rth_tr   = int(round(info.get("rth_trades", 0)))
+    rth_wr   = info.get("rth_wins", 0) / max(rth_tr, 1)
+    rth_pf   = info.get("rth_pf", 0.0)
+    rth_rr   = info.get("rth_rr", 0.0)
+    eth_tr   = int(round(info.get("eth_trades", 0)))
+    eth_wr   = info.get("eth_wins", 0) / max(eth_tr, 1)
+    eth_pf   = info.get("eth_pf", 0.0)
+    eth_rr   = info.get("eth_rr", 0.0)
+    avg_w    = info.get("avg_win_dollars", 0.0)
+    avg_l    = info.get("avg_loss_dollars", 0.0)
+    rr       = info.get("avg_rr", 0.0)
+    dur      = info.get("avg_duration_minutes", 0.0)
 
-    env_str  = f"{env_idx:>4}" if isinstance(env_idx, int) else f"{env_idx:>4}"
+    env_str = f"{env_idx:>3}" if isinstance(env_idx, int) else f"{str(env_idx):>3}"
 
     cells = [
-        (env_str,               4, "l"),
+        (env_str,               3, "l"),
         (f"{n_trades}",         4, "r"),
-        (f"{tr_per_wk:.1f}",    5, "r"),
-        (f"{win_rate*100:.1f}%",6, "r"),
+        (f"{win_rate*100:.1f}%",5, "r"),
         (_fmt_pnl(pnl_d),       7, "r"),
         (_fmt_pf(pf),           5, "r"),
         (f"{sh:.2f}",           5, "r"),
         (f"{dd_pct:.1f}%",      5, "r"),
         (f"{rth_tr}",           4, "r"),
-        (f"{rth_wr*100:.0f}%",  5, "r"),
+        (f"{rth_wr*100:.0f}%",  4, "r"),
+        (_fmt_pf(rth_pf),       5, "r"),
+        (f"{rth_rr:.2f}",       4, "r"),
         (f"{eth_tr}",           4, "r"),
-        (f"{eth_wr*100:.0f}%",  5, "r"),
-        (_fmt_dollars(max_w),   7, "r"),
-        (_fmt_dollars(max_l),   7, "r"),
+        (f"{eth_wr*100:.0f}%",  4, "r"),
+        (_fmt_pf(eth_pf),       5, "r"),
+        (f"{eth_rr:.2f}",       4, "r"),
         (_fmt_dollars(avg_w),   6, "r"),
         (_fmt_dollars(avg_l),   6, "r"),
         (f"{rr:.2f}",           4, "r"),
         (f"{dur:.0f}m",         4, "r"),
-        (f"{dur_min}m",         4, "r"),
-        (f"{dur_max}m",         4, "r"),
     ]
 
     parts = []

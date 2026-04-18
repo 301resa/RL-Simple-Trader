@@ -212,14 +212,14 @@ class ATRCalculator:
         if atr_val is None or atr_val <= 0:
             return None
 
-        # Prior day OHLC for context features
+        # O(log n) bisect lookup for prior day — avoids full-DataFrame boolean filter
         prior_high = prior_low = prior_range = 0.0
         if self._daily_bars is not None:
-            prior_days = self._daily_bars[self._daily_bars.index < date]
-            if not prior_days.empty:
-                last_day = prior_days.iloc[-1]
-                prior_high = float(last_day["high"])
-                prior_low = float(last_day["low"])
+            idx = bisect.bisect_left(self._sorted_dates, date)
+            if idx > 0:
+                last_day    = self._daily_bars.iloc[idx - 1]
+                prior_high  = float(last_day["high"])
+                prior_low   = float(last_day["low"])
                 prior_range = prior_high - prior_low
 
         # Session range so far (no lookahead)
@@ -277,13 +277,14 @@ class ATRCalculator:
         if atr_val is None or atr_val <= 0:
             return []
 
+        # O(log n) bisect lookup for prior day — avoids full-DataFrame boolean filter
         prior_high = prior_low = prior_range = 0.0
         if self._daily_bars is not None:
-            prior_days = self._daily_bars[self._daily_bars.index < date]
-            if not prior_days.empty:
-                last_day   = prior_days.iloc[-1]
-                prior_high = float(last_day["high"])
-                prior_low  = float(last_day["low"])
+            idx = bisect.bisect_left(self._sorted_dates, date)
+            if idx > 0:
+                last_day    = self._daily_bars.iloc[idx - 1]
+                prior_high  = float(last_day["high"])
+                prior_low   = float(last_day["low"])
                 prior_range = prior_high - prior_low
 
         highs_np = session_bars["high"].to_numpy(dtype=np.float64)
@@ -296,33 +297,34 @@ class ATRCalculator:
         session_open = float(opens_np[0])
         thresh = self.exhaustion_threshold * atr_val
 
-        states: List[ATRState] = []
-        running_high = float(highs_np[0])
-        running_low  = float(lows_np[0])
+        # Vectorised O(n) running max/min — replaces the Python loop entirely
+        running_highs  = np.maximum.accumulate(highs_np)
+        running_lows   = np.minimum.accumulate(lows_np)
+        current_ranges = running_highs - running_lows
+        atr_pct_used_v = current_ranges / atr_val
+        atr_remaining_v = np.maximum(0.0, atr_val - current_ranges)
+        move_down_v    = np.maximum(0.0, session_open - running_lows)
+        move_up_v      = np.maximum(0.0, running_highs - session_open)
+        short_exh_v    = move_down_v >= thresh
+        long_exh_v     = move_up_v   >= thresh
 
-        for i in range(n):
-            running_high = max(running_high, float(highs_np[i]))
-            running_low  = min(running_low,  float(lows_np[i]))
-            current_range = running_high - running_low
-            atr_pct_used  = current_range / atr_val
-            atr_remaining = max(0.0, atr_val - current_range)
-            move_down = max(0.0, session_open - running_low)
-            move_up   = max(0.0, running_high - session_open)
-            states.append(ATRState(
+        return [
+            ATRState(
                 atr_daily=atr_val,
                 prior_day_high=prior_high,
                 prior_day_low=prior_low,
                 prior_day_range=prior_range,
                 session_open=session_open,
-                session_high=running_high,
-                session_low=running_low,
-                current_daily_range=current_range,
-                atr_pct_used=atr_pct_used,
-                atr_remaining_pts=atr_remaining,
-                atr_short_exhausted=move_down >= thresh,
-                atr_long_exhausted=move_up   >= thresh,
-            ))
-        return states
+                session_high=float(running_highs[i]),
+                session_low=float(running_lows[i]),
+                current_daily_range=float(current_ranges[i]),
+                atr_pct_used=float(atr_pct_used_v[i]),
+                atr_remaining_pts=float(atr_remaining_v[i]),
+                atr_short_exhausted=bool(short_exh_v[i]),
+                atr_long_exhausted=bool(long_exh_v[i]),
+            )
+            for i in range(n)
+        ]
 
     @staticmethod
     def compute_atr_target_price(

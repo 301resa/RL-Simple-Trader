@@ -78,6 +78,11 @@ class ObservationBuilder:
         self._cached_highs:  Optional[np.ndarray] = None
         self._cached_lows:   Optional[np.ndarray] = None
         self._cached_closes: Optional[np.ndarray] = None
+        # Precomputed log-returns (same shape as cached arrays) — avoids per-step numpy work
+        self._lr_open:  Optional[np.ndarray] = None
+        self._lr_high:  Optional[np.ndarray] = None
+        self._lr_low:   Optional[np.ndarray] = None
+        self._lr_close: Optional[np.ndarray] = None
 
     @property
     def obs_dim(self) -> int:
@@ -106,6 +111,18 @@ class ObservationBuilder:
         self._cached_highs  = bars["high"].to_numpy(dtype=np.float64)
         self._cached_lows   = bars["low"].to_numpy(dtype=np.float64)
         self._cached_closes = bars["close"].to_numpy(dtype=np.float64)
+        # Precompute per-bar log-returns once — O(1) slice in build() instead of O(n) recompute
+        n  = len(self._cached_closes)
+        cv = self.clip_value
+        prev_c = np.empty(n, dtype=np.float64)
+        prev_c[0]  = self._cached_closes[0]
+        prev_c[1:] = self._cached_closes[:-1]
+        np.maximum(prev_c, 1e-6, out=prev_c)
+        self._lr_close = np.clip(np.log(np.maximum(self._cached_closes, 1e-6) / prev_c), -cv, cv)
+        self._lr_open  = np.clip(np.log(np.maximum(self._cached_opens,  1e-6) / prev_c), -cv, cv)
+        self._lr_high  = np.clip(np.log(np.maximum(self._cached_highs,  1e-6) / prev_c), -cv, cv)
+        self._lr_low   = np.clip(np.log(np.maximum(self._cached_lows,   1e-6) / prev_c), -cv, cv)
+        self._lr_close[0] = self._lr_open[0] = self._lr_high[0] = self._lr_low[0] = 0.0
 
     def build(
         self,
@@ -147,32 +164,44 @@ class ObservationBuilder:
 
         # ── 1. Recent price history (log returns) ─────────────────────────────
         n = self.price_history_len
-        indices    = np.arange(current_bar_idx - n + 1, current_bar_idx + 1)
-        valid_mask = indices >= 0
-        safe_idx   = np.maximum(indices, 0)
-        prev_idx   = np.maximum(indices - 1, 0)
-
-        prev_closes = np.where(
-            valid_mask & (indices > 0),
-            closes_np[prev_idx],
-            closes_np[safe_idx],
-        )
-        prev_closes = np.maximum(prev_closes, 1e-6)
-
-        def _lr_vec(prices: np.ndarray) -> np.ndarray:
-            return np.where(
-                valid_mask,
-                np.clip(np.log(np.maximum(prices[safe_idx], 1e-6) / prev_closes), -cv, cv),
-                0.0,
+        if self._lr_close is not None:
+            start = current_bar_idx - n + 1
+            if start >= 0:
+                price_block = np.column_stack([
+                    self._lr_open[start:current_bar_idx + 1],
+                    self._lr_high[start:current_bar_idx + 1],
+                    self._lr_low[start:current_bar_idx + 1],
+                    self._lr_close[start:current_bar_idx + 1],
+                ])
+            else:
+                pad = -start
+                price_block = np.column_stack([
+                    np.concatenate([np.zeros(pad), self._lr_open[:current_bar_idx + 1]]),
+                    np.concatenate([np.zeros(pad), self._lr_high[:current_bar_idx + 1]]),
+                    np.concatenate([np.zeros(pad), self._lr_low[:current_bar_idx + 1]]),
+                    np.concatenate([np.zeros(pad), self._lr_close[:current_bar_idx + 1]]),
+                ])
+            features.extend(price_block.ravel().tolist())
+        else:
+            # Fallback path (no episode cache — shouldn't happen in normal training)
+            indices    = np.arange(current_bar_idx - n + 1, current_bar_idx + 1)
+            valid_mask = indices >= 0
+            safe_idx   = np.maximum(indices, 0)
+            prev_idx   = np.maximum(indices - 1, 0)
+            prev_closes = np.where(
+                valid_mask & (indices > 0), closes_np[prev_idx], closes_np[safe_idx]
             )
-
-        lr_open  = _lr_vec(opens_np)
-        lr_high  = _lr_vec(highs_np)
-        lr_low   = _lr_vec(lows_np)
-        lr_close = _lr_vec(closes_np)
-
-        price_block = np.column_stack([lr_open, lr_high, lr_low, lr_close])
-        features.extend(price_block.ravel().tolist())
+            prev_closes = np.maximum(prev_closes, 1e-6)
+            def _lr_vec(prices: np.ndarray) -> np.ndarray:
+                return np.where(
+                    valid_mask,
+                    np.clip(np.log(np.maximum(prices[safe_idx], 1e-6) / prev_closes), -cv, cv),
+                    0.0,
+                )
+            price_block = np.column_stack(
+                [_lr_vec(opens_np), _lr_vec(highs_np), _lr_vec(lows_np), _lr_vec(closes_np)]
+            )
+            features.extend(price_block.ravel().tolist())
 
         # ── 2. ATR features ───────────────────────────────────────────────────
         atr_dict = atr_state.as_feature_dict()
@@ -311,8 +340,12 @@ class ObservationBuilder:
         w5_start  = max(i - 4,  0)
         w20_start = max(i - 19, 0)
 
-        returns_5  = np.diff(np.log(np.maximum(closes_np[w5_start:i + 1],  1e-6)))
-        returns_20 = np.diff(np.log(np.maximum(closes_np[w20_start:i + 1], 1e-6)))
+        if self._lr_close is not None:
+            returns_5  = self._lr_close[w5_start + 1:i + 1]
+            returns_20 = self._lr_close[w20_start + 1:i + 1]
+        else:
+            returns_5  = np.diff(np.log(np.maximum(closes_np[w5_start:i + 1],  1e-6)))
+            returns_20 = np.diff(np.log(np.maximum(closes_np[w20_start:i + 1], 1e-6)))
         vol_5  = float(np.std(returns_5))  if len(returns_5)  > 1 else 0.0
         vol_20 = float(np.std(returns_20)) if len(returns_20) > 1 else 0.0
         vol_expansion = float(np.clip(vol_5 / max(vol_20, 1e-8), 0.0, 4.0)) / 4.0
@@ -365,8 +398,12 @@ class ObservationBuilder:
         coherence = float(np.sum(signs)) / 3.0   # range [-1, 1]
 
         # HTF volatility expansion: 1h vol vs 2h vol (is the market accelerating?)
-        returns_12 = np.diff(np.log(np.maximum(closes_np[w12_start:i + 1], 1e-6)))
-        returns_24 = np.diff(np.log(np.maximum(closes_np[w24_start:i + 1], 1e-6)))
+        if self._lr_close is not None:
+            returns_12 = self._lr_close[w12_start + 1:i + 1]
+            returns_24 = self._lr_close[w24_start + 1:i + 1]
+        else:
+            returns_12 = np.diff(np.log(np.maximum(closes_np[w12_start:i + 1], 1e-6)))
+            returns_24 = np.diff(np.log(np.maximum(closes_np[w24_start:i + 1], 1e-6)))
         htf_vol_12 = float(np.std(returns_12)) if len(returns_12) > 1 else 0.0
         htf_vol_24 = float(np.std(returns_24)) if len(returns_24) > 1 else 0.0
         htf_vol_expansion = float(np.clip(htf_vol_12 / max(htf_vol_24, 1e-8), 0.0, 4.0)) / 4.0

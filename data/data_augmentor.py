@@ -93,34 +93,30 @@ class OHLCVAugmentor:
 
         df = bars.copy()
 
+        # Extract all OHLC as one (n, 4) float64 array — O=0, H=1, L=2, C=3.
+        # A single extraction + single write-back replaces 12 separate .values/.iloc calls.
+        ohlc = df[["open", "high", "low", "close"]].to_numpy(dtype=np.float64)
+
         # ── 1. Session-level return scaling ───────────────────
         if self.trend_scale > 0.0:
             scale_f = float(self._rng.uniform(
                 1.0 - self.trend_scale, 1.0 + self.trend_scale
             ))
             if scale_f != 1.0:
-                open0 = float(df["open"].iloc[0])
+                open0 = ohlc[0, 0]
                 if open0 > 0.0:
-                    for col in ("open", "high", "low", "close"):
-                        ratios = df[col].values / open0
-                        # Clamp to avoid log(≤0); ES prices are always >> 0
-                        ratios = np.maximum(ratios, 1e-6)
-                        df[col] = open0 * (ratios ** scale_f)
+                    ratios = np.maximum(ohlc / open0, 1e-6)
+                    np.multiply(open0, ratios ** scale_f, out=ohlc)
 
         # ── 2. Bar-level OHLC jitter ───────────────────────────
         if self.max_jitter_pts > 0.0:
-            offsets = self._rng.uniform(
+            ohlc += self._rng.uniform(
                 -self.max_jitter_pts, self.max_jitter_pts, size=(n, 4)
-            ).astype(np.float32)
-            df["open"]  = df["open"].values  + offsets[:, 0]
-            df["high"]  = df["high"].values  + offsets[:, 1]
-            df["low"]   = df["low"].values   + offsets[:, 2]
-            df["close"] = df["close"].values + offsets[:, 3]
+            )
 
         # ── 3. Enforce OHLC consistency ───────────────────────
-        open_arr  = df["open"].values
-        close_arr = df["close"].values
-        df["high"] = np.maximum(df["high"].values,  np.maximum(open_arr, close_arr))
-        df["low"]  = np.minimum(df["low"].values,   np.minimum(open_arr, close_arr))
+        np.maximum(ohlc[:, 1], np.maximum(ohlc[:, 0], ohlc[:, 3]), out=ohlc[:, 1])
+        np.minimum(ohlc[:, 2], np.minimum(ohlc[:, 0], ohlc[:, 3]), out=ohlc[:, 2])
 
+        df[["open", "high", "low", "close"]] = ohlc
         return df

@@ -462,6 +462,25 @@ metrics and log results without writing any model files (useful for exploration 
     instead of 2 `pd.Timestamp` allocations per step.
   - Dead O(n×window) vol_ratios fallback loop in `ObservationBuilder.build()` removed;
     `prepare_episode()` always pre-caches ratios so the fallback was unreachable.
+  - `ObservationBuilder.prepare_episode()`: precomputes all four OHLC log-return arrays
+    (`_lr_open/high/low/close`) in one vectorised pass per episode; `build()` now slices
+    precomputed arrays instead of recomputing log-returns and `np.diff(np.log(...))` per step.
+  - `TradingEnv.step()`: replaces `session_bars.iloc[step]` with O(1) numpy lookups into
+    `_cached_closes/highs/lows`; `_session_times` list pre-built in `reset()` eliminates
+    `session_bars.index[step].time()` per step.
+  - `TradingEnv._compute_action_mask()`: last `.iloc` close lookup replaced with numpy cache.
+  - `OHLCVAugmentor.apply()`: all three augmentation stages now operate on a single `(n,4)`
+    numpy array; 12 separate `.values`/column-assignment calls replaced with 1 extraction
+    + 1 write-back — ~4× faster per episode reset.
+  - `ATRCalculator.compute_all_session_states()`: Python loop replaced with
+    `np.maximum.accumulate` / `np.minimum.accumulate` — fully vectorised O(n).
+    Prior-day lookup also switched from pandas boolean filter to bisect (matching
+    `get_atr_for_date`).
+  - `TrainingHotSaveCallback`: three gate checks previously called `to_info_dict()` three
+    times each; refactored to compute `agg_list` once and pass it to all gates.
+  - `TrainingJournalCallback`: all file I/O (Excel, HTML, OHLC chart) disabled during
+    training — `_on_step` accumulates trades only; `_save()` / `_on_training_end()` are
+    no-ops. Call `write_snapshot()` / `_write_excel()` post-training for analysis.
 
 ---
 

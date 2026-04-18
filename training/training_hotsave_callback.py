@@ -133,63 +133,67 @@ class TrainingHotSaveCallback(BaseCallback):
                 self._env_cumulative[i].update(info)
                 for t in info.get("trades_list", []):
                     t["global_step"] = self.num_timesteps
+                    t["env_id"]      = i
                     self._trades.append(t)
 
         if self.num_timesteps % self.check_every_steps < self.n_envs:
-            self._check_pf_gate()
-            self._check_wr70_gate()
-            self._check_elite_gate()
+            self._run_gate_checks()
 
         return True
 
-    # ── Gate 1 — PF / WR ─────────────────────────────────────────────────────
-
-    def _check_pf_gate(self) -> None:
-        step = self.num_timesteps
-        if step - self._last_save_step < self.cooldown_steps:
-            return
+    def _run_gate_checks(self) -> None:
+        """Compute agg_list once, then run all three gates against it."""
         if not self._env_cumulative:
             return
-
+        step     = self.num_timesteps
         agg_list = [c.to_info_dict() for c in self._env_cumulative.values()]
-        passing  = [
+        self._check_pf_gate(step, agg_list)
+        self._check_wr70_gate(step, agg_list)
+        self._check_elite_gate(step, agg_list)
+
+    # ── Gate 1 — PF / WR ─────────────────────────────────────────────────────
+
+    def _check_pf_gate(self, step: int, agg_list: list) -> None:
+        if step - self._last_save_step < self.cooldown_steps:
+            return
+
+        pf_t  = self.pf_threshold
+        wr_t  = self.wr_threshold
+        mt    = self.min_trades
+        passing = [
             d for d in agg_list
             if (
-                d.get("profit_factor",   0.0) > self.pf_threshold
-                and d.get("win_rate",    0.0) >= self.wr_threshold
-                and d.get("n_trades",    0)   >= self.min_trades
+                d.get("profit_factor",   0.0) > pf_t
+                and d.get("win_rate",    0.0) >= wr_t
+                and d.get("n_trades",    0)   >= mt
                 and d.get("total_pnl_r", 0.0) > 0.0
             )
         ]
         if len(passing) < self.min_envs_passing:
             return
 
-        avg_pf = float(np.mean([d["profit_factor"] for d in passing]))
-        avg_wr = float(np.mean([d["win_rate"]       for d in passing]))
+        pf_arr = np.fromiter((d["profit_factor"] for d in passing), dtype=np.float64)
+        wr_arr = np.fromiter((d["win_rate"]       for d in passing), dtype=np.float64)
         self._save(
-            step=step,
-            prefix="hotsave",
-            tag="PF gate",
-            metrics={"avg_PF": avg_pf, "avg_WR": avg_wr, "envs": len(passing)},
+            step=step, prefix="hotsave", tag="PF gate",
+            metrics={"avg_PF": float(pf_arr.mean()), "avg_WR": float(wr_arr.mean()), "envs": len(passing)},
         )
         self._last_save_step = step
 
     # ── Gate 2 — WR70 ────────────────────────────────────────────────────────
 
-    def _check_wr70_gate(self) -> None:
-        step = self.num_timesteps
+    def _check_wr70_gate(self, step: int, agg_list: list) -> None:
         if step - self._last_wr70_save_step < self.wr70_cooldown_steps:
             return
-        if not self._env_cumulative:
-            return
 
-        agg_list   = [c.to_info_dict() for c in self._env_cumulative.values()]
+        min_pnl = self.wr70_min_pnl_dollars
+        mt      = self.min_trades
         qualifying = [
             d for d in agg_list
             if (
                 d.get("win_rate",            0.0) >= 0.70
-                and d.get("total_pnl_dollars", 0.0) >= self.wr70_min_pnl_dollars
-                and d.get("n_trades",          0)   >= self.min_trades
+                and d.get("total_pnl_dollars", 0.0) >= min_pnl
+                and d.get("n_trades",          0)   >= mt
                 and d.get("total_pnl_r",       0.0) > 0.0
             )
         ]
@@ -198,9 +202,7 @@ class TrainingHotSaveCallback(BaseCallback):
 
         best = max(qualifying, key=lambda d: d.get("win_rate", 0.0))
         self._save(
-            step=step,
-            prefix="hotsave_wr70",
-            tag="WR70 gate",
+            step=step, prefix="hotsave_wr70", tag="WR70 gate",
             metrics={
                 "WR":     best.get("win_rate", 0.0),
                 "PnL_$":  best.get("total_pnl_dollars", 0.0),
@@ -212,22 +214,21 @@ class TrainingHotSaveCallback(BaseCallback):
 
     # ── Gate 3 — Elite ───────────────────────────────────────────────────────
 
-    def _check_elite_gate(self) -> None:
-        """Save when any env achieves elite return, WR×PF threshold, and Sharpe."""
-        step = self.num_timesteps
+    def _check_elite_gate(self, step: int, agg_list: list) -> None:
         if step - self._last_elite_save_step < self.elite_cooldown_steps:
             return
-        if not self._env_cumulative:
-            return
 
-        agg_list   = [c.to_info_dict() for c in self._env_cumulative.values()]
+        pnl_t  = self.elite_pnl_threshold
+        wrpf_t = self.elite_wr_pf_threshold
+        sh_t   = self.elite_sharpe
+        mt     = self.min_trades
         qualifying = [
             d for d in agg_list
             if (
-                d.get("total_pnl_dollars", 0.0)                          > self.elite_pnl_threshold
-                and d.get("win_rate", 0.0) * d.get("profit_factor", 0.0) > self.elite_wr_pf_threshold
-                and d.get("sharpe_ratio", 0.0)                           > self.elite_sharpe
-                and d.get("n_trades", 0)                                 >= self.min_trades
+                d.get("total_pnl_dollars", 0.0)                          > pnl_t
+                and d.get("win_rate", 0.0) * d.get("profit_factor", 0.0) > wrpf_t
+                and d.get("sharpe_ratio", 0.0)                           > sh_t
+                and d.get("n_trades", 0)                                 >= mt
                 and d.get("total_pnl_r", 0.0)                            > 0.0
             )
         ]
@@ -236,9 +237,7 @@ class TrainingHotSaveCallback(BaseCallback):
 
         best = max(qualifying, key=lambda d: d.get("sharpe_ratio", 0.0))
         self._save(
-            step=step,
-            prefix="hotsave_elite",
-            tag="Elite gate",
+            step=step, prefix="hotsave_elite", tag="Elite gate",
             metrics={
                 "SH":     best.get("sharpe_ratio",    0.0),
                 "WR*PF":  best.get("win_rate", 0.0) * best.get("profit_factor", 0.0),
@@ -256,24 +255,13 @@ class TrainingHotSaveCallback(BaseCallback):
         name       = f"{prefix}_{step:010d}"
         model_path = self.models_dir / name
 
+        # ── Synchronous: model weights must be on disk before training continues
         self.model.save(str(model_path))
-
         if self.vec_normalize is not None:
             vn_path = self.models_dir / f"{name}_vecnormalize.pkl"
             self.vec_normalize.save(str(vn_path))
 
-        if self._journal_callback is not None and self._trades:
-            try:
-                self.journal_dir.mkdir(parents=True, exist_ok=True)
-                self._journal_callback.write_snapshot(
-                    output_dir=self.journal_dir,
-                    stem=name,
-                    trades=self._trades,
-                )
-            except Exception as exc:
-                if self.verbose:
-                    print(f"[HotSave] Journal snapshot failed: {exc}")
-
+        # ── Console log (fast, synchronous)
         if self.verbose >= 1:
             vn_note = " + VecNormalize" if self.vec_normalize is not None else ""
             met_str = "  ".join(
@@ -285,17 +273,16 @@ class TrainingHotSaveCallback(BaseCallback):
             print(f"  HOTSAVE [{tag}]  |  step {step:,}")
             print(f"  {met_str}")
             print(f"  Model  : {model_path}.zip{vn_note}")
-            print(f"  Journal: {self.journal_dir / name}")
             print(line)
 
         log.info(
             "Training hot-save written",
-            gate=tag,
-            step=step,
+            gate=tag, step=step,
             model_path=str(model_path),
             journal_dir=str(self.journal_dir),
             **{k: round(v, 3) if isinstance(v, float) else v for k, v in metrics.items()},
         )
+
 
     # ── n_envs helper ─────────────────────────────────────────────────────────
 
