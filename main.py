@@ -566,6 +566,9 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
     n_training_days   = len(c.split.train)
     min_trades_per_wk = hotsave_cfg.get("min_trades_per_week", 1)
     hotsave_min_trades = max(10, n_training_days * min_trades_per_wk // 5)
+    env_cfg_t  = configs.get("environment", {})
+    instrument_t  = env_cfg_t.get("instruments", {}).get("default", "ES")
+    bar_minutes_t = env_cfg_t.get("session", {}).get("bar_timeframe_minutes", 5)
 
     trainer = Trainer(
         agent=agent,
@@ -606,6 +609,9 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
         hotsave_elite_wr_pf_threshold=hotsave_cfg.get("elite_wr_pf_threshold", 1.5),
         hotsave_elite_sharpe=hotsave_cfg.get("elite_sharpe_threshold",         3.0),
         hotsave_elite_cooldown=hotsave_cfg.get("elite_cooldown_steps",         50_000),
+        data_dir=args.data,
+        instrument=instrument_t,
+        bar_minutes=bar_minutes_t,
     )
 
     trainer.run()
@@ -1056,6 +1062,9 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             hotsave_elite_wr_pf_threshold=hotsave_cfg.get("elite_wr_pf_threshold", 1.5),
             hotsave_elite_sharpe=hotsave_cfg.get("elite_sharpe_threshold",    3.0),
             hotsave_elite_cooldown=hotsave_cfg.get("elite_cooldown_steps",    50_000),
+            data_dir=args.data,
+            instrument=instrument,
+            bar_minutes=bar_minutes,
         )
 
         # Inject fold_journal_cb into Trainer callbacks

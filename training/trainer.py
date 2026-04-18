@@ -215,6 +215,10 @@ class Trainer:
         hotsave_elite_cooldown:        int   = 50_000,
         # Initial capital — used for WR70 and Elite PnL thresholds
         initial_capital: float = 2500.0,
+        # OHLC trade chart — pass data_dir + instrument to enable
+        data_dir:    str | None = None,
+        instrument:  str = "ES",
+        bar_minutes: int = 5,
     ) -> None:
         self.agent = agent
         self.train_env = train_env
@@ -255,6 +259,9 @@ class Trainer:
         self.hotsave_elite_sharpe            = hotsave_elite_sharpe
         self.hotsave_elite_cooldown          = hotsave_elite_cooldown
         self.initial_capital         = initial_capital
+        self.data_dir                = data_dir
+        self.instrument              = instrument
+        self.bar_minutes             = bar_minutes
 
     def run(self) -> PPOAgent:
         """
@@ -373,6 +380,9 @@ class Trainer:
         journal_cb = TrainingJournalCallback(
             journal_dir=self.log_dir / "journal",
             save_every_steps=50_000,
+            data_dir=self.data_dir,
+            instrument=self.instrument,
+            bar_minutes=self.bar_minutes,
             verbose=1,
         )
         cbs.append(journal_cb)

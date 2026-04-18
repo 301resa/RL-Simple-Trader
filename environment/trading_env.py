@@ -1072,6 +1072,12 @@ class TradingEnv(gym.Env):
                     "n_contracts":    t.n_contracts,
                     "entry_bar_idx":  t.entry_bar_idx,
                     "exit_bar_idx":   t.exit_bar_idx,
+                    "entry_time":     self._session_bars.index[
+                                          min(t.entry_bar_idx, len(self._session_bars) - 1)
+                                      ].isoformat(),
+                    "exit_time":      self._session_bars.index[
+                                          min(t.exit_bar_idx, len(self._session_bars) - 1)
+                                      ].isoformat(),
                     "duration_bars":  t.duration_bars,
                     "duration_min":   t.duration_bars * self.bar_minutes,
                     "exit_reason":    t.exit_reason.value,

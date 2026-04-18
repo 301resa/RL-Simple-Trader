@@ -55,6 +55,13 @@ class TrainingJournalCallback(BaseCallback):
         Output directory (created if missing).
     save_every_steps : int
         Write files after every N timesteps (default 50 000).
+    data_dir : str | Path | None
+        If provided, also generates a comprehensive OHLC trade chart HTML
+        alongside the regular equity-curve HTML.
+    instrument : str
+        Instrument ticker matching the CSV in data_dir (default "ES").
+    bar_minutes : int
+        Bar timeframe in minutes (must match the CSV data).
     verbose : int
     """
 
@@ -62,11 +69,17 @@ class TrainingJournalCallback(BaseCallback):
         self,
         journal_dir: str | Path = "logs/journal",
         save_every_steps: int = 50_000,
+        data_dir: str | Path | None = None,
+        instrument: str = "ES",
+        bar_minutes: int = 5,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
         self.journal_dir      = Path(journal_dir)
         self.save_every_steps = save_every_steps
+        self.data_dir         = Path(data_dir) if data_dir else None
+        self.instrument       = instrument
+        self.bar_minutes      = bar_minutes
         self._trades: List[dict] = []
         self._last_save_step  = 0
         self._save_n          = 0   # snapshot counter — incremented on every save
@@ -101,16 +114,18 @@ class TrainingJournalCallback(BaseCallback):
         snap_dir = self.journal_dir / "snapshots"
         snap_dir.mkdir(parents=True, exist_ok=True)
         self.journal_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"journal_s{self._save_n:04d}_step{self.num_timesteps:010d}"
         try:
-            self._write_excel(snap_dir)
+            self._write_excel(snap_dir, stem=stem)
         except Exception as exc:
             if self.verbose:
                 print(f"[TrainingJournal] Excel write failed: {exc}")
         try:
-            self._write_plotly(snap_dir)
+            self._write_plotly(snap_dir, stem=stem)
         except Exception as exc:
             if self.verbose:
                 print(f"[TrainingJournal] Plotly write failed: {exc}")
+        self._write_trade_chart(snap_dir, stem=stem)
 
     # ── Public snapshot API (called by hotsave callback) ─────────────────────
 
@@ -135,6 +150,40 @@ class TrainingJournalCallback(BaseCallback):
         except Exception as exc:
             if self.verbose:
                 print(f"[TrainingJournal] Hotsave Plotly write failed: {exc}")
+        self._write_trade_chart(output_dir, stem=stem, trades=_trades)
+
+    # ── Trade chart (OHLC + annotations) ─────────────────────────────────────
+
+    def _write_trade_chart(
+        self,
+        out_dir: Path,
+        stem:    str,
+        trades:  list | None = None,
+    ) -> None:
+        if self.data_dir is None:
+            return
+        _trades = trades if trades is not None else self._trades
+        if not _trades:
+            return
+        try:
+            from training.trade_chart import write_trade_chart
+            out_path = out_dir / f"{stem}_trades.html"
+            write_trade_chart(
+                trades=_trades,
+                data_dir=self.data_dir,
+                output_path=out_path,
+                instrument=self.instrument,
+                bar_minutes=self.bar_minutes,
+                title_prefix=f"Training Trades  step {self.num_timesteps:,}",
+            )
+            if self.verbose:
+                print(f"[TrainingJournal] Trade chart → {out_path}")
+            # keep a 'latest' copy
+            import shutil
+            shutil.copy2(str(out_path), str(self.journal_dir / "training_trades.html"))
+        except Exception as exc:
+            if self.verbose:
+                print(f"[TrainingJournal] Trade chart write failed: {exc}")
 
     # ── Excel ─────────────────────────────────────────────────────────────────
 
