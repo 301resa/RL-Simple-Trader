@@ -502,11 +502,15 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
 
     # ── Folder layout ─────────────────────────────────────────
     #   logs/
-    #     models/          ← best model + periodic checkpoints saved here
-    #     tensorboard/     ← TensorBoard event files
-    #     metrics.log      ← console table mirror
+    #     models/           ← best_model / final_model / vecnormalize.pkl
+    #       hotsaves/       ← hotsave .zip + _vecnormalize.pkl (models only)
+    #     checkpoints/      ← SB3 periodic rollout checkpoints
+    #     tensorboard/      ← TensorBoard event files
+    #     journal/          ← Excel + HTML trade journals
+    #       hotsaves/       ← hotsave trade journals (Excel + HTML)
+    #     metrics.log       ← console table mirror
     models_dir      = log_dir / "models"
-    checkpoints_dir = models_dir / "checkpoints"
+    checkpoints_dir = log_dir / "checkpoints"   # aligned with CheckpointCallback
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "tensorboard").mkdir(parents=True, exist_ok=True)
 
@@ -602,17 +606,14 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
         vec_normalize=c.vec_normalize,
         resume=bool(args.checkpoint),
         initial_capital=real_capital,
-        hotsave_pf=hotsave_cfg.get("pf_threshold",          1.60),
-        hotsave_wr=hotsave_cfg.get("wr_threshold",          0.40),
+        hotsave_pf=hotsave_cfg.get("pf_threshold",                1.60),
+        hotsave_wr=hotsave_cfg.get("wr_threshold",                0.40),
         hotsave_min_trades=hotsave_min_trades,
         hotsave_min_envs=hotsave_cfg.get("min_envs_passing",      2),
-        hotsave_cooldown=hotsave_cfg.get("cooldown_steps",        50_000),
-        hotsave_sharpe=hotsave_cfg.get("sharpe_threshold",      1.2),
-        hotsave_sharpe_pf=hotsave_cfg.get("sharpe_pf_threshold",   1.85),
-        hotsave_sharpe_cooldown=hotsave_cfg.get("sharpe_cooldown_steps", 50_000),
-        hotsave_wr70_cooldown=hotsave_cfg.get("wr70_cooldown_steps",        50_000),
-        hotsave_elite_pnl_multiplier=hotsave_cfg.get("elite_pnl_multiplier",   1.5),
-        hotsave_elite_wr_pf_threshold=hotsave_cfg.get("elite_wr_pf_threshold", 1.5),
+        hotsave_cooldown=hotsave_cfg.get("cooldown_steps",         50_000),
+        hotsave_wr70_cooldown=hotsave_cfg.get("wr70_cooldown_steps",         50_000),
+        hotsave_elite_pnl_multiplier=hotsave_cfg.get("elite_pnl_multiplier",  1.5),
+        hotsave_elite_wr_pf_threshold=hotsave_cfg.get("elite_wr_pf_threshold",1.5),
         hotsave_elite_sharpe=hotsave_cfg.get("elite_sharpe_threshold",         3.0),
         hotsave_elite_cooldown=hotsave_cfg.get("elite_cooldown_steps",         50_000),
         data_dir=args.data,

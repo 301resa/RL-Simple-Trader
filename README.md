@@ -245,22 +245,26 @@ python main.py --mode analyse --journal logs/journal/
 
 ```
 logs/
-├── models/
-│   ├── checkpoint_NNNNNNNNNN.zip           # Phase-gated eval checkpoints
-│   ├── checkpoint_NNNNNNNNNN_vecnormalize.pkl
+├── models/                                 # Model files only — no journals here
+│   ├── best_model.zip                      # Best eval-gated checkpoint
+│   ├── best_model_vecnormalize.pkl
 │   ├── final_model.zip                     # Safety-net checkpoint at end of training
-│   ├── vecnormalize.pkl                    # VecNormalize stats (end of training)
-│   └── hotsaves/
-│       ├── hotsave_NNNNNNNNNN.zip               # Gate 1 — PF/WR
-│       ├── hotsave_sh_NNNNNNNNNN.zip            # Gate 2 — Sharpe quality
-│       ├── hotsave_wr70_NNNNNNNNNN.zip          # Gate 3 — WR ≥ 70%
-│       ├── hotsave_elite_NNNNNNNNNN.zip         # Gate 4 — Elite
-│       ├── hotsave_*_vecnormalize.pkl           # VecNormalize stats (per save)
-│       ├── hotsave_*.xlsx                       # Trade journal (per save)
-│       └── hotsave_*.html                       # Plotly chart (per save)
-├── checkpoints/                            # Periodic SB3 checkpoints (every 100k steps)
+│   ├── vecnormalize.pkl
+│   └── hotsaves/                           # Hotsave model files only
+│       ├── hotsave_NNNNNNNNNN.zip          # Gate 1 — PF/WR
+│       ├── hotsave_wr70_NNNNNNNNNN.zip     # Gate 2 — WR ≥ 70%
+│       ├── hotsave_elite_NNNNNNNNNN.zip    # Gate 3 — Elite
+│       └── hotsave_*_vecnormalize.pkl      # VecNormalize stats (per save)
+├── checkpoints/                            # SB3 periodic checkpoints (every 100k steps)
 ├── tensorboard/                            # TensorBoard event files
-├── journal/                                # Excel + Plotly HTML trade journals
+├── journal/                                # All journals — Excel + Plotly HTML
+│   ├── training_journal.xlsx               # Aggregate training journal
+│   ├── training_journal.html               # Aggregate Plotly HTML
+│   ├── env00_trades.html                   # Per-env OHLC trade charts
+│   ├── env01_trades.html
+│   └── hotsaves/                           # Hotsave trade journals (separate from models)
+│       ├── hotsave_NNNNNNNNNN.xlsx
+│       └── hotsave_NNNNNNNNNN.html
 ├── walk_forward/                           # Per-fold outputs
 └── metrics.log                             # Console table mirror
 ```
@@ -286,23 +290,23 @@ Composite score = weighted average of: Sharpe (30%), P&L in R (25%), Win/Loss ra
 A **FINAL_STEP** checkpoint is always written at the end of training as a safety net.
 
 ### 2. Training hot-saves (`TrainingHotSaveCallback`)
-Checks every ~4,096 steps (one rollout) against four quality gates.
-Each gate also writes a full trade journal (Excel + HTML) alongside the saved model.
+Checks every ~4,096 steps (one rollout) against three quality gates.
+Model files go to `logs/models/hotsaves/`; trade journals (Excel + HTML) go to
+`logs/journal/hotsaves/` — completely separate so the folders stay clean.
 
 **Minimum trade count** scales automatically with the training date range:
 ```
 min_trades = max(10, n_trading_days × min_trades_per_week ÷ 5)
 ```
-Default: `min_trades_per_week = 1` (configured in `agent_config.yaml` → `hotsave:`).
+Default: `min_trades_per_week = 3` (configured in `agent_config.yaml` → `hotsave:`).
 
 | Date range | Trading days | min_trades |
 |------------|-------------|-----------|
-| 6 months | ~126 | 25 |
-| 12 months | ~252 | 50 |
-| 2 years | ~504 | 100 |
-| 4 years | ~1,008 | 201 |
+| 6 months | ~126 | 75 |
+| 12 months | ~252 | 151 |
+| 2 years | ~504 | 302 |
 
-The same threshold applies to all three gates. A model is **never saved if total PnL ≤ 0**.
+A model is **never saved if total PnL ≤ 0**.
 
 **Gate 1 — PF/WR** (`hotsave_NNNNNNNNNN.zip`): at least 2 envs simultaneously satisfy:
 
@@ -313,17 +317,7 @@ The same threshold applies to all three gates. A model is **never saved if total
 | Total PnL (R) | > 0 |
 | Trades | ≥ min_trades |
 
-**Gate 2 — Sharpe** (`hotsave_sh_NNNNNNNNNN.zip`): at least 2 envs simultaneously satisfy:
-
-| Criterion | Threshold |
-|-----------|-----------|
-| Sharpe ratio | > 1.2 |
-| Profit Factor | > 1.85 |
-| Win/Loss ratio | > 1.0 |
-| Total PnL (R) | > 0 |
-| Trades | ≥ min_trades |
-
-**Gate 3 — WR70** (`hotsave_wr70_NNNNNNNNNN.zip`): any single env satisfies all of:
+**Gate 2 — WR70** (`hotsave_wr70_NNNNNNNNNN.zip`): any single env satisfies all of:
 
 | Criterion | Threshold |
 |-----------|-----------|
@@ -332,18 +326,17 @@ The same threshold applies to all three gates. A model is **never saved if total
 | Total PnL (R) | > 0 |
 | Trades | ≥ min_trades |
 
-**Gate 4 — Elite** (`hotsave_elite_NNNNNNNNNN.zip`): any single env satisfies all of:
+**Gate 3 — Elite** (`hotsave_elite_NNNNNNNNNN.zip`): any single env satisfies all of:
 
 | Criterion | Threshold |
 |-----------|-----------|
-| Cumulative PnL ($) | > 1.5 × initial capital (150% return) |
+| Cumulative PnL ($) | > 1.5 × initial capital |
 | WR × PF | > 1.5 |
 | Sharpe ratio | > 3.0 |
 | Total PnL (R) | > 0 |
 | Trades | ≥ min_trades |
 
-All gates saved to `logs/models/hotsaves/`. Each save produces `.zip` + `_vecnormalize.pkl` + `.xlsx` + `.html`.
-Cooldown: 50,000 steps per gate (configurable in `agent_config.yaml` → `hotsave:`).
+Cooldown: configurable per gate in `agent_config.yaml` → `hotsave:`.
 
 ### Disabling eval saves
 Set `save_enabled: false` under `evaluation:` in `agent_config.yaml` to run eval

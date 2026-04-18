@@ -12,15 +12,7 @@ Gate 1 — Standard PF/WR gate:
     • total_pnl_r > 0           (never save on net loss)
     • trades >= min_trades      (scaled: max(10, n_trading_days * min_trades_per_week // 5))
 
-Gate 2 — Sharpe quality gate (high-quality saves):
-  At least min_envs_passing training envs simultaneously satisfy:
-    • Sharpe > sharpe_threshold   (default 1.2)
-    • PF     > sharpe_pf_threshold (default 1.85)
-    • win_loss_ratio > 1.0         (avg winner > avg loser)
-    • total_pnl_r   > 0.0
-    • trades >= min_trades
-
-Gate 3 — Win-rate 70 gate:
+Gate 2 — Win-rate 70 gate:
   Any single training env satisfies ALL of:
     • WR  >= 0.70
     • total_pnl_dollars >= 0.5% of initial_capital
@@ -28,17 +20,17 @@ Gate 3 — Win-rate 70 gate:
     • trades >= min_trades
   Saved with prefix "hotsave_wr70_".
 
-Gate 4 — Elite gate (exceptional quality):
+Gate 3 — Elite gate (exceptional quality):
   Any single training env satisfies ALL of:
-    • total_pnl_dollars > 1.5 × initial_capital  (150% cumulative return)
-    • WR × PF > 1.5                               (consistency × edge combined)
-    • Sharpe > 3.0                                (elite risk-adjusted return)
+    • total_pnl_dollars > elite_pnl_multiplier × initial_capital
+    • WR × PF > elite_wr_pf_threshold
+    • Sharpe > elite_sharpe
     • trades >= min_trades
   Saved with prefix "hotsave_elite_".
 
-Each gate has its own cooldown. Prefixes: hotsave_ / hotsave_sh_ / hotsave_wr70_ / hotsave_elite_.
-
-Saves: <models_dir>/hotsave[_sh|_wr70|_elite]_<step>.zip  +  ..._vecnormalize.pkl
+Each gate has its own cooldown.
+Model files  → models_dir/hotsaves/
+Journal files → journal_dir/hotsaves/   (separate from models — clean layout)
 """
 
 from __future__ import annotations
@@ -65,38 +57,35 @@ class TrainingHotSaveCallback(BaseCallback):
     Parameters
     ----------
     models_dir : str | Path
+        Where model .zip and _vecnormalize.pkl files are written.
+    journal_dir : str | Path | None
+        Where journal snapshots (Excel + HTML) are written.
+        Defaults to models_dir if None.
     pf_threshold : float          Gate 1 — minimum profit factor.
     wr_threshold : float          Gate 1 — minimum win rate (0–1).
-    min_trades : int              All gates — minimum trades (computed by main.py
-                                  as max(10, n_trading_days * min_trades_per_week // 5)).
-    min_envs_passing : int        Gates 1 & 2 — envs that must simultaneously pass.
+    min_trades : int              All gates — minimum trades.
+    min_envs_passing : int        Gate 1 — envs that must simultaneously pass.
     cooldown_steps : int          Gate 1 — minimum steps between saves.
-    sharpe_threshold : float      Gate 2 — minimum annualised Sharpe.
-    sharpe_pf_threshold : float   Gate 2 — minimum profit factor.
-    sharpe_cooldown_steps : int   Gate 2 — minimum steps between saves.
-    wr70_cooldown_steps : int     Gate 3 — minimum steps between saves.
-    elite_pnl_multiplier : float  Gate 4 — PnL must exceed this × initial_capital.
-    elite_wr_pf_threshold : float Gate 4 — WR × PF must exceed this.
-    elite_sharpe : float          Gate 4 — minimum annualised Sharpe.
-    elite_cooldown_steps : int    Gate 4 — minimum steps between saves.
+    wr70_cooldown_steps : int     Gate 2 — minimum steps between saves.
+    elite_pnl_multiplier : float  Gate 3 — PnL must exceed this × initial_capital.
+    elite_wr_pf_threshold : float Gate 3 — WR × PF must exceed this.
+    elite_sharpe : float          Gate 3 — minimum annualised Sharpe.
+    elite_cooldown_steps : int    Gate 3 — minimum steps between saves.
     initial_capital : float       Account size — used for WR70 and Elite PnL thresholds.
-    check_every_steps : int       How often (steps) to check all gates.
     vec_normalize                 If provided, saves normalisation stats alongside model.
+    journal_callback              TrainingJournalCallback — if set, saves HTML+Excel on each gate.
     """
 
     def __init__(
         self,
         models_dir: str | Path,
+        journal_dir: str | Path | None = None,
         pf_threshold: float = 1.60,
         wr_threshold: float = 0.40,
         min_trades: int = 50,
         min_envs_passing: int = 2,
         cooldown_steps: int = 50_000,
-        sharpe_threshold: float = 1.2,
-        sharpe_pf_threshold: float = 1.85,
-        sharpe_cooldown_steps: int = 50_000,
         wr70_cooldown_steps: int = 50_000,
-        # Gate 4 — Elite
         elite_pnl_multiplier: float  = 1.5,
         elite_wr_pf_threshold: float = 1.5,
         elite_sharpe: float          = 3.0,
@@ -104,19 +93,17 @@ class TrainingHotSaveCallback(BaseCallback):
         initial_capital: float = 2500.0,
         check_every_steps: int = 4_096,
         vec_normalize=None,
-        journal_callback=None,   # TrainingJournalCallback — if set, saves HTML+Excel on each gate
+        journal_callback=None,
         verbose: int = 1,
     ) -> None:
         super().__init__(verbose)
         self.models_dir           = Path(models_dir)
+        self.journal_dir          = Path(journal_dir) if journal_dir else self.models_dir
         self.pf_threshold         = pf_threshold
         self.wr_threshold         = wr_threshold
         self.min_trades           = min_trades
         self.min_envs_passing     = min_envs_passing
         self.cooldown_steps       = cooldown_steps
-        self.sharpe_threshold     = sharpe_threshold
-        self.sharpe_pf_threshold  = sharpe_pf_threshold
-        self.sharpe_cooldown_steps= sharpe_cooldown_steps
         self.wr70_cooldown_steps  = wr70_cooldown_steps
         self.wr70_min_pnl_dollars = 0.005 * initial_capital
         self.elite_pnl_threshold  = elite_pnl_multiplier * initial_capital
@@ -127,13 +114,10 @@ class TrainingHotSaveCallback(BaseCallback):
         self.vec_normalize        = vec_normalize
         self._journal_callback    = journal_callback
 
-        # cumulative stats per env — never reset during training
         self._env_cumulative: Dict[int, EnvCumulative] = {}
         self._last_save_step:        int = -cooldown_steps
-        self._last_sharpe_save_step: int = -sharpe_cooldown_steps
         self._last_wr70_save_step:   int = -wr70_cooldown_steps
         self._last_elite_save_step:  int = -elite_cooldown_steps
-        # own trade list — used for journal snapshots, independent of journal_callback
         self._trades: list = []
 
     # ── Episode capture ───────────────────────────────────────────────────────
@@ -153,7 +137,6 @@ class TrainingHotSaveCallback(BaseCallback):
 
         if self.num_timesteps % self.check_every_steps < self.n_envs:
             self._check_pf_gate()
-            self._check_sharpe_gate()
             self._check_wr70_gate()
             self._check_elite_gate()
 
@@ -191,41 +174,7 @@ class TrainingHotSaveCallback(BaseCallback):
         )
         self._last_save_step = step
 
-    # ── Gate 2 — Sharpe quality ───────────────────────────────────────────────
-
-    def _check_sharpe_gate(self) -> None:
-        step = self.num_timesteps
-        if step - self._last_sharpe_save_step < self.sharpe_cooldown_steps:
-            return
-        if not self._env_cumulative:
-            return
-
-        agg_list = [c.to_info_dict() for c in self._env_cumulative.values()]
-        passing  = [
-            d for d in agg_list
-            if (
-                d.get("sharpe_ratio",    0.0) > self.sharpe_threshold
-                and d.get("profit_factor", 0.0) > self.sharpe_pf_threshold
-                and d.get("n_trades",      0)   >= self.min_trades
-                and d.get("win_loss_ratio", 0.0) > 1.0
-                and d.get("total_pnl_r",   0.0) > 0.0
-            )
-        ]
-        if len(passing) < self.min_envs_passing:
-            return
-
-        avg_sh = float(np.mean([d["sharpe_ratio"]   for d in passing]))
-        avg_pf = float(np.mean([d["profit_factor"]  for d in passing]))
-        avg_rr = float(np.mean([d["win_loss_ratio"] for d in passing]))
-        self._save(
-            step=step,
-            prefix="hotsave_sh",
-            tag="Sharpe gate",
-            metrics={"avg_SH": avg_sh, "avg_PF": avg_pf, "avg_RR": avg_rr, "envs": len(passing)},
-        )
-        self._last_sharpe_save_step = step
-
-    # ── Gate 3 — WR70 ────────────────────────────────────────────────────────
+    # ── Gate 2 — WR70 ────────────────────────────────────────────────────────
 
     def _check_wr70_gate(self) -> None:
         step = self.num_timesteps
@@ -261,10 +210,10 @@ class TrainingHotSaveCallback(BaseCallback):
         )
         self._last_wr70_save_step = step
 
-    # ── Gate 4 — Elite ───────────────────────────────────────────────────────
+    # ── Gate 3 — Elite ───────────────────────────────────────────────────────
 
     def _check_elite_gate(self) -> None:
-        """Save when any env achieves 150%+ cumulative return, WR×PF > 1.5, Sharpe > 3."""
+        """Save when any env achieves elite return, WR×PF threshold, and Sharpe."""
         step = self.num_timesteps
         if step - self._last_elite_save_step < self.elite_cooldown_steps:
             return
@@ -315,8 +264,9 @@ class TrainingHotSaveCallback(BaseCallback):
 
         if self._journal_callback is not None and self._trades:
             try:
+                self.journal_dir.mkdir(parents=True, exist_ok=True)
                 self._journal_callback.write_snapshot(
-                    output_dir=self.models_dir,
+                    output_dir=self.journal_dir,
                     stem=name,
                     trades=self._trades,
                 )
@@ -334,14 +284,16 @@ class TrainingHotSaveCallback(BaseCallback):
             print(f"\n{line}")
             print(f"  HOTSAVE [{tag}]  |  step {step:,}")
             print(f"  {met_str}")
-            print(f"  File : {model_path}.zip{vn_note}")
+            print(f"  Model  : {model_path}.zip{vn_note}")
+            print(f"  Journal: {self.journal_dir / name}")
             print(line)
 
         log.info(
             "Training hot-save written",
             gate=tag,
             step=step,
-            path=str(model_path),
+            model_path=str(model_path),
+            journal_dir=str(self.journal_dir),
             **{k: round(v, 3) if isinstance(v, float) else v for k, v in metrics.items()},
         )
 

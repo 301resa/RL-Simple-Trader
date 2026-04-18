@@ -196,26 +196,20 @@ class Trainer:
         resume: bool = False, # True when continuing from a checkpoint
         eval_save_enabled: bool = True,  # False = run eval metrics but save no models
         # Training hot-save — Gate 1 (PF/WR)
-        n_training_days: int = 252,  # actual trading days in training range — used for Tr/wk
+        n_training_days: int = 252,
         hotsave_pf: float = 1.60,
         hotsave_wr: float = 0.40,
-        hotsave_min_trades: int = 50,   # computed by main.py from n_trading_days; default = ~1yr
+        hotsave_min_trades: int = 50,
         hotsave_min_envs: int = 2,
         hotsave_cooldown: int = 50_000,
-        # Training hot-save — Gate 2 (Sharpe quality)
-        hotsave_sharpe: float = 1.2,
-        hotsave_sharpe_pf: float = 1.85,
-        hotsave_sharpe_cooldown: int = 50_000,
-        # Gate 3 WR70 cooldown (min_trades shared with all gates)
+        # Gate 2 — WR70
         hotsave_wr70_cooldown: int = 50_000,
-        # Gate 4 — Elite
+        # Gate 3 — Elite
         hotsave_elite_pnl_multiplier:  float = 1.5,
         hotsave_elite_wr_pf_threshold: float = 1.5,
         hotsave_elite_sharpe:          float = 3.0,
         hotsave_elite_cooldown:        int   = 50_000,
-        # Initial capital — used for WR70 and Elite PnL thresholds
         initial_capital: float = 2500.0,
-        # OHLC trade chart — pass data_dir + instrument to enable
         data_dir:    str | None = None,
         instrument:  str = "ES",
         bar_minutes: int = 5,
@@ -245,14 +239,11 @@ class Trainer:
         self.resume               = resume
         self.eval_save_enabled    = eval_save_enabled
         self.n_training_days         = n_training_days
-        self.hotsave_pf              = hotsave_pf
-        self.hotsave_wr              = hotsave_wr
-        self.hotsave_min_trades      = hotsave_min_trades
-        self.hotsave_min_envs        = hotsave_min_envs
-        self.hotsave_cooldown        = hotsave_cooldown
-        self.hotsave_sharpe          = hotsave_sharpe
-        self.hotsave_sharpe_pf       = hotsave_sharpe_pf
-        self.hotsave_sharpe_cooldown         = hotsave_sharpe_cooldown
+        self.hotsave_pf                      = hotsave_pf
+        self.hotsave_wr                      = hotsave_wr
+        self.hotsave_min_trades              = hotsave_min_trades
+        self.hotsave_min_envs                = hotsave_min_envs
+        self.hotsave_cooldown                = hotsave_cooldown
         self.hotsave_wr70_cooldown           = hotsave_wr70_cooldown
         self.hotsave_elite_pnl_multiplier    = hotsave_elite_pnl_multiplier
         self.hotsave_elite_wr_pf_threshold   = hotsave_elite_wr_pf_threshold
@@ -387,23 +378,19 @@ class Trainer:
         )
         cbs.append(journal_cb)
 
-        # 8. Training hot-saves — four quality gates
+        # 8. Training hot-saves — three quality gates
+        # Model files  → logs/models/hotsaves/   (.zip + _vecnormalize.pkl)
+        # Journal files → logs/journal/hotsaves/  (.xlsx + .html)
         cbs.append(
             TrainingHotSaveCallback(
                 models_dir=self.models_dir / "hotsaves",
-                # Gate 1 — PF/WR
+                journal_dir=self.log_dir / "journal" / "hotsaves",
                 pf_threshold=self.hotsave_pf,
                 wr_threshold=self.hotsave_wr,
                 min_trades=self.hotsave_min_trades,
                 min_envs_passing=self.hotsave_min_envs,
                 cooldown_steps=self.hotsave_cooldown,
-                # Gate 2 — Sharpe quality
-                sharpe_threshold=self.hotsave_sharpe,
-                sharpe_pf_threshold=self.hotsave_sharpe_pf,
-                sharpe_cooldown_steps=self.hotsave_sharpe_cooldown,
-                # Gate 3 — WR70
                 wr70_cooldown_steps=self.hotsave_wr70_cooldown,
-                # Gate 4 — Elite
                 elite_pnl_multiplier=self.hotsave_elite_pnl_multiplier,
                 elite_wr_pf_threshold=self.hotsave_elite_wr_pf_threshold,
                 elite_sharpe=self.hotsave_elite_sharpe,
