@@ -1001,21 +1001,24 @@ class TradingEnv(gym.Env):
 
         # ── RTH vs ETH split ──────────────────────────────────
         rth_trades_n = rth_wins_n = eth_trades_n = eth_wins_n = 0
+        _trade_is_rth: list = [True] * len(trades)
         if self._session_bars is not None and trades:
             try:
                 rth_s = pd.Timestamp(f"2000-01-01 {self.rth_start}").time()
                 rth_e = pd.Timestamp(f"2000-01-01 {self.rth_end}").time()
-                for t in trades:
+                for i, t in enumerate(trades):
                     idx = min(t.entry_bar_idx, len(self._session_bars) - 1)
-                    bar_time = self._session_bars.index[idx].time()
-                    if rth_s <= bar_time <= rth_e:
+                    is_rth_t = rth_s <= self._session_bars.index[idx].time() <= rth_e
+                    _trade_is_rth[i] = is_rth_t
+                    if is_rth_t:
                         rth_trades_n += 1
                         rth_wins_n   += int(t.is_win)
                     else:
                         eth_trades_n += 1
                         eth_wins_n   += int(t.is_win)
             except Exception:
-                rth_trades_n = n_trades  # fallback: all RTH
+                _trade_is_rth = [True] * len(trades)
+                rth_trades_n  = n_trades  # fallback: all RTH
 
         return {
             "date":                    self._current_day,
@@ -1073,8 +1076,9 @@ class TradingEnv(gym.Env):
                     "duration_min":   t.duration_bars * self.bar_minutes,
                     "exit_reason":    t.exit_reason.value,
                     "is_win":         t.is_win,
+                    "is_rth":         _trade_is_rth[i],
                     "mae_r":          round(t.max_adverse_excursion, 4),
                 }
-                for t in trades
+                for i, t in enumerate(trades)
             ],
         }

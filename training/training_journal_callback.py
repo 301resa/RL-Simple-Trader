@@ -155,7 +155,7 @@ class TrainingJournalCallback(BaseCallback):
                 "entry_price", "stop_price", "initial_target", "exit_price",
                 "pnl_r", "pnl_dollars", "pnl_points",
                 "n_contracts", "duration_min", "exit_reason",
-                "is_win", "mae_r",
+                "is_win", "is_rth", "mae_r",
             ]
             trades_df = df[[c for c in cols if c in df.columns]].copy()
             trades_df.to_excel(writer, sheet_name="Trades", index=False)
@@ -164,19 +164,31 @@ class TrainingJournalCallback(BaseCallback):
 
             # ── Sheet 2: Daily ────────────────────────────────
             if "date" in df.columns:
-                daily = (
-                    df.groupby("date")
-                    .agg(
-                        trades=("pnl_r", "count"),
-                        wins=("is_win", "sum"),
-                        total_pnl_r=("pnl_r", "sum"),
-                        total_pnl_dollars=("pnl_dollars", "sum"),
-                        avg_pnl_r=("pnl_r", "mean"),
-                        avg_duration_min=("duration_min", "mean"),
-                    )
-                    .reset_index()
-                )
-                daily["win_rate"] = (daily["wins"] / daily["trades"].clip(lower=1)).round(3)
+                def _daily_row(g):
+                    n_g   = len(g)
+                    wins_g  = g[g["is_win"]]
+                    losses_g = g[~g["is_win"]]
+                    pnl_r_g  = float(g["pnl_r"].sum())
+                    pnl_d_g  = float(g["pnl_dollars"].sum()) if "pnl_dollars" in g.columns else 0.0
+                    row = {
+                        "trades":            n_g,
+                        "wins":              len(wins_g),
+                        "total_pnl_r":       round(pnl_r_g, 4),
+                        "total_pnl_dollars": round(pnl_d_g, 2),
+                        "avg_pnl_r":         round(pnl_r_g / n_g, 4) if n_g else 0.0,
+                        "avg_duration_min":  round(float(g["duration_min"].mean()), 1) if "duration_min" in g.columns else 0.0,
+                        "win_rate":          round(len(wins_g) / n_g, 3) if n_g else 0.0,
+                    }
+                    if "is_rth" in g.columns:
+                        rth_g = g[g["is_rth"]]
+                        eth_g = g[~g["is_rth"]]
+                        row["rth_pnl_$"] = round(float(rth_g["pnl_dollars"].sum()) if "pnl_dollars" in rth_g.columns and len(rth_g) else 0.0, 2)
+                        row["rth_pf"]    = round(_pf(rth_g), 2)
+                        row["eth_pnl_$"] = round(float(eth_g["pnl_dollars"].sum()) if "pnl_dollars" in eth_g.columns and len(eth_g) else 0.0, 2)
+                        row["eth_pf"]    = round(_pf(eth_g), 2)
+                    return pd.Series(row)
+
+                daily = df.groupby("date").apply(_daily_row).reset_index()
                 daily.to_excel(writer, sheet_name="Daily", index=False)
                 _style_daily_sheet(writer.sheets["Daily"], daily)
 
@@ -383,6 +395,17 @@ class TrainingJournalCallback(BaseCallback):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _pf(df: Any) -> float:
+    """Profit factor for a trades DataFrame slice."""
+    if df is None or len(df) == 0:
+        return 0.0
+    wins   = df[df["is_win"]] if "is_win" in df.columns else df.iloc[:0]
+    losses = df[~df["is_win"]] if "is_win" in df.columns else df.iloc[:0]
+    gw = float(wins["pnl_r"].sum())           if len(wins)   else 0.0
+    gl = abs(float(losses["pnl_r"].sum()))    if len(losses) else 1e-6
+    return min(gw / max(gl, 1e-6), 99.99)
+
+
 def _compute_summary(df: Any, step: int) -> dict:
     """Compute summary stats from a trades DataFrame."""
     import pandas as pd
@@ -399,7 +422,7 @@ def _compute_summary(df: Any, step: int) -> dict:
     avg_loss = float(losses["pnl_r"].mean()) if len(losses) else 0.0
     gross_w  = float(wins["pnl_r"].sum())   if len(wins)   else 0.0
     gross_l  = abs(float(losses["pnl_r"].sum())) if len(losses) else 1e-6
-    pf       = min(gross_w / max(gross_l, 1e-6), 99.99)
+    pf_val   = min(gross_w / max(gross_l, 1e-6), 99.99)
     avg_dur  = float(df["duration_min"].mean()) if "duration_min" in df else 0.0
 
     tr = df["pnl_r"].values
@@ -408,17 +431,43 @@ def _compute_summary(df: Any, step: int) -> dict:
     else:
         sharpe = 0.0
 
+    # RTH / ETH profit factors
+    if "is_rth" in df.columns:
+        rth_df   = df[df["is_rth"]]
+        eth_df   = df[~df["is_rth"]]
+        rth_pnl  = float(rth_df["pnl_dollars"].sum()) if "pnl_dollars" in rth_df.columns and len(rth_df) else 0.0
+        eth_pnl  = float(eth_df["pnl_dollars"].sum()) if "pnl_dollars" in eth_df.columns and len(eth_df) else 0.0
+        rth_pf_v = _pf(rth_df)
+        eth_pf_v = _pf(eth_df)
+    else:
+        rth_pnl = eth_pnl = rth_pf_v = eth_pf_v = 0.0
+
+    # Max drawdown in dollars
+    if "pnl_dollars" in df.columns and len(df):
+        eq_d   = np.cumsum(df["pnl_dollars"].values.astype(float))
+        peak_d = np.maximum.accumulate(eq_d)
+        max_dd = float((peak_d - eq_d).max())
+        dd_pct = max_dd / max(float(peak_d.max()), 1.0) * 100 if peak_d.max() > 0 else 0.0
+    else:
+        max_dd = dd_pct = 0.0
+
     return {
         "Training Step":    f"{step:,}",
         "Total Trades":     n,
         "Win Rate":         f"{wr*100:.1f}%",
         "Total PnL (R)":    f"{total_r:+.2f}",
         "Total PnL ($)":    f"${total_usd:+,.0f}",
-        "Profit Factor":    f"{pf:.2f}",
+        "Profit Factor":    f"{pf_val:.2f}",
+        "RTH PnL ($)":      f"${rth_pnl:+,.0f}",
+        "RTH PF":           f"{rth_pf_v:.2f}",
+        "ETH PnL ($)":      f"${eth_pnl:+,.0f}",
+        "ETH PF":           f"{eth_pf_v:.2f}",
         "Sharpe Ratio":     f"{sharpe:.2f}",
         "Avg Win (R)":      f"{avg_win:+.3f}",
         "Avg Loss (R)":     f"{avg_loss:+.3f}",
         "Avg Duration":     f"{avg_dur:.0f} min",
+        "DD%":              f"{dd_pct:.1f}%",
+        "Max DD ($)":       f"${max_dd:,.0f}",
         "Total Wins":       len(wins),
         "Total Losses":     len(losses),
     }

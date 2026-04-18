@@ -146,7 +146,7 @@ class FoldJournalCallback(BaseCallback):
             "entry_price", "stop_price", "initial_target", "exit_price",
             "pnl_r", "pnl_dollars", "pnl_points",
             "n_contracts", "duration_min", "exit_reason",
-            "is_win", "mae_r",
+            "is_win", "is_rth", "mae_r",
         ]
 
         with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
@@ -354,6 +354,17 @@ class FoldJournalCallback(BaseCallback):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _pf_fold(df) -> float:
+    """Profit factor for a trade DataFrame slice."""
+    if df is None or len(df) == 0:
+        return 0.0
+    wins   = df[df["is_win"]] if "is_win" in df.columns else df.iloc[:0]
+    losses = df[~df["is_win"]] if "is_win" in df.columns else df.iloc[:0]
+    gw = float(wins["pnl_r"].sum())        if len(wins)   else 0.0
+    gl = abs(float(losses["pnl_r"].sum())) if len(losses) else 1e-6
+    return min(gw / max(gl, 1e-6), 99.99)
+
+
 def _env_summary_row(env_idx: int, df) -> dict:
     """Compute one summary row for a single env's trade DataFrame."""
     import pandas as pd
@@ -361,20 +372,21 @@ def _env_summary_row(env_idx: int, df) -> dict:
     if df is None or (hasattr(df, "empty") and df.empty) or len(df) == 0:
         return {
             "Env": f"{env_idx:02d}", "Trades": 0, "WR%": "—",
-            "PnL_R": "—", "PF": "—", "Sharpe": "—",
-            "AvgW_R": "—", "AvgL_R": "—", "AvgDur_min": "—",
+            "PnL_R": "—", "PF": "—",
+            "RTH_PnL$": "—", "RTH_PF": "—",
+            "ETH_PnL$": "—", "ETH_PF": "—",
+            "Sharpe": "—", "AvgW_R": "—", "AvgL_R": "—",
+            "AvgDur_min": "—", "DD%": "—", "Max_DD$": "—",
         }
 
     n      = len(df)
-    wins   = df[df["is_win"]]   if "is_win"   in df.columns else pd.DataFrame()
-    losses = df[~df["is_win"]]  if "is_win"   in df.columns else pd.DataFrame()
+    wins   = df[df["is_win"]]   if "is_win" in df.columns else pd.DataFrame()
+    losses = df[~df["is_win"]]  if "is_win" in df.columns else pd.DataFrame()
     wr     = len(wins) / n if n else 0.0
     pnl_r  = float(df["pnl_r"].sum()) if "pnl_r" in df.columns else 0.0
-    gw     = float(wins["pnl_r"].sum())    if len(wins)   else 0.0
-    gl     = abs(float(losses["pnl_r"].sum())) if len(losses) else 1e-6
-    pf     = min(gw / max(gl, 1e-6), 99.99)
-    avg_w  = float(wins["pnl_r"].mean())    if len(wins)   else 0.0
-    avg_l  = float(losses["pnl_r"].mean())  if len(losses) else 0.0
+    pf     = _pf_fold(df)
+    avg_w  = float(wins["pnl_r"].mean())   if len(wins)   else 0.0
+    avg_l  = float(losses["pnl_r"].mean()) if len(losses) else 0.0
     avg_d  = float(df["duration_min"].mean()) if "duration_min" in df.columns else 0.0
 
     tr_arr = df["pnl_r"].values if "pnl_r" in df.columns else np.array([])
@@ -383,16 +395,42 @@ def _env_summary_row(env_idx: int, df) -> dict:
     else:
         sharpe = 0.0
 
+    # RTH / ETH split
+    if "is_rth" in df.columns:
+        rth_df   = df[df["is_rth"]]
+        eth_df   = df[~df["is_rth"]]
+        rth_pnl  = float(rth_df["pnl_dollars"].sum()) if "pnl_dollars" in rth_df.columns and len(rth_df) else 0.0
+        eth_pnl  = float(eth_df["pnl_dollars"].sum()) if "pnl_dollars" in eth_df.columns and len(eth_df) else 0.0
+        rth_pf   = _pf_fold(rth_df)
+        eth_pf   = _pf_fold(eth_df)
+    else:
+        rth_pnl = eth_pnl = rth_pf = eth_pf = 0.0
+
+    # Max drawdown in dollars
+    if "pnl_dollars" in df.columns and len(df):
+        eq_d   = np.cumsum(df["pnl_dollars"].values.astype(float))
+        peak_d = np.maximum.accumulate(eq_d)
+        max_dd = float((peak_d - eq_d).max())
+        dd_pct = max_dd / max(float(peak_d.max()), 1.0) * 100 if peak_d.max() > 0 else 0.0
+    else:
+        max_dd = dd_pct = 0.0
+
     return {
-        "Env":       f"{env_idx:02d}",
-        "Trades":    n,
-        "WR%":       f"{wr*100:.1f}%",
-        "PnL_R":     f"{pnl_r:+.2f}",
-        "PF":        f"{pf:.2f}",
-        "Sharpe":    f"{sharpe:.2f}",
-        "AvgW_R":    f"{avg_w:+.3f}",
-        "AvgL_R":    f"{avg_l:+.3f}",
-        "AvgDur_min":f"{avg_d:.0f}",
+        "Env":        f"{env_idx:02d}",
+        "Trades":     n,
+        "WR%":        f"{wr*100:.1f}%",
+        "PnL_R":      f"{pnl_r:+.2f}",
+        "PF":         f"{pf:.2f}",
+        "RTH_PnL$":   f"${rth_pnl:+,.0f}",
+        "RTH_PF":     f"{rth_pf:.2f}",
+        "ETH_PnL$":   f"${eth_pnl:+,.0f}",
+        "ETH_PF":     f"{eth_pf:.2f}",
+        "Sharpe":     f"{sharpe:.2f}",
+        "AvgW_R":     f"{avg_w:+.3f}",
+        "AvgL_R":     f"{avg_l:+.3f}",
+        "AvgDur_min": f"{avg_d:.0f}",
+        "DD%":        f"{dd_pct:.1f}%",
+        "Max_DD$":    f"${max_dd:,.0f}",
     }
 
 
