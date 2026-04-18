@@ -25,7 +25,10 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-# CSV column → internal lowercase name
+# Required CSV columns
+_REQUIRED_COLS = {"Date", "Time", "Open", "High", "Low", "Close"}
+
+# Full column rename map — optional columns are silently skipped if absent
 _COLUMN_MAP = {
     "Date": "date",
     "Time": "time",
@@ -248,14 +251,15 @@ class DataLoader:
           4. Drop the original string date/time columns.
           5. Sort by index.
         """
-        # 1. Rename columns
-        missing_cols = [c for c in _COLUMN_MAP if c not in raw.columns]
-        if missing_cols:
+        # 1. Rename columns — required cols must be present; optional cols skipped if absent
+        missing_required = _REQUIRED_COLS - set(raw.columns)
+        if missing_required:
             raise ValueError(
-                f"CSV is missing expected columns: {missing_cols}. "
+                f"CSV is missing required columns: {sorted(missing_required)}. "
                 f"Found: {list(raw.columns)}"
             )
-        df = raw.rename(columns=_COLUMN_MAP)
+        present_map = {k: v for k, v in _COLUMN_MAP.items() if k in raw.columns}
+        df = raw.rename(columns=present_map)
 
         # 2. Build datetime index — D/M/YYYY H:MM:SS
         dt_strings = df["date"].str.strip() + " " + df["time"].str.strip()
@@ -286,13 +290,12 @@ class DataLoader:
         The index of the resulting DataFrame is a DatetimeIndex with
         date-only labels (YYYY-MM-DD strings) for easy lookup.
         """
-        daily = intraday[["open", "high", "low", "close", "volume"]].resample("1D").agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        }).dropna()
+        agg_cols = {"open": "first", "high": "max", "low": "min", "close": "last"}
+        cols = ["open", "high", "low", "close"]
+        if "volume" in intraday.columns:
+            agg_cols["volume"] = "sum"
+            cols.append("volume")
+        daily = intraday[cols].resample("1D").agg(agg_cols).dropna()
 
         # Use YYYY-MM-DD string index for consistent key lookups
         daily.index = daily.index.strftime("%Y-%m-%d")
