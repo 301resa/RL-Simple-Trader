@@ -1,9 +1,9 @@
 """
 data/data_augmentor.py
 =======================
-Per-episode OHLCV augmentation for training diversity.
+Per-episode OHLC augmentation for training diversity.
 
-Three complementary techniques are applied in order:
+Two complementary techniques are applied in order:
 
   1. Session-level return scaling
      A scale factor f ~ U(1 - trend_scale, 1 + trend_scale) is sampled once
@@ -16,9 +16,8 @@ Three complementary techniques are applied in order:
      Each bar's O/H/L/C receives an independent random offset drawn from
      U(-max_jitter_pts, +max_jitter_pts).  Default: ±2.0 pts (8 ticks for ES).
 
-  3. Volume multiplicative scaling
-     Volume is multiplied by a factor drawn from U(1 - volume_scale, 1 + volume_scale).
-     Scales the entire session uniformly so relative bar volumes are preserved.
+Volume is intentionally excluded — the strategy is price-structure based and
+volume is not part of the observation vector.
 
 OHLC integrity is enforced after every step:
   high  ≥ max(open, close)
@@ -43,7 +42,7 @@ import pandas as pd
 
 class OHLCVAugmentor:
     """
-    Applies three-stage augmentation to a session's OHLCV bars.
+    Applies two-stage OHLC augmentation to a session's bars.
 
     Parameters
     ----------
@@ -56,10 +55,6 @@ class OHLCVAugmentor:
         Half-range of session-level return scaling.
         0.15 → scale factor drawn from U(0.85, 1.15).
         Set to 0.0 to disable.
-    volume_scale : float
-        Half-range of session-level volume multiplicative scaling.
-        0.30 → factor drawn from U(0.70, 1.30).
-        Set to 0.0 to disable.
     """
 
     def __init__(
@@ -67,12 +62,10 @@ class OHLCVAugmentor:
         rng: Optional[np.random.Generator] = None,
         max_jitter_pts: float = 2.0,
         trend_scale:    float = 0.15,
-        volume_scale:   float = 0.30,
     ) -> None:
         self._rng           = rng if rng is not None else np.random.default_rng()
         self.max_jitter_pts = max_jitter_pts
         self.trend_scale    = trend_scale
-        self.volume_scale   = volume_scale
 
     # ── Public API ────────────────────────────────────────────
 
@@ -129,12 +122,5 @@ class OHLCVAugmentor:
         close_arr = df["close"].values
         df["high"] = np.maximum(df["high"].values,  np.maximum(open_arr, close_arr))
         df["low"]  = np.minimum(df["low"].values,   np.minimum(open_arr, close_arr))
-
-        # ── 4. Volume multiplicative scaling ──────────────────
-        if "volume" in df.columns and self.volume_scale > 0.0:
-            vol_factor = float(self._rng.uniform(
-                1.0 - self.volume_scale, 1.0 + self.volume_scale
-            ))
-            df["volume"] = np.maximum(0.0, df["volume"].values * vol_factor)
 
         return df

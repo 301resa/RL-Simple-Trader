@@ -367,17 +367,18 @@ metrics and log results without writing any model files (useful for exploration 
 ## Key Design Decisions
 
 - **60-candle sliding window + 17 engineered features**: `lookback_bars: 60` — the last
-  60 bars of OHLCV (log-returns + volume ratio) form the price block. Structured features
-  (36) cover: ATR (4), zone signals (10: dist_norm×2, in_zone×2, width_norm×2,
-  age_norm×2, swept×2), order zone / confluence (10), portfolio state (8), session timing
-  (4: session_time_pct, bars_remaining_pct, `is_rth`, `rth_time_pct`). An additional 17
-  engineered features complete the vector: price location (5), momentum (4), volatility
-  regime (2), bar character (1), HTF context (5: 1h/2h close-in-range, prior-day range
-  position, multi-TF momentum coherence, HTF vol expansion). Wide zones (> 10 pts) are
-  zeroed in all zone features before building the obs. The zone detector uses its own
-  500-bar history internally. Zone features include `supply_swept` and `demand_swept`
-  binary flags. Observation vector size: `60 × 5 + 36 + 17 = 353` features.
-  The LSTM (256 units) carries within-session state across steps.
+  60 bars of OHLC log-returns form the price block (volume excluded — the strategy is
+  price-structure based). Structured features (36) cover: ATR (4), zone signals (10:
+  dist_norm×2, in_zone×2, width_norm×2, age_norm×2, swept×2), order zone / confluence
+  (10), portfolio state (8), session timing (4: session_time_pct, bars_remaining_pct,
+  `is_rth`, `rth_time_pct`). An additional 17 engineered features complete the vector:
+  price location (5), momentum (4), volatility regime (2), bar character (1), HTF context
+  (5: 1h/2h close-in-range, prior-day range position, multi-TF momentum coherence, HTF
+  vol expansion). Wide zones (> 10 pts) are zeroed in all zone features before building
+  the obs. The zone detector uses its own 500-bar history internally. Zone features
+  include `supply_swept` and `demand_swept` binary flags. Observation vector size:
+  `60 × 4 + 36 + 17 = 293` features. The LSTM (256 units) carries within-session state
+  across steps.
 
 - **OHLCV augmentation** (`data/data_augmentor.py`): Three-stage augmentation applied
   to every training episode to prevent the agent memorising price-to-outcome mappings:
@@ -387,8 +388,7 @@ metrics and log results without writing any model files (useful for exploration 
      moves (±15%) so the agent encounters different volatility regimes on each replay.
   2. **Bar-level OHLC jitter** — each bar's O/H/L/C receives an independent continuous
      offset drawn from U(−2.0, +2.0) pts (±8 ticks for ES).
-  3. **Volume multiplicative scaling** — volume for the entire session is multiplied by
-     a factor drawn from U(0.70, 1.30).
+  Volume is intentionally not augmented — it is excluded from the observation vector.
   OHLC integrity is enforced after every step (`high ≥ max(open, close)`,
   `low ≤ min(open, close)`).  Each of the 16 parallel workers receives its own
   `OHLCVAugmentor` seeded with `base_seed + worker_id` so every env sees a fully

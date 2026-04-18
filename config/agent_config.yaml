@@ -89,7 +89,6 @@ hotsave:
 augmentation:
   max_jitter_pts: 2.0    # OHLC bar-level jitter ±N pts (2.0 = ±8 ticks for ES)
   trend_scale:    0.15   # session return scaling ±15%  (e.g. 1.0% move → 0.85–1.15%)
-  volume_scale:   0.30   # session volume multiplicative ±30%
 
 multiprocessing:
   n_envs: 16                       # parallel training environments

@@ -315,7 +315,6 @@ def build_components(
             rng=np.random.default_rng(env_seed),
             max_jitter_pts=float(aug_cfg.get("max_jitter_pts", 2.0)),
             trend_scale=float(aug_cfg.get("trend_scale",    0.15)),
-            volume_scale=float(aug_cfg.get("volume_scale",  0.30)),
         )
         return TradingEnv(
             data_loader=data_loader,

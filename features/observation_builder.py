@@ -4,7 +4,7 @@ features/observation_builder.py
 Assembles the neural network observation vector from all feature states.
 
 The observation is a flat float32 numpy array containing:
-  1. Recent OHLCV price history — 60-bar sliding window (log-returns + vol ratio)
+  1. Recent OHLC price history — 60-bar sliding window (log-returns, no volume)
   2. ATR features (exhaustion, remaining room)                             [4]
   3. Zone features (distance, in-zone, width, age, swept — supply+demand) [10]
   4. Order zone / confluence features (score, R:R, pending order state)   [10]
@@ -18,8 +18,11 @@ The observation is a flat float32 numpy array containing:
        HTF context (5): 1h close-in-range, 2h close-in-range, prior day range position,
                         multi-TF momentum coherence, HTF vol expansion
 
+Note: volume is intentionally excluded — the strategy is price-structure based
+and volume data was found to add noise rather than signal.
+
 Total fixed features: 36 + 17 = 53
-Observation vector size: 60 × 5 + 53 = 353
+Observation vector size: 60 × 4 + 53 = 293
 
 Zone width/age features give the agent context on zone quality — tight fresh zones
 trade differently from wide stale ones.  Wide zones (>10 pts) are zeroed out in
@@ -71,11 +74,10 @@ class ObservationBuilder:
         self.price_history_len = lookback_bars
         self._max_zone_age = float(max_zone_age_bars)
         # Per-episode numpy cache — populated by prepare_episode()
-        self._cached_opens:      Optional[np.ndarray] = None
-        self._cached_highs:      Optional[np.ndarray] = None
-        self._cached_lows:       Optional[np.ndarray] = None
-        self._cached_closes:     Optional[np.ndarray] = None
-        self._cached_vol_ratios: Optional[np.ndarray] = None
+        self._cached_opens:  Optional[np.ndarray] = None
+        self._cached_highs:  Optional[np.ndarray] = None
+        self._cached_lows:   Optional[np.ndarray] = None
+        self._cached_closes: Optional[np.ndarray] = None
 
     @property
     def obs_dim(self) -> int:
@@ -86,15 +88,14 @@ class ObservationBuilder:
         Engineered features (17):
           PriceLocation(5) + Momentum(4) + VolRegime(2) + BarCharacter(1) + HTFContext(5)
         Price window:
-          lookback_bars × 5 OHLCV log-returns
+          lookback_bars × 4 OHLC log-returns (volume excluded)
         """
-        return self.price_history_len * 5 + _N_STRUCTURED + _N_ENGINEERED
+        return self.price_history_len * 4 + _N_STRUCTURED + _N_ENGINEERED
 
     def prepare_episode(self, bars: pd.DataFrame) -> None:
         """
-        Pre-extract numpy arrays and precompute rolling volume averages for an
-        episode's bar DataFrame.  Call once per episode (after reset) so that
-        build() does not repeat .to_numpy() and rolling-average work each step.
+        Pre-extract numpy arrays for an episode's bar DataFrame.  Call once per
+        episode (after reset) so build() does not repeat .to_numpy() each step.
 
         Parameters
         ----------
@@ -105,22 +106,6 @@ class ObservationBuilder:
         self._cached_highs  = bars["high"].to_numpy(dtype=np.float64)
         self._cached_lows   = bars["low"].to_numpy(dtype=np.float64)
         self._cached_closes = bars["close"].to_numpy(dtype=np.float64)
-
-        # Vectorised rolling 20-bar average volume (for bars BEFORE each position).
-        # Uses cumsum trick: O(n) instead of O(n × window) per episode.
-        if "volume" in bars.columns:
-            vols = bars["volume"].to_numpy(dtype=np.float64)
-            cumvol = np.concatenate([[0.0], np.cumsum(vols)])
-            n = len(vols)
-            end_idx   = np.arange(n, dtype=np.int64)
-            start_idx = np.maximum(end_idx - 20, 0)
-            window_sum = cumvol[end_idx] - cumvol[start_idx]
-            window_len = np.maximum(end_idx - start_idx, 1)
-            avg_before = np.where(end_idx > start_idx, window_sum / window_len, vols)
-            self._cached_vol_ratios = np.clip(vols / np.maximum(avg_before, 1.0), 0.0, 5.0)
-        else:
-            n = len(bars)
-            self._cached_vol_ratios = np.zeros(n, dtype=np.float64)
 
     def build(
         self,
@@ -151,13 +136,11 @@ class ObservationBuilder:
             highs_np  = self._cached_highs
             lows_np   = self._cached_lows
             closes_np = self._cached_closes
-            cached_vr = self._cached_vol_ratios
         else:
             opens_np  = bars["open"].to_numpy(dtype=np.float64)
             highs_np  = bars["high"].to_numpy(dtype=np.float64)
             lows_np   = bars["low"].to_numpy(dtype=np.float64)
             closes_np = bars["close"].to_numpy(dtype=np.float64)
-            cached_vr = None
 
         current_close = float(closes_np[current_bar_idx])
         features: list = []
@@ -188,12 +171,7 @@ class ObservationBuilder:
         lr_low   = _lr_vec(lows_np)
         lr_close = _lr_vec(closes_np)
 
-        if cached_vr is not None:
-            vol_ratios = np.where(valid_mask, cached_vr[safe_idx], 0.0)
-        else:
-            vol_ratios = np.zeros(n, dtype=np.float64)
-
-        price_block = np.column_stack([lr_open, lr_high, lr_low, lr_close, vol_ratios])
+        price_block = np.column_stack([lr_open, lr_high, lr_low, lr_close])
         features.extend(price_block.ravel().tolist())
 
         # ── 2. ATR features ───────────────────────────────────────────────────
