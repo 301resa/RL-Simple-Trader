@@ -527,7 +527,7 @@ def _compute_summary(df: Any, step: int) -> dict:
 
     tr = df["pnl_r"].values
     if len(tr) >= 5 and tr.std() > 0.01:
-        sharpe = float(np.clip(tr.mean() / tr.std(), -9.99, 9.99))
+        sharpe = float(np.clip(tr.mean() / tr.std() * np.sqrt(252), -9.99, 9.99))
     else:
         sharpe = 0.0
 

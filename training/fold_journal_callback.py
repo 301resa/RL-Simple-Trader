@@ -391,7 +391,7 @@ def _env_summary_row(env_idx: int, df) -> dict:
 
     tr_arr = df["pnl_r"].values if "pnl_r" in df.columns else np.array([])
     if len(tr_arr) >= 5 and tr_arr.std() > 0.01:
-        sharpe = float(np.clip(tr_arr.mean() / tr_arr.std(), -9.99, 9.99))
+        sharpe = float(np.clip(tr_arr.mean() / tr_arr.std() * np.sqrt(252), -9.99, 9.99))
     else:
         sharpe = 0.0
 
