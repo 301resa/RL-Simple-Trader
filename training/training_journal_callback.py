@@ -89,10 +89,11 @@ class TrainingJournalCallback(BaseCallback):
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [])
         dones = self.locals.get("dones", [])
-        for info, done in zip(infos, dones):
+        for env_idx, (info, done) in enumerate(zip(infos, dones)):
             if done:
                 for t in info.get("trades_list", []):
                     t["global_step"] = self.num_timesteps
+                    t["env_id"]      = env_idx
                     self._trades.append(t)
 
         if (self.num_timesteps - self._last_save_step) >= self.save_every_steps:
@@ -165,8 +166,11 @@ class TrainingJournalCallback(BaseCallback):
         _trades = trades if trades is not None else self._trades
         if not _trades:
             return
+        import shutil
+        from training.trade_chart import write_trade_chart
+
+        # ── Aggregate OHLC chart (all envs combined) ──────────────────────────
         try:
-            from training.trade_chart import write_trade_chart
             out_path = out_dir / f"{stem}_trades.html"
             write_trade_chart(
                 trades=_trades,
@@ -174,16 +178,43 @@ class TrainingJournalCallback(BaseCallback):
                 output_path=out_path,
                 instrument=self.instrument,
                 bar_minutes=self.bar_minutes,
-                title_prefix=f"Training Trades  step {self.num_timesteps:,}",
+                title_prefix=f"All Envs — step {self.num_timesteps:,}",
             )
-            if self.verbose:
-                print(f"[TrainingJournal] Trade chart → {out_path}")
-            # keep a 'latest' copy
-            import shutil
             shutil.copy2(str(out_path), str(self.journal_dir / "training_trades.html"))
+            if self.verbose:
+                print(f"[TrainingJournal] Aggregate trade chart → {out_path}")
         except Exception as exc:
             if self.verbose:
-                print(f"[TrainingJournal] Trade chart write failed: {exc}")
+                print(f"[TrainingJournal] Aggregate trade chart failed: {exc}")
+
+        # ── One OHLC chart per env ────────────────────────────────────────────
+        env_ids = sorted(set(t.get("env_id", 0) for t in _trades))
+        if len(env_ids) <= 1:
+            return   # single env — aggregate chart is sufficient
+        for eid in env_ids:
+            env_trades = [t for t in _trades if t.get("env_id", 0) == eid]
+            if not env_trades:
+                continue
+            try:
+                env_path = out_dir / f"{stem}_env{eid:02d}.html"
+                write_trade_chart(
+                    trades=env_trades,
+                    data_dir=self.data_dir,
+                    output_path=env_path,
+                    instrument=self.instrument,
+                    bar_minutes=self.bar_minutes,
+                    title_prefix=f"Env {eid:02d} — step {self.num_timesteps:,}",
+                )
+                # always keep latest per-env copy
+                shutil.copy2(
+                    str(env_path),
+                    str(self.journal_dir / f"training_trades_env{eid:02d}.html"),
+                )
+                if self.verbose:
+                    print(f"[TrainingJournal] Env {eid:02d} trade chart → {env_path}")
+            except Exception as exc:
+                if self.verbose:
+                    print(f"[TrainingJournal] Env {eid:02d} trade chart failed: {exc}")
 
     # ── Excel ─────────────────────────────────────────────────────────────────
 
@@ -247,6 +278,21 @@ class TrainingJournalCallback(BaseCallback):
             summary_df.to_excel(writer, sheet_name="Summary", index=False)
             _style_summary_sheet(writer.sheets["Summary"])
 
+            # ── Sheets 4+: Per-env ────────────────────────────
+            if "env_id" in df.columns:
+                _TRADE_COLS = [
+                    "global_step", "date", "direction",
+                    "entry_price", "stop_price", "initial_target", "exit_price",
+                    "pnl_r", "pnl_dollars", "pnl_points",
+                    "n_contracts", "duration_min", "exit_reason",
+                    "is_win", "is_rth", "mae_r",
+                ]
+                for env_id, env_df in df.groupby("env_id"):
+                    sheet = f"Env_{int(env_id):02d}"
+                    ecols = [c for c in _TRADE_COLS if c in env_df.columns]
+                    env_df[ecols].to_excel(writer, sheet_name=sheet, index=False)
+                    _style_trades_sheet(writer.sheets[sheet], env_df[ecols])
+
         if copy_latest:
             import shutil
             latest = self.journal_dir / "training_journal.xlsx"
@@ -287,14 +333,15 @@ class TrainingJournalCallback(BaseCallback):
         color_r   = _GREEN if total_d >= 0 else _RED
 
         fig = make_subplots(
-            rows=5, cols=1,
-            row_heights=[0.28, 0.20, 0.16, 0.16, 0.20],
-            vertical_spacing=0.04,
+            rows=6, cols=1,
+            row_heights=[0.22, 0.16, 0.12, 0.12, 0.16, 0.22],
+            vertical_spacing=0.035,
             specs=[
                 [{"type": "scatter"}],
                 [{"type": "bar"}],
                 [{"type": "scatter"}],
                 [{"type": "histogram"}],
+                [{"type": "table"}],
                 [{"type": "table"}],
             ],
             subplot_titles=[
@@ -302,7 +349,8 @@ class TrainingJournalCallback(BaseCallback):
                 "Per-Trade PnL ($)",
                 "Cumulative Drawdown ($)",
                 "Trade Duration Distribution (min)",
-                "",
+                "Overall Summary",
+                "Per-Environment Breakdown",
             ],
         )
 
@@ -362,10 +410,9 @@ class TrainingJournalCallback(BaseCallback):
             row=4, col=1,
         )
 
-        # ── Row 5: Summary table ──────────────────────────────
-        summary = _compute_summary(
-            __import__("pandas").DataFrame(df_raw), self.num_timesteps
-        )
+        # ── Row 5: Overall summary table ─────────────────────
+        import pandas as pd
+        summary = _compute_summary(pd.DataFrame(df_raw), self.num_timesteps)
         s_keys = list(summary.keys())
         s_vals = [str(v) for v in summary.values()]
         half   = len(s_keys) // 2 + len(s_keys) % 2
@@ -396,6 +443,38 @@ class TrainingJournalCallback(BaseCallback):
             row=5, col=1,
         )
 
+        # ── Row 6: Per-environment breakdown table ────────────
+        from training.fold_journal_callback import _env_summary_row
+        env_rows = []
+        env_ids_seen = sorted(set(t.get("env_id", 0) for t in df_raw))
+        env_df_all = pd.DataFrame(df_raw)
+        for eid in env_ids_seen:
+            env_slice = env_df_all[env_df_all["env_id"] == eid] if "env_id" in env_df_all.columns else env_df_all
+            env_rows.append(_env_summary_row(eid, env_slice))
+        if env_rows:
+            tbl_df = pd.DataFrame(env_rows)
+            fig.add_trace(
+                go.Table(
+                    header=dict(
+                        values=[f"<b>{c}</b>" for c in tbl_df.columns],
+                        fill_color=_PAPER,
+                        font=dict(color=_TEXT, size=10),
+                        align="center",
+                        line_color=_GRID,
+                        height=24,
+                    ),
+                    cells=dict(
+                        values=[tbl_df[c].tolist() for c in tbl_df.columns],
+                        fill_color=_BG,
+                        font=dict(color=_TEXT, size=10),
+                        align=["center"] * len(tbl_df.columns),
+                        line_color=_GRID,
+                        height=20,
+                    ),
+                ),
+                row=6, col=1,
+            )
+
         # ── Layout ────────────────────────────────────────────
         title = (
             f"Training Journal  —  Step {self.num_timesteps:,}  |  "
@@ -410,7 +489,7 @@ class TrainingJournalCallback(BaseCallback):
             showlegend=False,
             dragmode="pan",
             margin=dict(l=60, r=30, t=60, b=20),
-            height=1100,
+            height=1500,
         )
         for row in range(1, 5):
             fig.update_xaxes(gridcolor=_GRID, zeroline=False,
