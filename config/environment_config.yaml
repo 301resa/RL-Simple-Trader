@@ -41,7 +41,7 @@ contracts:
     tick_value: 0.50
 
 account:
-  initial_balance: 50000.0      # starting account equity ($)
+  initial_balance: 100000.0      # starting account equity ($)
   max_drawdown_limit: 2000.0    # hard daily drawdown limit ($) for guardrail check
 
 observation:
