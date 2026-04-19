@@ -173,17 +173,29 @@ as the natural first profit objective.
 - **1% of account equity** per trade (capital-based sizing)
 - **Fractional contract sizes**: `[0.5, 1.0, 1.5, 2.0, 2.5]` — snapped to the largest
   tier that doesn't exceed the 1% capital risk
-- **Confluence-graded sizing**: the confluence score gates the maximum allowed tier:
+- **Three-constraint sizing** — smallest of all three wins:
 
-  | Confluence Score | Max Contracts |
-  |-----------------|---------------|
-  | < 0.50          | 0.5           |
-  | 0.50 – 0.65     | 1.0           |
-  | 0.65 – 0.75     | 1.5           |
-  | 0.75 – 0.85     | 2.0           |
-  | ≥ 0.85          | 2.5           |
+  1. **Capital constraint**: `risk_dollars / (stop_pts × point_value)` → never exceeds 1% risk
+  2. **Confluence constraint**: graduated score gates the maximum tier:
 
-  Final size = `min(capital_tier, confluence_tier)` — never exceeds 1% risk.
+     | Confluence Score | Max Contracts |
+     |-----------------|---------------|
+     | < 0.60          | 0.5           |
+     | 0.60 – 0.70     | 1.0           |
+     | 0.70 – 0.80     | 1.5           |
+     | 0.80 – 0.90     | 2.0           |
+     | ≥ 0.90          | 2.5           |
+
+     In-zone confluence is now **graduated** (0.55–1.00) based on zone quality
+     (width × 40% + age × 35% + touches × 25%) so all five tiers are reachable.
+
+  3. **Zone-width constraint**: wider zones carry more uncertainty.
+     Size is scaled by `max(0.50, 1 − zone_width / 10)` — a 5-pt zone gets
+     75% of the size a 0-pt zone would get; a 10-pt zone gets 50%.
+
+- **Daily budget guard**: a single trade cannot consume more than **50% of the
+  remaining daily loss budget** — if the day is already down $700 of the $1,000
+  limit, the next trade is capped at $150 risk (50% × $300 remaining).
 
 - **Dual daily loss limit**: stops trading when **either** limit is reached:
   - **−3R** on the day, OR

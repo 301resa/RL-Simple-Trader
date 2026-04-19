@@ -9,10 +9,11 @@ sizing:
   risk_per_trade_pct: 0.01       # risk 1% of account per trade
   min_contracts: 0.5             # fractional micro contracts allowed
   max_contracts: 2.5
-  contract_tiers: [1.0, 2.0, 3.0, 4.0, 5.0]   # allowed position sizes
-  # Confluence score thresholds that gate each tier (4 thresholds → 5 tiers)
+  contract_tiers: [0.5, 1.0, 1.5, 2.0, 2.5]   # fractional tiers — finer granularity than integer sizes
+  # Confluence score thresholds that gate each tier (4 thresholds → 5 tiers).
+  # In-zone confluence is now graduated (0.55–1.00) so middle tiers are reachable.
   # score < t[0] → 0.5, < t[1] → 1.0, < t[2] → 1.5, < t[3] → 2.0, else → 2.5
-  confluence_tier_thresholds: [0.50, 0.65, 0.75, 0.85]
+  confluence_tier_thresholds: [0.60, 0.70, 0.80, 0.90]
 
 stop_loss:
   zone_buffer_atr_pct: 0.03     # buffer beyond zone top/bottom (3% of ATR)

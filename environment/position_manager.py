@@ -197,20 +197,29 @@ class PositionManager:
         self,
         stop_pts: float,
         confluence_score: float,
+        zone_width_pts: float = 0.0,
     ) -> float:
         """
         Return the number of contracts (from CONTRACT_TIERS) for this trade.
 
-        Two constraints are applied, and the smaller is taken:
-          1. Capital constraint: 1% of equity / (stop_pts × point_value)
-             — snapped DOWN to the nearest tier.
-          2. Confluence constraint: confluence score maps to the highest
-             allowed tier via the configured thresholds.
+        Three constraints applied — the smallest result wins:
+          1. Capital constraint: 1% of equity / (stop_pts × point_value).
+          2. Confluence constraint: score maps to the highest allowed tier.
+          3. Zone-width constraint: wider zones carry more uncertainty —
+             contracts are scaled down linearly from full size at 0 pts
+             to 50% of full size at MAX_ZONE_WIDTH_PTS (10 pts).
         """
+        from features.order_zone_engine import MAX_ZONE_WIDTH_PTS
+
         # Capital-based maximum (snap down to nearest tier that doesn't exceed risk)
         risk_dollars = self.real_capital * self.risk_per_trade_pct
         risk_per_contract = max(stop_pts * self.point_value, 1e-6)
         raw_n = risk_dollars / risk_per_contract
+
+        # Zone-width scaling: narrow zones get full size, wide zones get ≥50%
+        if zone_width_pts > 0.0:
+            width_factor = max(0.50, 1.0 - (zone_width_pts / MAX_ZONE_WIDTH_PTS) * 0.50)
+            raw_n *= width_factor
 
         # Find the highest tier that doesn't exceed raw_n
         capital_tier = self._contract_tiers[0]
@@ -231,7 +240,7 @@ class PositionManager:
         else:
             conf_tier = self._contract_tiers[-1]
 
-        # Take the smaller of capital and confluence constraints
+        # Take the smallest of all three constraints
         n = min(capital_tier, conf_tier)
         return max(self._contract_tiers[0], min(self._contract_tiers[-1], n))
 
@@ -244,6 +253,7 @@ class PositionManager:
         current_bar_idx: int,
         atr: float,
         confluence_score: float = 1.0,
+        zone_width_pts: float = 0.0,
     ) -> Tuple[bool, str]:
         """
         Open a new position.
@@ -284,8 +294,20 @@ class PositionManager:
         if initial_risk <= 0:
             return False, "zero_risk"
 
-        # Confluence-graded fractional sizing (0.5 increments, capital-capped)
-        n_contracts = self._size_by_confluence(initial_risk, confluence_score)
+        # Confluence + zone-width graded sizing (0.5 increments, capital-capped)
+        n_contracts = self._size_by_confluence(initial_risk, confluence_score, zone_width_pts)
+
+        # Daily budget guard — single trade cannot consume more than 50% of
+        # the remaining daily loss allowance.  Protects against one bad trade
+        # wiping out the day's risk budget.
+        remaining_budget = max(0.0, self.max_daily_loss_dollars + self._state.daily_pnl_dollars)
+        if remaining_budget > 0.0:
+            max_by_budget = remaining_budget * 0.5 / max(initial_risk * self.point_value, 1e-6)
+            budget_tier = self._contract_tiers[0]
+            for t in self._contract_tiers:
+                if t <= max_by_budget:
+                    budget_tier = t
+            n_contracts = min(n_contracts, budget_tier)
 
         pos_dir = PositionDirection.LONG if direction == 1 else PositionDirection.SHORT
 

@@ -809,6 +809,7 @@ class TradingEnv(gym.Env):
         confluence = oz_state.confluence_score if oz_state is not None else 1.0
         atr        = atr_state.atr_daily
 
+        zone_width_pts = 0.0
         if direction == -1 and zone_state and zone_state.nearest_supply:
             zone = zone_state.nearest_supply
             if not zone.was_swept:
@@ -817,6 +818,7 @@ class TradingEnv(gym.Env):
             if zone.top - zone.bottom > MAX_ZONE_WIDTH_PTS:
                 log.debug("Pending order skipped — supply zone too wide", width=round(zone.top - zone.bottom, 2))
                 return
+            zone_width_pts = zone.top - zone.bottom
             limit_price = zone.top                              # SHORT: re-entry as price drops back to zone.top
             stop_price  = zone.top + FIXED_STOP_BUFFER_PTS     # stop just above sweep level
         elif direction == 1 and zone_state and zone_state.nearest_demand:
@@ -827,6 +829,7 @@ class TradingEnv(gym.Env):
             if zone.top - zone.bottom > MAX_ZONE_WIDTH_PTS:
                 log.debug("Pending order skipped — demand zone too wide", width=round(zone.top - zone.bottom, 2))
                 return
+            zone_width_pts = zone.top - zone.bottom
             limit_price = zone.bottom                           # LONG: re-entry as price rallies back to zone.bottom
             stop_price  = zone.bottom - FIXED_STOP_BUFFER_PTS  # stop just below sweep level
         else:
@@ -844,6 +847,7 @@ class TradingEnv(gym.Env):
             "stop_price":      stop_price,
             "target_price":    target_price,
             "confluence_score": confluence,
+            "zone_width_pts":  zone_width_pts,
             "placed_bar_idx":  self._current_step,
             "atr_state":       atr_state,
         }
@@ -885,6 +889,7 @@ class TradingEnv(gym.Env):
             current_bar_idx=current_bar_idx,
             atr=po["atr_state"].atr_daily,
             confluence_score=po["confluence_score"],
+            zone_width_pts=po.get("zone_width_pts", 0.0),
         )
 
         if success:

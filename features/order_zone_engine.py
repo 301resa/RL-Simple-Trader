@@ -32,6 +32,39 @@ FIXED_STOP_BUFFER_PTS: float = 1.5   # buffer beyond zone edge
 MIN_STOP_PTS: float = 3.0            # floor so 1R is never trivially small
 MAX_ZONE_WIDTH_PTS: float = 10.0     # zones wider than this are skipped (undefined risk)
 
+# Zone quality scoring constants
+_ZONE_MAX_AGE_BARS: int   = 300   # matches max_zone_age_bars in features_config.yaml
+_ZONE_MAX_TOUCHES: int    = 3     # matches max_zone_touches in features_config.yaml
+
+
+def _zone_quality_score(zone, current_bar_idx: int) -> float:
+    """
+    Graduate the in-zone confluence score based on zone quality.
+
+    Replaces the previous binary 1.0 score so that the confluence score
+    naturally spreads across all five position-size tiers instead of
+    clustering at the extremes (1 or 5 contracts).
+
+    Components (all in [0, 1], higher = better):
+      width_score  — narrow zones are more precise entry points
+      age_score    — fresh zones react more cleanly than old ones
+      touch_score  — fewer prior touches means more untapped structure
+
+    Returns a score in [0.55, 1.00] when price is inside a valid zone.
+    The 0.55 floor ensures in-zone setups always beat the minimum
+    confluence threshold (0.45) while still being sized conservatively.
+    """
+    width   = zone.top - zone.bottom
+    age     = current_bar_idx - zone.bar_formed_idx
+    touches = getattr(zone, "touches", 0)
+
+    width_score = max(0.0, 1.0 - width  / MAX_ZONE_WIDTH_PTS)          # 0 = 10pt wide, 1 = 0pt wide
+    age_score   = max(0.0, 1.0 - age    / _ZONE_MAX_AGE_BARS)           # 0 = very old,  1 = just formed
+    touch_score = max(0.0, 1.0 - touches / max(_ZONE_MAX_TOUCHES, 1))   # 0 = max touches, 1 = untouched
+
+    quality = width_score * 0.40 + age_score * 0.35 + touch_score * 0.25
+    return float(np.clip(0.55 + quality * 0.45, 0.55, 1.00))
+
 
 class OrderZoneType(Enum):
     BULLISH = "bullish"
@@ -135,8 +168,7 @@ class OrderZoneEngine:
                 s = zone_state.nearest_supply
                 if s.bottom - atr * 0.05 <= current_price <= s.top + atr * 0.05:
                     in_supply = True
-                    zone_score_bearish = 1.0
-                    # Entry at zone.top (after sweep re-entry), stop 1.5 pts above zone.top.
+                    zone_score_bearish = _zone_quality_score(s, current_bar_idx)
                     stop_pts_bearish = max(FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
                 else:
                     prox = max(0.0, 1.0 - abs(current_price - s.midpoint) / max(atr, 1.0))
@@ -146,8 +178,7 @@ class OrderZoneEngine:
                 d = zone_state.nearest_demand
                 if d.bottom - atr * 0.05 <= current_price <= d.top + atr * 0.05:
                     in_demand = True
-                    zone_score_bullish = 1.0
-                    # Entry at zone.bottom (after sweep re-entry), stop 1.5 pts below zone.bottom.
+                    zone_score_bullish = _zone_quality_score(d, current_bar_idx)
                     stop_pts_bullish = max(FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
                 else:
                     prox = max(0.0, 1.0 - abs(current_price - d.midpoint) / max(atr, 1.0))
