@@ -536,6 +536,7 @@ def _build_journal(
             f"Dur  : {dur_min} min<extra></extra>"
         )
 
+        # Entry marker
         fig.add_trace(go.Scatter(
             x=[entry_time], y=[entry_px], mode="markers",
             marker=dict(symbol=entry_sym, color=entry_col, size=13,
@@ -543,6 +544,7 @@ def _build_journal(
             showlegend=False, hovertemplate=hover_entry,
         ), row=1, col=1)
 
+        # Exit marker
         fig.add_trace(go.Scatter(
             x=[exit_time], y=[exit_px], mode="markers",
             marker=dict(symbol="x", color=exit_col, size=11,
@@ -550,16 +552,31 @@ def _build_journal(
             showlegend=False, hovertemplate=hover_exit,
         ), row=1, col=1)
 
-        # SL line (dashed red, entry→exit)
-        fig.add_shape(type="line",
-            x0=entry_time, x1=exit_time, y0=stop_px, y1=stop_px,
-            line=dict(color="rgba(239,83,80,0.55)", width=1, dash="dot"),
-            row=1, col=1)
-        # TP line (dashed green, entry→exit)
-        fig.add_shape(type="line",
-            x0=entry_time, x1=exit_time, y0=tgt_px,  y1=tgt_px,
-            line=dict(color="rgba(38,166,154,0.55)", width=1, dash="dot"),
-            row=1, col=1)
+        # Entry→exit connector (thin white dashed line)
+        fig.add_trace(go.Scatter(
+            x=[entry_time, exit_time], y=[entry_px, exit_px],
+            mode="lines",
+            line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dot"),
+            showlegend=False, hoverinfo="skip",
+        ), row=1, col=1)
+
+        # SL line (solid red, entry→exit) — use Scatter so it renders on the correct subplot
+        fig.add_trace(go.Scatter(
+            x=[entry_time, exit_time], y=[stop_px, stop_px],
+            mode="lines",
+            line=dict(color="rgba(239,83,80,0.80)", width=1.5, dash="dash"),
+            showlegend=False,
+            hovertemplate=f"<b>Stop Loss</b>: {stop_px}<extra></extra>",
+        ), row=1, col=1)
+
+        # TP line (solid green, entry→exit) — same reason
+        fig.add_trace(go.Scatter(
+            x=[entry_time, exit_time], y=[tgt_px, tgt_px],
+            mode="lines",
+            line=dict(color="rgba(38,166,154,0.80)", width=1.5, dash="dash"),
+            showlegend=False,
+            hovertemplate=f"<b>Take Profit</b>: {tgt_px}<extra></extra>",
+        ), row=1, col=1)
 
         pnl_times.append(exit_time)
         pnl_vals.append(pnl_r)
