@@ -174,6 +174,8 @@ class TradingEnv(gym.Env):
         self._rth_start_secs  = _rth_start_ts.timestamp() % 86400  # seconds since midnight
         self.no_entry_last_n_bars = no_entry_last_n_bars
         self.early_terminate_on_max_dd = early_terminate_on_max_dd
+        # Read from action_masker if available, else default 5 bars (25 min for 5-min bars)
+        self._max_pending_order_bars: int = getattr(action_masker, "max_pending_order_bars", 5)
         self.point_value = point_value
         self.bar_minutes = bar_minutes
         self.curriculum_filter_fn = curriculum_filter_fn
@@ -462,6 +464,14 @@ class TradingEnv(gym.Env):
             current_low   = float(current_bar["low"])
         atr_state     = self._current_atr_state
 
+        # ── Expire stale pending orders ───────────────────────
+        # Cancel any pending order older than max_pending_order_bars bars.
+        # Prevents stale limit orders filling at prices far from the zone.
+        if (self._pending_order is not None
+                and self._current_step - self._pending_order["placed_bar_idx"]
+                    > self._max_pending_order_bars):
+            self._pending_order = None
+
         # ── Check pending limit order fill ────────────────────
         # Done before action processing so the fill reward is computed this bar.
         if self._pending_order is not None and not self.position_manager.state.is_open:
@@ -568,6 +578,22 @@ class TradingEnv(gym.Env):
                 )
             if self.early_terminate_on_max_dd:
                 terminated = True
+
+        # ── RTH-end force close (FULL / GLOBEX sessions only) ─────────────────
+        # When trading the full 23-hour session, close any open position the
+        # moment the current bar is at or past RTH end (16:00 ET).
+        # This enforces the rule: no carrying positions into overnight / Asia.
+        if (self.session_type != "RTH"
+                and not trade_closed_this_step
+                and self.position_manager.state.is_open):
+            _bar_time_now = self._session_times[self._current_step]
+            if _bar_time_now >= self._rth_end_time:
+                _rth_closed = self.position_manager.force_close(
+                    current_price, self._current_step, ExitReason.SESSION_END
+                )
+                if _rth_closed is not None:
+                    trade_closed_this_step = True
+                self._pending_order = None  # also cancel any pending at RTH end
 
         # End of session
         self._current_step += 1
@@ -730,7 +756,10 @@ class TradingEnv(gym.Env):
             if _ob._cached_closes is not None
             else float(self._session_bars.iloc[_s]["close"])
         )
-        return self.action_masker.compute_mask(
+
+        bars_since_last_trade = _s - self.position_manager.state.last_close_bar
+
+        mask = self.action_masker.compute_mask(
             is_position_open=portfolio_state["position_open"],
             position_direction=portfolio_state["position_direction"],
             unrealised_r=portfolio_state.get("current_pnl_r", 0.0),
@@ -740,7 +769,18 @@ class TradingEnv(gym.Env):
             in_loss_streak_pause=self.position_manager.state.in_loss_streak_pause,
             bars_remaining_in_session=bars_remaining,
             max_drawdown_breached=self.position_manager.is_max_drawdown_breached(_close_now),
+            bars_since_last_trade=bars_since_last_trade,
         )
+
+        # Block entries at/after RTH end for FULL/GLOBEX sessions.
+        # Prevents late-session entries that cannot close before RTH end.
+        if self.session_type != "RTH":
+            _bar_time = self._session_times[_s]
+            if _bar_time >= self._rth_end_time:
+                mask[Action.ENTER_SHORT] = 0.0
+                mask[Action.ENTER_LONG]  = 0.0
+
+        return mask
 
     def _place_pending_order(
         self, direction: int, current_price: float, atr_state: ATRState
@@ -814,7 +854,12 @@ class TradingEnv(gym.Env):
         )
 
     def _check_pending_fill(self, bar_high: float, bar_low: float) -> bool:
-        """Return True if the current bar's range touches the pending limit price.
+        """Return True if the current bar's range contains the pending limit price.
+
+        A valid limit fill requires the bar's range to include the limit price —
+        bar_low ≤ limit_price ≤ bar_high — for both directions.  Checking only
+        one side allows fills at prices outside the bar's OHLC range (e.g. SHORT
+        at 7018 when bar_high is only 7015), which is physically impossible.
 
         After a liquidity sweep the fill direction is the reverse of the approach:
           LONG  — placed at demand.bottom; fills when price RALLIES back up to it.
@@ -823,10 +868,8 @@ class TradingEnv(gym.Env):
         po = self._pending_order
         if po is None:
             return False
-        if po["direction"] == 1:    # LONG: price rallied back up to demand.bottom
-            return bar_high >= po["limit_price"]
-        else:                       # SHORT: price dropped back down to supply.top
-            return bar_low <= po["limit_price"]
+        limit = po["limit_price"]
+        return bar_low <= limit <= bar_high
 
     def _open_from_pending(self, current_bar_idx: int) -> None:
         """Open a position at the pending limit price and clear the pending order."""

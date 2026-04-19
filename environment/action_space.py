@@ -73,6 +73,10 @@ class ActionMasker:
         Block entries beyond this count.
     no_entry_last_n_bars : int
         Block entries in last N bars of session.
+    min_bars_between_trades : int
+        Minimum bars that must elapse after a trade closes before a new
+        entry is allowed.  Prevents re-entering the same zone immediately
+        after a fill (eliminates 0-min duplicate trades).
     """
 
     def __init__(
@@ -81,11 +85,13 @@ class ActionMasker:
         trail_min_r: float = 2.0,
         max_trades_per_day: int = 5,
         no_entry_last_n_bars: int = 3,
+        min_bars_between_trades: int = 3,
     ) -> None:
         self.atr_exhaustion_threshold = atr_exhaustion_threshold
         self.trail_min_r = trail_min_r
         self.max_trades_per_day = max_trades_per_day
         self.no_entry_last_n_bars = no_entry_last_n_bars
+        self.min_bars_between_trades = min_bars_between_trades
 
     def compute_mask(
         self,
@@ -98,6 +104,7 @@ class ActionMasker:
         in_loss_streak_pause: bool,
         bars_remaining_in_session: int,
         max_drawdown_breached: bool,
+        bars_since_last_trade: int = 9999,
     ) -> np.ndarray:
         """
         Compute the action mask for the current timestep.
@@ -158,6 +165,9 @@ class ActionMasker:
         elif bars_remaining_in_session <= self.no_entry_last_n_bars:
             entry_blocked = True
             block_reason = "end_of_session"
+        elif bars_since_last_trade < self.min_bars_between_trades:
+            entry_blocked = True
+            block_reason = "min_gap_between_trades"
         # ATR exhaustion is NOT a hard mask — after a volatile RTH session the
         # cumulative range exceeds the threshold, which would permanently block
         # all ETH/globex entries for the rest of the day.  The reward function

@@ -38,4 +38,6 @@ daily_limits:
   pause_bars_after_loss_streak: 30  # bars to sit out after loss streak
 
 session:
-  no_entry_last_n_bars: 3        # no new entries in last 3 bars of RTH
+  no_entry_last_n_bars: 3        # no new entries in last 3 bars of session
+  min_bars_between_trades: 3     # minimum bars between trade close and next entry (15 min @ 5-min bars)
+  max_pending_order_bars: 5      # cancel pending limit orders older than this many bars (25 min @ 5-min bars)

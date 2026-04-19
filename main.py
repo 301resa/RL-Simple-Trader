@@ -255,7 +255,9 @@ def build_components(
         trail_min_r=risk_cfg.get("trailing", {}).get("activate_at_r", 2.0),
         max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
         no_entry_last_n_bars=session_risk_cfg.get("no_entry_last_n_bars", 3),
+        min_bars_between_trades=session_risk_cfg.get("min_bars_between_trades", 3),
     )
+    action_masker.max_pending_order_bars = session_risk_cfg.get("max_pending_order_bars", 5)
 
     # ── Position Manager ──────────────────────────────────────
     account_cfg = env_cfg.get("account", {})
@@ -888,7 +890,9 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         trail_min_r=trail_cfg.get("activate_at_r", 2.0),
         max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
         no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
+        min_bars_between_trades=session_risk.get("min_bars_between_trades", 3),
     )
+    action_masker.max_pending_order_bars = session_risk.get("max_pending_order_bars", 5)
     reward_calculator = RewardCalculator.from_config(reward_cfg)
     train_augmentor   = OHLCVAugmentor(rng=np.random.default_rng(agent_cfg.get("seed", 42)))
 

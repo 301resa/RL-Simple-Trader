@@ -1124,7 +1124,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         trail_min_r=trail_cfg.get("activate_at_r", 2.0),
         max_trades_per_day=daily_lim.get("max_trades_per_day", 5),
         no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
+        min_bars_between_trades=session_risk.get("min_bars_between_trades", 3),
     )
+    action_masker.max_pending_order_bars = session_risk.get("max_pending_order_bars", 5)
     reward_calculator = RewardCalculator.from_config(reward_cfg)
 
     zone_detector_defaults = {

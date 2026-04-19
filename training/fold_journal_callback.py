@@ -200,6 +200,7 @@ class FoldJournalCallback(BaseCallback):
         )
 
         agg_pnl_d  = [t.get("pnl_dollars", t["pnl_r"]) for t in sorted_trades]
+        agg_pnl_r  = [t.get("pnl_r", 0.0)             for t in sorted_trades]
         agg_is_win = [t["is_win"] for t in sorted_trades]
         n_agg      = len(agg_pnl_d)
         trade_nums = list(range(1, n_agg + 1))
@@ -312,7 +313,7 @@ class FoldJournalCallback(BaseCallback):
         # ── Layout ────────────────────────────────────────────
         n_wins  = sum(agg_is_win)
         wr_pct  = 100 * n_wins / n_agg if n_agg else 0.0
-        total_r = sum(agg_pnl)
+        total_r = sum(agg_pnl_r)
         clr     = _GREEN if total_r >= 0 else _RED
 
         title = (

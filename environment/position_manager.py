@@ -83,6 +83,7 @@ class PositionState:
     initial_risk_pts: float = 0.0
     mae_pts: float = 0.0
     confluence_score: float = 0.0
+    last_close_bar: int = -9999   # bar index of last completed trade (for min-gap enforcement)
 
 
 class PositionManager:
@@ -525,6 +526,7 @@ class PositionManager:
                 s.in_loss_streak_pause = True
 
         # Clear position state
+        s.last_close_bar = current_bar_idx   # record for min-gap enforcement
         s.is_open = False
         s.direction = PositionDirection.FLAT
         s.trailing_active = False
