@@ -17,11 +17,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Tuple
 
-# Allowed position sizes in contracts (micro / fractional lots)
-CONTRACT_TIERS: List[float] = [0.5, 1.0, 1.5, 2.0, 2.5]
-
-# Default confluence-score thresholds — one per tier boundary (n tiers = n-1 thresholds)
-DEFAULT_CONFLUENCE_THRESHOLDS: List[float] = [0.50, 0.65, 0.75, 0.85]
+# Fallback defaults used only when the caller does not pass the instrument
+# profile's contract tiers and confluence thresholds.
+# Minis (ES/NQ) are integer-only — contract_tiers must never include fractional
+# values for those instruments; micros (MES/MNQ) are also integer.
+CONTRACT_TIERS: List[float] = [1, 2]
+DEFAULT_CONFLUENCE_THRESHOLDS: List[float] = [0.75]
 
 
 class ExitReason(str, Enum):
@@ -47,7 +48,7 @@ class Trade:
     exit_price: float
     stop_price: float
     initial_target: float
-    n_contracts: float          # fractional lots (0.5 increments)
+    n_contracts: float          # integer contracts (tier values)
     entry_bar_idx: int
     exit_bar_idx: int
     pnl_r: float
@@ -68,7 +69,7 @@ class PositionState:
     entry_price: float = 0.0
     stop_price: float = 0.0
     target_price: float = 0.0
-    n_contracts: float = 0.5    # fractional lots
+    n_contracts: float = 1      # integer contracts
     entry_bar_idx: int = 0
     trailing_active: bool = False
     trailing_stop_price: float = 0.0
@@ -128,8 +129,8 @@ class PositionManager:
         self,
         real_capital: float = 50000.0,
         risk_per_trade_pct: float = 0.01,
-        min_contracts: float = 0.5,
-        max_contracts: float = 2.5,
+        min_contracts: float = 1,
+        max_contracts: float = 2,
         point_value: float = 2.0,
         max_trades_per_day: int = 5,
         trail_activate_r: float = 1.2,
@@ -144,6 +145,7 @@ class PositionManager:
         trail_step_atr_pct: float = 0.25,
         contract_tiers: Optional[List[float]] = None,
         confluence_tier_thresholds: Optional[List[float]] = None,
+        max_zone_pts: float = 10.0,
     ) -> None:
         self.real_capital = real_capital
         self.risk_per_trade_pct = risk_per_trade_pct
@@ -168,6 +170,7 @@ class PositionManager:
             confluence_tier_thresholds if confluence_tier_thresholds
             else DEFAULT_CONFLUENCE_THRESHOLDS
         )
+        self._max_zone_pts: float = max_zone_pts
 
         self._state = PositionState(
             n_contracts=min_contracts,
@@ -198,6 +201,7 @@ class PositionManager:
         stop_pts: float,
         confluence_score: float,
         zone_width_pts: float = 0.0,
+        max_zone_width_pts: float = 10.0,
     ) -> float:
         """
         Return the number of contracts (from CONTRACT_TIERS) for this trade.
@@ -207,10 +211,8 @@ class PositionManager:
           2. Confluence constraint: score maps to the highest allowed tier.
           3. Zone-width constraint: wider zones carry more uncertainty —
              contracts are scaled down linearly from full size at 0 pts
-             to 50% of full size at MAX_ZONE_WIDTH_PTS (10 pts).
+             to 50% of full size at max_zone_width_pts.
         """
-        from features.order_zone_engine import MAX_ZONE_WIDTH_PTS
-
         # Capital-based maximum (snap down to nearest tier that doesn't exceed risk)
         risk_dollars = self.real_capital * self.risk_per_trade_pct
         risk_per_contract = max(stop_pts * self.point_value, 1e-6)
@@ -218,7 +220,7 @@ class PositionManager:
 
         # Zone-width scaling: narrow zones get full size, wide zones get ≥50%
         if zone_width_pts > 0.0:
-            width_factor = max(0.50, 1.0 - (zone_width_pts / MAX_ZONE_WIDTH_PTS) * 0.50)
+            width_factor = max(0.50, 1.0 - (zone_width_pts / max(max_zone_width_pts, 1e-6)) * 0.50)
             raw_n *= width_factor
 
         # Find the highest tier that doesn't exceed raw_n
@@ -294,8 +296,9 @@ class PositionManager:
         if initial_risk <= 0:
             return False, "zero_risk"
 
-        # Confluence + zone-width graded sizing (0.5 increments, capital-capped)
-        n_contracts = self._size_by_confluence(initial_risk, confluence_score, zone_width_pts)
+        # Confluence + zone-width graded sizing (tick-based, capital-capped)
+        max_zone_width_pts = max(self._max_zone_pts, 1e-6)
+        n_contracts = self._size_by_confluence(initial_risk, confluence_score, zone_width_pts, max_zone_width_pts)
 
         # Daily budget guard — single trade cannot consume more than 50% of
         # the remaining daily loss allowance.  Protects against one bad trade

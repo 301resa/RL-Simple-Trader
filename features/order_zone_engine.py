@@ -25,25 +25,17 @@ import numpy as np
 import pandas as pd
 
 from features.atr_calculator import ATRState
+from features.harmonic_detector import HarmonicState, HARMONIC_NONE
 from features.zone_detector import ZoneState, ZoneType
 
-# Stop placement constants
-FIXED_STOP_BUFFER_PTS: float = 1.5   # buffer beyond zone edge
-MIN_STOP_PTS: float = 3.0            # floor so 1R is never trivially small
-MAX_ZONE_WIDTH_PTS: float = 10.0     # zones wider than this are skipped (undefined risk)
-
 # Zone quality scoring constants
-_ZONE_MAX_AGE_BARS: int   = 300   # matches max_zone_age_bars in features_config.yaml
-_ZONE_MAX_TOUCHES: int    = 3     # matches max_zone_touches in features_config.yaml
+_ZONE_MAX_AGE_BARS: int = 300   # matches max_zone_age_bars in features_config.yaml
+_ZONE_MAX_TOUCHES: int  = 3     # matches max_zone_touches in features_config.yaml
 
 
-def _zone_quality_score(zone, current_bar_idx: int) -> float:
+def _zone_quality_score(zone, current_bar_idx: int, max_zone_width_pts: float) -> float:
     """
     Graduate the in-zone confluence score based on zone quality.
-
-    Replaces the previous binary 1.0 score so that the confluence score
-    naturally spreads across all five position-size tiers instead of
-    clustering at the extremes (1 or 5 contracts).
 
     Components (all in [0, 1], higher = better):
       width_score  — narrow zones are more precise entry points
@@ -58,9 +50,9 @@ def _zone_quality_score(zone, current_bar_idx: int) -> float:
     age     = current_bar_idx - zone.bar_formed_idx
     touches = getattr(zone, "touches", 0)
 
-    width_score = max(0.0, 1.0 - width  / MAX_ZONE_WIDTH_PTS)          # 0 = 10pt wide, 1 = 0pt wide
-    age_score   = max(0.0, 1.0 - age    / _ZONE_MAX_AGE_BARS)           # 0 = very old,  1 = just formed
-    touch_score = max(0.0, 1.0 - touches / max(_ZONE_MAX_TOUCHES, 1))   # 0 = max touches, 1 = untouched
+    width_score = max(0.0, 1.0 - width  / max(max_zone_width_pts, 1e-6))
+    age_score   = max(0.0, 1.0 - age    / _ZONE_MAX_AGE_BARS)
+    touch_score = max(0.0, 1.0 - touches / max(_ZONE_MAX_TOUCHES, 1))
 
     quality = width_score * 0.40 + age_score * 0.35 + touch_score * 0.25
     return float(np.clip(0.55 + quality * 0.45, 0.55, 1.00))
@@ -96,17 +88,20 @@ class OrderZoneState:
     rr_ratio: float
     trade_worthwhile: bool
     component_scores: Dict[str, float]
-    stop_pts_bearish: float = 1.5
-    stop_pts_bullish: float = 1.5
+    stop_pts_bearish: float = 0.0
+    stop_pts_bullish: float = 0.0
 
 
 class OrderZoneEngine:
     """
     Computes the Order Zone confluence score for each bar.
 
-    Two factors:
-      1. Supply/Demand zone membership  (zone_weight  = 0.90)
-      2. ATR room remaining             (atr_weight   = 0.10)
+    Three factors:
+      1. Supply/Demand zone membership  (zone_weight     = 0.80)
+      2. W/M harmonic pattern           (harmonic_weight = 0.10)
+      3. ATR room remaining             (atr_weight      = 0.10)
+
+    Harmonic is directional — W score used for bullish, M score for bearish.
 
     Parameters
     ----------
@@ -115,7 +110,7 @@ class OrderZoneEngine:
     min_rr_ratio : float
         Minimum R:R ratio required for trade_worthwhile = True.
     weights : dict, optional
-        Keys: "zone", "atr"
+        Keys: "zone", "atr", "harmonic"
     """
 
     def __init__(
@@ -123,20 +118,29 @@ class OrderZoneEngine:
         min_confluence_score: float = 0.35,
         min_rr_ratio: float = 1.5,
         weights: Optional[dict] = None,
-        zone_weight: float = 0.90,
+        zone_weight: float = 0.80,
         atr_weight: float = 0.10,
+        harmonic_weight: float = 0.10,
+        max_zone_pts: float = 10.0,       # tick-based; sourced from InstrumentProfile
+        stop_buffer_pts: float = 1.5,     # tick-based
+        fallback_stop_pts: float = 3.0,   # tick-based; used when no zone is in play
     ) -> None:
         self.min_confluence_score = min_confluence_score
-        self.min_rr_ratio = min_rr_ratio
+        self.min_rr_ratio         = min_rr_ratio
+        self.max_zone_pts         = max_zone_pts
+        self.stop_buffer_pts      = stop_buffer_pts
+        self.fallback_stop_pts    = fallback_stop_pts
 
         if weights is not None:
-            self.zone_weight = float(weights.get("zone", zone_weight))
-            self.atr_weight  = float(weights.get("atr",  atr_weight))
+            self.zone_weight     = float(weights.get("zone",     zone_weight))
+            self.atr_weight      = float(weights.get("atr",      atr_weight))
+            self.harmonic_weight = float(weights.get("harmonic", harmonic_weight))
         else:
-            self.zone_weight = zone_weight
-            self.atr_weight  = atr_weight
+            self.zone_weight     = zone_weight
+            self.atr_weight      = atr_weight
+            self.harmonic_weight = harmonic_weight
 
-        self._total_weight = self.zone_weight + self.atr_weight
+        self._total_weight = self.zone_weight + self.atr_weight + self.harmonic_weight
 
     def compute(
         self,
@@ -145,31 +149,38 @@ class OrderZoneEngine:
         atr_state: ATRState,
         zone_state: Optional[ZoneState],
         current_price: Optional[float] = None,
+        harmonic_state: Optional[HarmonicState] = None,
     ) -> OrderZoneState:
         """Score the current setup and return an OrderZoneState.
 
         Pass ``current_price`` directly to avoid a bars.iloc[current_bar_idx] lookup.
+        Pass ``harmonic_state`` to include W/M pattern confluence.
         """
         if current_price is None:
             current_price = float(bars.iloc[current_bar_idx]["close"])
         atr = atr_state.atr_daily
+
+        # Tick-based geometry from instrument profile
+        max_zone_width_pts = self.max_zone_pts
+        stop_buffer_pts    = self.stop_buffer_pts
+        fallback_stop_pts  = self.fallback_stop_pts
 
         # ── 1. Zone proximity / membership ───────────────────────────────────
         in_supply = False
         in_demand = False
         zone_score_bearish = 0.0
         zone_score_bullish = 0.0
-        # Stop is placed FIXED_STOP_BUFFER_PTS beyond the zone boundary
-        stop_pts_bearish = FIXED_STOP_BUFFER_PTS
-        stop_pts_bullish = FIXED_STOP_BUFFER_PTS
+        stop_pts_bearish = fallback_stop_pts
+        stop_pts_bullish = fallback_stop_pts
 
         if zone_state is not None:
             if zone_state.nearest_supply and zone_state.nearest_supply.is_valid:
                 s = zone_state.nearest_supply
                 if s.bottom - atr * 0.05 <= current_price <= s.top + atr * 0.05:
                     in_supply = True
-                    zone_score_bearish = _zone_quality_score(s, current_bar_idx)
-                    stop_pts_bearish = max(FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
+                    zone_score_bearish = _zone_quality_score(s, current_bar_idx, max_zone_width_pts)
+                    # True risk = full zone width + buffer (stop lives beyond far edge)
+                    stop_pts_bearish = (s.top - s.bottom) + stop_buffer_pts
                 else:
                     prox = max(0.0, 1.0 - abs(current_price - s.midpoint) / max(atr, 1.0))
                     zone_score_bearish = prox * 0.5
@@ -178,8 +189,8 @@ class OrderZoneEngine:
                 d = zone_state.nearest_demand
                 if d.bottom - atr * 0.05 <= current_price <= d.top + atr * 0.05:
                     in_demand = True
-                    zone_score_bullish = _zone_quality_score(d, current_bar_idx)
-                    stop_pts_bullish = max(FIXED_STOP_BUFFER_PTS, MIN_STOP_PTS)
+                    zone_score_bullish = _zone_quality_score(d, current_bar_idx, max_zone_width_pts)
+                    stop_pts_bullish = (d.top - d.bottom) + stop_buffer_pts
                 else:
                     prox = max(0.0, 1.0 - abs(current_price - d.midpoint) / max(atr, 1.0))
                     zone_score_bullish = prox * 0.5
@@ -190,14 +201,23 @@ class OrderZoneEngine:
         atr_score_bearish = 0.0 if atr_state.atr_short_exhausted else atr_base
         atr_score_bullish = 0.0 if atr_state.atr_long_exhausted  else atr_base
 
-        # ── 3. Weighted confluence scores ─────────────────────────────────────
+        # ── 3. Harmonic W/M pattern (directional) ────────────────────────────
+        # M pattern = double-top → bearish confluence
+        # W pattern = double-bottom → bullish confluence
+        hs = harmonic_state if harmonic_state is not None else HARMONIC_NONE
+        harmonic_score_bearish = float(hs.m_score)
+        harmonic_score_bullish = float(hs.w_score)
+
+        # ── 4. Weighted confluence scores ─────────────────────────────────────
         raw_bearish = (
-            zone_score_bearish * self.zone_weight
-            + atr_score_bearish * self.atr_weight
+            zone_score_bearish     * self.zone_weight
+            + harmonic_score_bearish * self.harmonic_weight
+            + atr_score_bearish      * self.atr_weight
         )
         raw_bullish = (
-            zone_score_bullish * self.zone_weight
-            + atr_score_bullish * self.atr_weight
+            zone_score_bullish     * self.zone_weight
+            + harmonic_score_bullish * self.harmonic_weight
+            + atr_score_bullish      * self.atr_weight
         )
 
         bearish_score = float(np.clip(raw_bearish / self._total_weight, 0.0, 1.0))
@@ -238,10 +258,12 @@ class OrderZoneEngine:
         )
 
         component_scores = {
-            "zone_bearish":    zone_score_bearish,
-            "zone_bullish":    zone_score_bullish,
-            "atr_room_bearish": atr_score_bearish,
-            "atr_room_bullish": atr_score_bullish,
+            "zone_bearish":      zone_score_bearish,
+            "zone_bullish":      zone_score_bullish,
+            "harmonic_bearish":  harmonic_score_bearish,
+            "harmonic_bullish":  harmonic_score_bullish,
+            "atr_room_bearish":  atr_score_bearish,
+            "atr_room_bullish":  atr_score_bullish,
         }
 
         return OrderZoneState(

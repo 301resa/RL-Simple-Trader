@@ -1,6 +1,10 @@
 # environment_config.yaml
 # ========================
 # Trading environment, session, and account settings.
+#
+# All price-based thresholds are expressed in TICKS (per-instrument).
+# Switch instruments by changing `instruments.default` — every downstream
+# module reads geometry from utils.instrument.InstrumentProfile.
 
 instruments:
   allowed: [ES, MES, NQ, MNQ]
@@ -22,23 +26,65 @@ session:
   globex_start:  "18:00"        # Globex re-open after settlement break
   globex_end:    "09:15"        # Globex close before RTH open
 
+# Per-instrument tick-based profiles.
+# Geometry keys ending in _ticks are multiplied by tick_size at load time
+# (utils.instrument.load_instrument_profile) to produce point values.
+#
+# Sizing tiers:
+#   Minis (ES/NQ)   — integer contracts only, capped at 2
+#   Micros (MES/MNQ) — integer contracts only, higher tiers allowed
 contracts:
   ES:
-    micro_point_value: 50.0     # ES = $50 per point
+    micro_point_value: 50.0        # $ per point per contract
     tick_size: 0.25
     tick_value: 12.50
+    stop_buffer_ticks: 6           # 1.5 pts beyond far zone edge
+    min_target_ticks: 12           # 3.0 pts minimum TP distance
+    jitter_ticks: 8                # 2.0 pts augmentation jitter
+    min_zone_ticks: 4              # reject zones < 1.0 pt
+    max_zone_ticks: 40             # reject zones > 10.0 pts
+    fallback_stop_ticks: 12        # 3.0 pts emergency stop
+    contract_tiers: [1, 2]
+    confluence_tier_thresholds: [0.75]
+
   MES:
-    micro_point_value: 5.0      # MES = $5 per point (micro)
+    micro_point_value: 5.0
     tick_size: 0.25
     tick_value: 1.25
+    stop_buffer_ticks: 6
+    min_target_ticks: 12
+    jitter_ticks: 8
+    min_zone_ticks: 4
+    max_zone_ticks: 40
+    fallback_stop_ticks: 12
+    contract_tiers: [1, 2, 3, 5, 8]
+    confluence_tier_thresholds: [0.60, 0.70, 0.80, 0.90]
+
   NQ:
     micro_point_value: 20.0
     tick_size: 0.25
     tick_value: 5.0
+    stop_buffer_ticks: 24          # 6.0 pts (NQ ATR ≈ 4× ES)
+    min_target_ticks: 48           # 12.0 pts
+    jitter_ticks: 32               # 8.0 pts
+    min_zone_ticks: 16             # 4.0 pts
+    max_zone_ticks: 160            # 40.0 pts
+    fallback_stop_ticks: 48        # 12.0 pts
+    contract_tiers: [1, 2]
+    confluence_tier_thresholds: [0.75]
+
   MNQ:
     micro_point_value: 2.0
     tick_size: 0.25
     tick_value: 0.50
+    stop_buffer_ticks: 24
+    min_target_ticks: 48
+    jitter_ticks: 32
+    min_zone_ticks: 16
+    max_zone_ticks: 160
+    fallback_stop_ticks: 48
+    contract_tiers: [1, 2, 3, 5, 8]
+    confluence_tier_thresholds: [0.60, 0.70, 0.80, 0.90]
 
 account:
   initial_balance: 100000.0      # starting account equity ($)

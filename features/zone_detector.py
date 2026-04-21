@@ -108,7 +108,15 @@ class ZoneDetector:
     max_zone_age_bars : int
         Expire a zone after this many bars regardless of touches.
     zone_buffer_atr_pct : float
-        Buffer beyond zone boundary required for a breakout to invalidate.
+        Buffer beyond zone boundary required for a close-based breakout to invalidate.
+        (Legacy — superseded by break_buffer_pts when a non-zero value is passed.)
+    break_buffer_pts : float
+        Wick-break threshold in points. A bar whose low drops more than this many points
+        below a demand zone's bottom — or whose high rises more than this many points
+        above a supply zone's top — invalidates the zone outright (cut-through rule).
+        A zero or negative value disables the wick-break path and falls back to the
+        close-based ATR-pct rule. Typically set to the instrument's stop_buffer_pts
+        (the same level at which a just-entered trade would be stopped out).
     """
 
     def __init__(
@@ -121,6 +129,7 @@ class ZoneDetector:
         max_zones_per_side: int = 5,
         max_zone_age_bars: int = 200,
         zone_buffer_atr_pct: float = 0.02,
+        break_buffer_pts: float = 0.0,
     ) -> None:
         self.consolidation_min_bars = consolidation_min_bars
         self.consolidation_max_bars = consolidation_max_bars
@@ -130,6 +139,7 @@ class ZoneDetector:
         self.max_zones_per_side = max_zones_per_side
         self.max_zone_age_bars = max_zone_age_bars
         self.zone_buffer_atr_pct = zone_buffer_atr_pct
+        self.break_buffer_pts = float(break_buffer_pts)
 
         self._supply_zones: List[Zone] = []
         self._demand_zones: List[Zone] = []
@@ -215,8 +225,18 @@ class ZoneDetector:
         bar_low: float,
         atr: float,
     ) -> None:
-        """Invalidate zones that are broken through, over-touched, or too old."""
-        buffer = atr * self.zone_buffer_atr_pct
+        """Invalidate zones that are broken through, over-touched, or too old.
+
+        Break (cut-through) rule — the bar that "cuts through" the zone kills it:
+          SUPPLY: bar_high > zone.top    + break_buffer_pts  (deep wick pierce above)
+                  OR bar_close > zone.top                    (close past the top edge)
+          DEMAND: bar_low  < zone.bottom - break_buffer_pts  (deep wick pierce below)
+                  OR bar_close < zone.bottom                 (close past the bottom edge)
+
+        If break_buffer_pts is 0.0 (legacy path) only the ATR-pct close rule applies.
+        """
+        atr_buffer = atr * self.zone_buffer_atr_pct
+        pierce_pts = self.break_buffer_pts
 
         for zone in self._supply_zones:
             if not zone.is_valid:
@@ -224,12 +244,18 @@ class ZoneDetector:
             if current_bar_idx - zone.bar_formed_idx > self.max_zone_age_bars:
                 zone.is_valid = False
                 continue
+            # ── Cut-through check (runs before sweep so a pierce kills the zone) ──
+            if pierce_pts > 0.0:
+                if bar_high > zone.top + pierce_pts or current_price > zone.top:
+                    zone.is_valid = False
+                    continue
+            elif current_price > zone.top + atr_buffer:
+                zone.is_valid = False
+                continue
             # Sweep uses bar HIGH — wick-and-return setups must be captured.
             if not zone.was_swept and bar_high >= zone.top:
                 zone.was_swept = True
-            if current_price > zone.top + buffer:       # sustained breakout — zone dead
-                zone.is_valid = False
-            elif zone.bottom <= current_price <= zone.top:
+            if zone.bottom <= current_price <= zone.top:
                 zone.touches += 1
                 if zone.touches > self.max_zone_touches:
                     zone.is_valid = False
@@ -240,12 +266,18 @@ class ZoneDetector:
             if current_bar_idx - zone.bar_formed_idx > self.max_zone_age_bars:
                 zone.is_valid = False
                 continue
+            # ── Cut-through check ────────────────────────────────────────────────
+            if pierce_pts > 0.0:
+                if bar_low < zone.bottom - pierce_pts or current_price < zone.bottom:
+                    zone.is_valid = False
+                    continue
+            elif current_price < zone.bottom - atr_buffer:
+                zone.is_valid = False
+                continue
             # Sweep uses bar LOW — wick-and-return setups must be captured.
             if not zone.was_swept and bar_low <= zone.bottom:
                 zone.was_swept = True
-            if current_price < zone.bottom - buffer:    # sustained breakout — zone dead
-                zone.is_valid = False
-            elif zone.bottom <= current_price <= zone.top:
+            if zone.bottom <= current_price <= zone.top:
                 zone.touches += 1
                 if zone.touches > self.max_zone_touches:
                     zone.is_valid = False

@@ -41,6 +41,7 @@ from pathlib import Path
 
 import yaml
 
+from utils.instrument import load_instrument_profile
 from utils.logger import configure_logging, get_logger, tee_stdout
 from utils.metrics_printer import init_console
 from utils.validators import validate_all_configs, assert_instrument_allowed
@@ -119,6 +120,7 @@ def build_components(
     from environment.reward_calculator import RewardCalculator
     from environment.trading_env import TradingEnv
     from features.atr_calculator import ATRCalculator
+    from features.harmonic_detector import HarmonicDetector
     from features.observation_builder import ObservationBuilder
     from features.order_zone_engine import OrderZoneEngine
     from features.zone_detector import ZoneDetector
@@ -133,6 +135,11 @@ def build_components(
     instrument = env_cfg.get("instruments", {}).get("default", "NQ")
     allowed = env_cfg.get("instruments", {}).get("allowed", ["NQ", "ES", "MNQ", "MES"])
     assert_instrument_allowed(instrument, allowed)
+
+    # All price-based thresholds (stop buffer, zone widths, jitter, contract tiers)
+    # live on the instrument profile — switch instruments by changing
+    # environment_config.instruments.default.
+    instrument_profile = load_instrument_profile(env_cfg)
 
     # ── Data ─────────────────────────────────────────────────
     session_cfg = env_cfg.get("session", {})
@@ -227,6 +234,7 @@ def build_components(
         max_zone_age_bars=zones_cfg.get("max_zone_age_bars", 200),
         max_zone_touches=zones_cfg.get("max_zone_touches", 3),
         zone_buffer_atr_pct=zones_cfg.get("zone_buffer_atr_pct", 0.02),
+        break_buffer_pts=instrument_profile.stop_buffer_pts,
     )
 
     # ── Order Zone Engine ─────────────────────────────────────
@@ -235,7 +243,21 @@ def build_components(
         weights=oz_cfg.get("weights"),
         min_confluence_score=oz_cfg.get("min_confluence_score", 0.60),
         min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 1.5),
+        max_zone_pts=instrument_profile.max_zone_pts,
+        stop_buffer_pts=instrument_profile.stop_buffer_pts,
+        fallback_stop_pts=instrument_profile.fallback_stop_pts,
     )
+
+    # ── Harmonic Detector ─────────────────────────────────────
+    harm_cfg = feat_cfg.get("harmonic", {})
+    harmonic_detector = HarmonicDetector(
+        lookback_bars=harm_cfg.get("lookback_bars", 40),
+        pivot_window=harm_cfg.get("pivot_window", 3),
+        symmetry_tol_atr_pct=harm_cfg.get("symmetry_tol_atr_pct", 0.12),
+        min_peak_atr_pct=harm_cfg.get("min_peak_atr_pct", 0.15),
+        min_separation_bars=harm_cfg.get("min_separation_bars", 5),
+        recency_bars=harm_cfg.get("recency_bars", 6),
+    ) if harm_cfg.get("enabled", True) else None
 
     # ── Observation Builder ───────────────────────────────────
     obs_cfg = env_cfg.get("observation", {})
@@ -244,6 +266,8 @@ def build_components(
         normalize_observations=obs_cfg.get("normalize_observations", True),
         lookback_bars=obs_cfg.get("lookback_bars", 20),
         max_zone_age_bars=zones_cfg.get("max_zone_age_bars", 300),
+        max_zone_pts=instrument_profile.max_zone_pts,
+        min_zone_pts=instrument_profile.min_zone_pts,
     )
 
     # ── Action Masker ─────────────────────────────────────────
@@ -263,29 +287,29 @@ def build_components(
     account_cfg = env_cfg.get("account", {})
     sizing_cfg = risk_cfg.get("sizing", {})
     trail_cfg = risk_cfg.get("trailing", {})
-    contracts_cfg = env_cfg.get("contracts", {}).get(instrument, {})
     real_capital = float(account_cfg.get("initial_balance", 2500))
-    point_value = float(contracts_cfg.get("micro_point_value", 2.0))
+    point_value = instrument_profile.point_value
 
     def make_position_manager():
         return PositionManager(
             real_capital=real_capital,
             risk_per_trade_pct=sizing_cfg.get("risk_per_trade_pct", 0.01),
-            min_contracts=sizing_cfg.get("min_contracts", 0.5),
-            max_contracts=sizing_cfg.get("max_contracts", 2.5),
+            min_contracts=sizing_cfg.get("min_contracts", 1),
+            max_contracts=sizing_cfg.get("max_contracts", 2),
             point_value=point_value,
             max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
             trail_activate_r=trail_cfg.get("activate_at_r", 2.0),
             trail_aggressive_r=trail_cfg.get("trail_aggressively_at_r", 4.0),
             trail_lock_in_r=trail_cfg.get("lock_in_r_at_trail", 2.0),
             max_daily_loss_r=daily_lim_cfg.get("max_daily_loss_r", 3.0),
-            max_daily_loss_dollars=daily_lim_cfg.get("max_daily_loss_dollars", 1000.0),
+            max_daily_loss_dollars=daily_lim_cfg.get("max_daily_loss_dollars", 3000.0),
             max_drawdown_r=risk_cfg.get("position", {}).get("max_drawdown_r", 5.0),
             pause_bars_after_loss_streak=daily_lim_cfg.get("pause_bars_after_loss_streak", 6),
             loss_streak_threshold=daily_lim_cfg.get("max_consecutive_losses_before_pause", 3),
             zone_buffer_atr_pct=risk_cfg.get("stop_loss", {}).get("zone_buffer_atr_pct", 0.03),
-            contract_tiers=sizing_cfg.get("contract_tiers"),
-            confluence_tier_thresholds=sizing_cfg.get("confluence_tier_thresholds"),
+            contract_tiers=instrument_profile.contract_tiers,
+            confluence_tier_thresholds=instrument_profile.confluence_tier_thresholds,
+            max_zone_pts=instrument_profile.max_zone_pts,
         )
 
     # ── Reward Calculator ─────────────────────────────────────
@@ -315,7 +339,7 @@ def build_components(
         # parallel workers apply independent jitter sequences every episode.
         augmentor = None if is_eval else OHLCVAugmentor(
             rng=np.random.default_rng(env_seed),
-            max_jitter_pts=float(aug_cfg.get("max_jitter_pts", 2.0)),
+            max_jitter_pts=instrument_profile.jitter_pts,
             trend_scale=float(aug_cfg.get("trend_scale",    0.15)),
         )
         return TradingEnv(
@@ -325,20 +349,21 @@ def build_components(
             reward_calculator=reward_calculator,
             observation_builder=observation_builder,
             atr_calculator=atr_calculator,
-            zone_detector=ZoneDetector(**{
-                k: zones_cfg.get(k, v)
-                for k, v in _ZONE_DETECTOR_DEFAULTS.items()
-            }),
+            zone_detector=ZoneDetector(
+                **{k: zones_cfg.get(k, v) for k, v in _ZONE_DETECTOR_DEFAULTS.items()},
+                break_buffer_pts=instrument_profile.stop_buffer_pts,
+            ),
             order_zone_engine=order_zone_engine,
             action_masker=action_masker,
+            instrument=instrument_profile,
             rth_start=session_start,
             rth_end=session_end,
             no_entry_last_n_bars=session_risk_cfg.get("no_entry_last_n_bars", 3),
             early_terminate_on_max_dd=env_cfg.get("episode", {}).get("early_termination_on_max_drawdown", True),
-            point_value=point_value,
             bar_minutes=bar_minutes,
             curriculum_filter_fn=None,
             augmentor=augmentor,
+            harmonic_detector=harmonic_detector,
             session_type=session_type,
             random_start=not is_eval,
             seed=env_seed,
@@ -740,6 +765,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     from environment.reward_calculator import RewardCalculator
     from environment.trading_env import TradingEnv
     from features.atr_calculator import ATRCalculator
+    from features.harmonic_detector import HarmonicDetector
     from features.observation_builder import ObservationBuilder
     from features.order_zone_engine import OrderZoneEngine
     from features.zone_detector import ZoneDetector
@@ -788,7 +814,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     account_cfg  = env_cfg.get("account", {})
     sizing_cfg   = risk_cfg.get("sizing", {})
     trail_cfg    = risk_cfg.get("trailing", {})
-    contracts_cfg= env_cfg.get("contracts", {}).get(instrument, {})
+    instrument_profile = load_instrument_profile(env_cfg)
 
     data_loader = DataLoader(
         data_dir=args.data,
@@ -866,7 +892,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
 
     # ── Shared component factories ────────────────────────────
     real_capital = float(account_cfg.get("initial_balance", 2500))
-    point_value  = float(contracts_cfg.get("micro_point_value", 2.0))
+    point_value  = instrument_profile.point_value
     session_start= session_cfg.get("rth_start_utc", "08:30")
     session_end  = session_cfg.get("rth_end_utc",   "15:00")
     session_type = session_cfg.get("session_type", "RTH").upper()
@@ -878,12 +904,26 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         weights=oz_cfg.get("weights"),
         min_confluence_score=oz_cfg.get("min_confluence_score", 0.60),
         min_rr_ratio=risk_cfg.get("take_profit", {}).get("min_rr_ratio", 1.5),
+        max_zone_pts=instrument_profile.max_zone_pts,
+        stop_buffer_pts=instrument_profile.stop_buffer_pts,
+        fallback_stop_pts=instrument_profile.fallback_stop_pts,
     )
+    harm_cfg = feat_cfg.get("harmonic", {})
+    harmonic_detector = HarmonicDetector(
+        lookback_bars=harm_cfg.get("lookback_bars", 40),
+        pivot_window=harm_cfg.get("pivot_window", 3),
+        symmetry_tol_atr_pct=harm_cfg.get("symmetry_tol_atr_pct", 0.12),
+        min_peak_atr_pct=harm_cfg.get("min_peak_atr_pct", 0.15),
+        min_separation_bars=harm_cfg.get("min_separation_bars", 5),
+        recency_bars=harm_cfg.get("recency_bars", 6),
+    ) if harm_cfg.get("enabled", True) else None
     observation_builder = ObservationBuilder(
         clip_value=obs_cfg.get("clip_observations", 10.0),
         normalize_observations=obs_cfg.get("normalize_observations", True),
         lookback_bars=obs_cfg.get("lookback_bars", 20),
         max_zone_age_bars=zones_cfg.get("max_zone_age_bars", 300),
+        max_zone_pts=instrument_profile.max_zone_pts,
+        min_zone_pts=instrument_profile.min_zone_pts,
     )
     action_masker = ActionMasker(
         atr_exhaustion_threshold=atr_gate_cfg.get("block_entries_above_pct", 0.95),
@@ -894,27 +934,33 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     )
     action_masker.max_pending_order_bars = session_risk.get("max_pending_order_bars", 5)
     reward_calculator = RewardCalculator.from_config(reward_cfg)
-    train_augmentor   = OHLCVAugmentor(rng=np.random.default_rng(agent_cfg.get("seed", 42)))
+    aug_cfg = agent_cfg.get("augmentation", {})
+    train_augmentor   = OHLCVAugmentor(
+        rng=np.random.default_rng(agent_cfg.get("seed", 42)),
+        max_jitter_pts=instrument_profile.jitter_pts,
+        trend_scale=float(aug_cfg.get("trend_scale", 0.15)),
+    )
 
     def make_position_manager():
         return PositionManager(
             real_capital=real_capital,
             risk_per_trade_pct=sizing_cfg.get("risk_per_trade_pct", 0.01),
-            min_contracts=sizing_cfg.get("min_contracts", 0.5),
-            max_contracts=sizing_cfg.get("max_contracts", 2.5),
+            min_contracts=sizing_cfg.get("min_contracts", 1),
+            max_contracts=sizing_cfg.get("max_contracts", 2),
             point_value=point_value,
             max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
             trail_activate_r=trail_cfg.get("activate_at_r", 2.0),
             trail_aggressive_r=trail_cfg.get("trail_aggressively_at_r", 4.0),
             trail_lock_in_r=trail_cfg.get("lock_in_r_at_trail", 2.0),
             max_daily_loss_r=daily_lim_cfg.get("max_daily_loss_r", 3.0),
-            max_daily_loss_dollars=daily_lim_cfg.get("max_daily_loss_dollars", 1000.0),
+            max_daily_loss_dollars=daily_lim_cfg.get("max_daily_loss_dollars", 3000.0),
             max_drawdown_r=risk_cfg.get("position", {}).get("max_drawdown_r", 5.0),
             pause_bars_after_loss_streak=daily_lim_cfg.get("pause_bars_after_loss_streak", 6),
             loss_streak_threshold=daily_lim_cfg.get("max_consecutive_losses_before_pause", 3),
             zone_buffer_atr_pct=risk_cfg.get("stop_loss", {}).get("zone_buffer_atr_pct", 0.03),
-            contract_tiers=sizing_cfg.get("contract_tiers"),
-            confluence_tier_thresholds=sizing_cfg.get("confluence_tier_thresholds"),
+            contract_tiers=instrument_profile.contract_tiers,
+            confluence_tier_thresholds=instrument_profile.confluence_tier_thresholds,
+            max_zone_pts=instrument_profile.max_zone_pts,
         )
 
     def make_env(day_list, is_eval=False, worker_seed_offset=0):
@@ -925,19 +971,21 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             reward_calculator=reward_calculator,
             observation_builder=observation_builder,
             atr_calculator=atr_calculator,
-            zone_detector=ZoneDetector(**{
-                k: zones_cfg.get(k, v) for k, v in _ZONE_DETECTOR_DEFAULTS.items()
-            }),
+            zone_detector=ZoneDetector(
+                **{k: zones_cfg.get(k, v) for k, v in _ZONE_DETECTOR_DEFAULTS.items()},
+                break_buffer_pts=instrument_profile.stop_buffer_pts,
+            ),
             order_zone_engine=order_zone_engine,
             action_masker=action_masker,
+            instrument=instrument_profile,
             rth_start=session_start,
             rth_end=session_end,
             no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
             early_terminate_on_max_dd=env_cfg.get("episode", {}).get("early_termination_on_max_drawdown", True),
-            point_value=point_value,
             bar_minutes=bar_minutes,
             curriculum_filter_fn=None,
             augmentor=None if is_eval else train_augmentor,
+            harmonic_detector=harmonic_detector,
             session_type=session_type,
             random_start=not is_eval,
             seed=agent_cfg.get("seed", 42) + worker_seed_offset + (100 if is_eval else 0),

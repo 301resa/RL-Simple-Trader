@@ -1,26 +1,24 @@
 # risk_config.yaml
 # =================
 # Position sizing, stop loss, take profit, and risk guardrail settings.
+#
+# Per-instrument geometry (contract tiers, confluence thresholds, stop
+# buffers, min-target, zone-width bands) lives in environment_config.yaml
+# under contracts.<SYMBOL> and is loaded via utils.instrument.
 
 position:
   max_drawdown_r: 5.0            # episode ends if cumulative loss exceeds this R
 
 sizing:
   risk_per_trade_pct: 0.01       # risk 1% of account per trade
-  min_contracts: 0.5             # fractional micro contracts allowed
-  max_contracts: 2.5
-  contract_tiers: [0.5, 1.0, 1.5, 2.0, 2.5]   # fractional tiers — finer granularity than integer sizes
-  # Confluence score thresholds that gate each tier (4 thresholds → 5 tiers).
-  # In-zone confluence is now graduated (0.55–1.00) so middle tiers are reachable.
-  # score < t[0] → 0.5, < t[1] → 1.0, < t[2] → 1.5, < t[3] → 2.0, else → 2.5
-  confluence_tier_thresholds: [0.60, 0.70, 0.80, 0.90]
+  min_contracts: 1               # integer only — no fractional contracts
+  max_contracts: 2               # hard ceiling for minis (instrument profile may cap lower)
 
 stop_loss:
-  zone_buffer_atr_pct: 0.03     # buffer beyond zone top/bottom (3% of ATR)
   allow_stop_widening: false     # HARD RULE: never widen a stop once placed
 
 take_profit:
-  min_rr_ratio: 1.5              # minimum 1.5:1 R:R required to enter
+  min_rr_ratio: 1.05              # minimum R:R required to enter
 
 trailing:
   activate_at_r: 1.2             # activate trailing stop at 1.2R unrealised profit
@@ -33,12 +31,12 @@ atr_gate:
 
 daily_limits:
   max_daily_loss_r: 3.0          # stop trading after -3R on the day
-  max_daily_loss_dollars: 1000.0 # hard $ cap (whichever limit triggers first)
-  max_trades_per_day: 999        # no hard cap — daily loss limit is the natural brake
+  max_daily_loss_dollars: 3000.0 # hard $ cap (whichever limit triggers first)
+  max_trades_per_day: 10        # no hard cap — daily loss limit is the natural brake
   max_consecutive_losses_before_pause: 3
   pause_bars_after_loss_streak: 30  # bars to sit out after loss streak
 
 session:
-  no_entry_last_n_bars: 3        # no new entries in last 3 bars of session
-  min_bars_between_trades: 3     # minimum bars between trade close and next entry (15 min @ 5-min bars)
-  max_pending_order_bars: 5      # cancel pending limit orders older than this many bars (25 min @ 5-min bars)
+  no_entry_last_n_bars: 4        # no new entries in last 3 bars of session
+  min_bars_between_trades: 6    # minimum bars between trade close and next entry (30 min @ 5-min bars)
+  max_pending_order_bars: 24    # cancel pending limit orders older than this many bars (25 min @ 5-min bars)

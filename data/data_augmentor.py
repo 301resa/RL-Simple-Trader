@@ -94,7 +94,6 @@ class OHLCVAugmentor:
         df = bars.copy()
 
         # Extract all OHLC as one (n, 4) float64 array — O=0, H=1, L=2, C=3.
-        # A single extraction + single write-back replaces 12 separate .values/.iloc calls.
         ohlc = df[["open", "high", "low", "close"]].to_numpy(dtype=np.float64)
 
         # ── 1. Session-level return scaling ───────────────────

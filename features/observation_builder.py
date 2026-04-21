@@ -8,9 +8,10 @@ The observation is a flat float32 numpy array containing:
   2. ATR features (exhaustion, remaining room)                             [4]
   3. Zone features (distance, in-zone, width, age, swept — supply+demand) [10]
   4. Order zone / confluence features (score, R:R, pending order state)   [10]
-  5. Portfolio state (position, P&L, drawdown, trade counts)              [8]
-  6. Session timing + market context (elapsed, remaining, RTH flag, RTH time) [4]
-  7. Engineered features — 17 pre-computed signals:                       [17]
+  5. Harmonic pattern features (W score, M score)                         [2]
+  6. Portfolio state (position, P&L, drawdown, trade counts)              [8]
+  7. Session timing + market context (elapsed, remaining, RTH flag, RTH time) [4]
+  8. Engineered features — 17 pre-computed signals:                       [17]
        Price location (5): session drift, dist from session high/low, prior day high/low
        Momentum (4): 5-bar, 12-bar (1h), 15-bar, 30-bar log-returns
        Volatility regime (2): short/long vol ratio, avg close-in-range
@@ -21,8 +22,8 @@ The observation is a flat float32 numpy array containing:
 Note: volume is intentionally excluded — the strategy is price-structure based
 and volume data was found to add noise rather than signal.
 
-Total fixed features: 36 + 17 = 53
-Observation vector size: 60 × 4 + 53 = 293
+Total fixed features: 38 + 17 = 55
+Observation vector size: 60 × 4 + 55 = 295
 
 Zone width/age features give the agent context on zone quality — tight fresh zones
 trade differently from wide stale ones.  Wide zones (>10 pts) are zeroed out in
@@ -38,11 +39,12 @@ import numpy as np
 import pandas as pd
 
 from features.atr_calculator import ATRState
+from features.harmonic_detector import HarmonicState, HARMONIC_NONE
 from features.zone_detector import ZoneState
-from features.order_zone_engine import MAX_ZONE_WIDTH_PTS, OrderZoneState
+from features.order_zone_engine import OrderZoneState
 
 # Structured feature counts
-_N_STRUCTURED  = 36   # ATR(4) + Zone(10) + OrderZone(10) + Portfolio(8) + Session(4)
+_N_STRUCTURED  = 38   # ATR(4) + Zone(10) + OrderZone(10) + Harmonic(2) + Portfolio(8) + Session(4)
 _N_ENGINEERED  = 17   # PriceLocation(5) + Momentum(4) + VolRegime(2) + BarCharacter(1) + HTFContext(5)
 
 
@@ -68,11 +70,15 @@ class ObservationBuilder:
         clip_value: float = 10.0,
         lookback_bars: int = 60,
         max_zone_age_bars: int = 300,
+        max_zone_pts: float = 10.0,
+        min_zone_pts: float = 1.0,
     ) -> None:
         self.normalize_observations = normalize_observations
         self.clip_value = clip_value
         self.price_history_len = lookback_bars
         self._max_zone_age = float(max_zone_age_bars)
+        self._max_zone_pts = float(max_zone_pts)
+        self._min_zone_pts = float(min_zone_pts)
         # Per-episode numpy cache — populated by prepare_episode()
         self._cached_opens:  Optional[np.ndarray] = None
         self._cached_highs:  Optional[np.ndarray] = None
@@ -88,8 +94,8 @@ class ObservationBuilder:
     def obs_dim(self) -> int:
         """Total length of the observation vector (deterministic from config).
 
-        Structured features (36):
-          ATR(4) + Zone(10) + OrderZone(10) + Portfolio(8) + Session(4)
+        Structured features (38):
+          ATR(4) + Zone(10) + OrderZone(10) + Harmonic(2) + Portfolio(8) + Session(4)
         Engineered features (17):
           PriceLocation(5) + Momentum(4) + VolRegime(2) + BarCharacter(1) + HTFContext(5)
         Price window:
@@ -134,6 +140,7 @@ class ObservationBuilder:
         portfolio_state: dict,
         session_info: dict,
         pending_order: dict | None = None,
+        harmonic_state: HarmonicState | None = None,
     ) -> np.ndarray:
         """
         Build and return the observation vector for the current bar.
@@ -216,10 +223,16 @@ class ObservationBuilder:
         supply = zone_state.nearest_supply if zone_state else None
         demand = zone_state.nearest_demand if zone_state else None
 
-        if supply and (supply.top - supply.bottom) > MAX_ZONE_WIDTH_PTS:
-            supply = None
-        if demand and (demand.top - demand.bottom) > MAX_ZONE_WIDTH_PTS:
-            demand = None
+        max_zone_pts = self._max_zone_pts
+        min_zone_pts = self._min_zone_pts
+        if supply is not None:
+            w = supply.top - supply.bottom
+            if w > max_zone_pts or w < min_zone_pts:
+                supply = None
+        if demand is not None:
+            w = demand.top - demand.bottom
+            if w > max_zone_pts or w < min_zone_pts:
+                demand = None
 
         def _dist_norm(z) -> float:
             if z is None or not z.is_valid:
@@ -282,7 +295,14 @@ class ObservationBuilder:
             po_dist_norm,
         ])
 
-        # ── 5. Portfolio state ────────────────────────────────────────────────
+        # ── 5. Harmonic pattern features ──────────────────────────────────────
+        hs = harmonic_state if harmonic_state is not None else HARMONIC_NONE
+        features.extend([
+            float(np.clip(hs.w_score, 0.0, 1.0)),   # W (double-bottom) quality
+            float(np.clip(hs.m_score, 0.0, 1.0)),   # M (double-top)    quality
+        ])
+
+        # ── 6. Portfolio state ────────────────────────────────────────────────
         pos_dir = portfolio_state.get("position_direction", "FLAT")
         features.extend([
             float(portfolio_state.get("position_open", False)),
@@ -295,7 +315,7 @@ class ObservationBuilder:
             float(np.clip(portfolio_state.get("consecutive_losses", 0)       /  3.0,  0.0, 1.0)),
         ])
 
-        # ── 6. Session timing + market context ───────────────────────────────
+        # ── 7. Session timing + market context ───────────────────────────────
         # is_rth: 1 during Regular Trading Hours (09:30–16:00 ET), 0 in Globex/pre-market.
         # rth_time_pct: 0→1 across the RTH session; 0 outside RTH.
         # These let the agent distinguish pre-market range-building from RTH price action.
@@ -306,7 +326,7 @@ class ObservationBuilder:
             float(np.clip(session_info.get("rth_time_pct", 0.0), 0.0, 1.0)),
         ])
 
-        # ── 7. Engineered features (11) ───────────────────────────────────────
+        # ── 8. Engineered features ────────────────────────────────────────────
         # These replace the information previously carried by the 500-bar raw
         # window.  The zone detector still uses 500 bars internally — these
         # features give the network the same structural context in compact form.

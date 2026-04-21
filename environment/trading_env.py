@@ -36,28 +36,31 @@ from environment.position_manager import ExitReason, PositionDirection, Position
 from environment.reward_calculator import RewardCalculator, RewardBreakdown
 from features.atr_calculator import ATRCalculator, ATRState
 from features.observation_builder import ObservationBuilder
-from features.order_zone_engine import FIXED_STOP_BUFFER_PTS, MAX_ZONE_WIDTH_PTS, MIN_STOP_PTS, OrderZoneEngine, OrderZoneState
+from features.harmonic_detector import HarmonicDetector, HarmonicState, HARMONIC_NONE
+from features.order_zone_engine import OrderZoneEngine, OrderZoneState
 from features.zone_detector import ZoneDetector, ZoneState
+from utils.instrument import InstrumentProfile
 from utils.logger import get_logger
 
 log = get_logger(__name__)
 
 
-def _filter_wide_zones(zs) -> object:
-    """Return a ZoneState with wide zones (> MAX_ZONE_WIDTH_PTS) set to None.
+def _filter_zones_by_width(zs, min_width_pts: float, max_width_pts: float) -> object:
+    """Return a ZoneState with zones outside [min_width_pts, max_width_pts] set to None.
 
-    Wide zones are never traded (skipped in _place_pending_order) so their signals
-    must not influence confluence scoring or observation features.
+    Zones narrower than min are rejected (tiny block zones — no edge).
+    Zones wider than max are rejected (risk too large for the strategy).
+    Widths are absolute points, sourced from the instrument profile (ticks × tick_size),
+    so the threshold scales correctly for both ES and NQ.
     """
-    supply = zs.nearest_supply if (
-        zs.nearest_supply is not None
-        and (zs.nearest_supply.top - zs.nearest_supply.bottom) <= MAX_ZONE_WIDTH_PTS
-    ) else None
-    demand = zs.nearest_demand if (
-        zs.nearest_demand is not None
-        and (zs.nearest_demand.top - zs.nearest_demand.bottom) <= MAX_ZONE_WIDTH_PTS
-    ) else None
-    return ZoneState(nearest_supply=supply, nearest_demand=demand)
+    def _ok(zone):
+        if zone is None:
+            return None
+        w = zone.top - zone.bottom
+        if w < min_width_pts or w > max_width_pts:
+            return None
+        return zone
+    return ZoneState(nearest_supply=_ok(zs.nearest_supply), nearest_demand=_ok(zs.nearest_demand))
 
 
 def _freeze_zone_state(zs) -> object:
@@ -105,8 +108,8 @@ class TradingEnv(gym.Env):
         Block entries in last N bars of session.
     early_terminate_on_max_dd : bool
         End episode immediately on max drawdown breach.
-    point_value : float
-        Dollar value per point per micro contract.
+    instrument : InstrumentProfile
+        Tick-based per-instrument geometry (stop buffer, zone widths, etc.).
     curriculum_filter_fn : Optional[callable]
         If provided, called with (date, daily_bar) → bool.
         Returns True if this day should be included in the current
@@ -139,14 +142,15 @@ class TradingEnv(gym.Env):
         zone_detector: ZoneDetector,
         order_zone_engine: OrderZoneEngine,
         action_masker: ActionMasker,
+        instrument: InstrumentProfile,
         rth_start: str = "09:30",
         rth_end: str = "16:00",
         no_entry_last_n_bars: int = 3,
         early_terminate_on_max_dd: bool = True,
-        point_value: float = 2.0,
         bar_minutes: int = 5,
         curriculum_filter_fn: Optional[Any] = None,
         augmentor: Optional[OHLCVAugmentor] = None,
+        harmonic_detector: Optional[HarmonicDetector] = None,
         session_type: str = "RTH",
         random_start: bool = False,
         seed: Optional[int] = None,
@@ -163,6 +167,7 @@ class TradingEnv(gym.Env):
         self.zone_detector = zone_detector
         self.order_zone_engine = order_zone_engine
         self.action_masker = action_masker
+        self.instrument = instrument
         self.rth_start = rth_start
         self.rth_end = rth_end
         # Pre-compute RTH time constants once — avoids pd.Timestamp allocation per step
@@ -176,10 +181,10 @@ class TradingEnv(gym.Env):
         self.early_terminate_on_max_dd = early_terminate_on_max_dd
         # Read from action_masker if available, else default 5 bars (25 min for 5-min bars)
         self._max_pending_order_bars: int = getattr(action_masker, "max_pending_order_bars", 5)
-        self.point_value = point_value
         self.bar_minutes = bar_minutes
         self.curriculum_filter_fn = curriculum_filter_fn
         self.augmentor = augmentor
+        self.harmonic_detector = harmonic_detector
         self.session_type = session_type.upper()
         self.random_start = random_start
         self.zone_lookback_bars = zone_lookback_bars
@@ -401,11 +406,23 @@ class TradingEnv(gym.Env):
 
             # Zone detector uses full history-extended context
             combined_idx = self._combined_session_offset + bar_idx
+
             zone_s = self.zone_detector.scan_and_update(
                 bars=self._combined_bars,
                 atr_series=self._combined_atr_series,
                 current_bar_idx=combined_idx,
             )
+
+            # W/M harmonic pattern detection (optional — None if detector not provided)
+            harm_s: HarmonicState = HARMONIC_NONE
+            if self.harmonic_detector is not None:
+                harm_s = self.harmonic_detector.detect(
+                    highs=_np_high,
+                    lows=_np_low,
+                    current_bar_idx=combined_idx,
+                    atr=atr_s.atr_daily,
+                )
+
             # Filter wide zones before scoring — agent cannot trade them, so
             # confluence scores must not reflect their presence.
             current_price = float(_np_close[combined_idx])
@@ -413,8 +430,13 @@ class TradingEnv(gym.Env):
                 bars=self._combined_bars,
                 current_bar_idx=combined_idx,
                 atr_state=atr_s,
-                zone_state=_filter_wide_zones(zone_s),
+                zone_state=_filter_zones_by_width(
+                    zone_s,
+                    self.instrument.min_zone_pts,
+                    self.instrument.max_zone_pts,
+                ),
                 current_price=current_price,
+                harmonic_state=harm_s,
             )
             # Freeze ZoneState: Zone objects in the detector's lists are mutable
             # and will be updated by future bars — snapshot them cheaply with
@@ -422,9 +444,10 @@ class TradingEnv(gym.Env):
             # ATRState and OrderZoneState are created fresh each iteration → safe to
             # store directly with no copy.
             self._precomputed_states.append({
-                "atr": atr_s,
-                "zone": _freeze_zone_state(zone_s),
-                "oz": oz_s,
+                "atr":      atr_s,
+                "zone":     _freeze_zone_state(zone_s),
+                "oz":       oz_s,
+                "harmonic": harm_s,
             })
 
         # Build initial observation
@@ -472,11 +495,33 @@ class TradingEnv(gym.Env):
                     > self._max_pending_order_bars):
             self._pending_order = None
 
+        # ── Cancel on zone cut-through ────────────────────────
+        # If the current bar pierces the zone's stop level before the limit fills,
+        # the zone is invalidated — cancel the pending so we don't enter-and-stop
+        # on the same candle.  Runs before the fill check.
+        if (self._pending_order is not None
+                and not self.position_manager.state.is_open
+                and self._pending_zone_cut_through(current_high, current_low)):
+            log.debug(
+                "Pending order cancelled — zone cut through",
+                direction="LONG" if self._pending_order["direction"] == 1 else "SHORT",
+                stop_price=self._pending_order["stop_price"],
+                bar_low=current_low, bar_high=current_high,
+            )
+            self._pending_order = None
+
         # ── Check pending limit order fill ────────────────────
         # Done before action processing so the fill reward is computed this bar.
+        # The fill path enforces an IN-BAR invariant: a pending limit can only
+        # fill when bar_low ≤ limit_price ≤ bar_high.  Both _check_pending_fill
+        # and _open_from_pending re-check this — the open is refused otherwise.
         if self._pending_order is not None and not self.position_manager.state.is_open:
             if self._check_pending_fill(current_high, current_low):
-                self._open_from_pending(current_bar_idx=self._current_step)
+                self._open_from_pending(
+                    current_bar_idx=self._current_step,
+                    bar_high=current_high,
+                    bar_low=current_low,
+                )
 
         # ── Validate action against mask ──────────────────────
         # Compute portfolio_state once and reuse for both mask validation and reward.
@@ -498,11 +543,13 @@ class TradingEnv(gym.Env):
             self._peak_unrealised_r = unrealised_r
 
         if action == Action.ENTER_SHORT:
-            # Cancel any pending, then place new pending limit at zone midpoint
-            self._pending_order = None
+            # Replacement policy lives inside _place_pending_order: a new order at
+            # the same direction + same limit price as the existing pending is
+            # rejected (preserving the original placed_bar_idx / expiry timer);
+            # a new order in a different direction or at a different price
+            # overwrites.  If no valid zone exists, the existing pending is kept.
             self._place_pending_order(direction=-1, current_price=current_price, atr_state=atr_state)
         elif action == Action.ENTER_LONG:
-            self._pending_order = None
             self._place_pending_order(direction=1, current_price=current_price, atr_state=atr_state)
         elif action == Action.EXIT:
             # Cancel pending order when flat, or close open position below
@@ -660,6 +707,7 @@ class TradingEnv(gym.Env):
         atr_state        = states["atr"]
         zone_state       = states["zone"]
         order_zone_state = states["oz"]
+        harmonic_state   = states.get("harmonic", HARMONIC_NONE)
 
         self._current_atr_state     = atr_state
         self._last_zone_state       = zone_state
@@ -700,6 +748,7 @@ class TradingEnv(gym.Env):
             portfolio_state=portfolio_state,
             session_info=session_info,
             pending_order=self._pending_order,
+            harmonic_state=harmonic_state,
         )
 
         self._last_obs = obs
@@ -786,60 +835,93 @@ class TradingEnv(gym.Env):
         self, direction: int, current_price: float, atr_state: ATRState
     ) -> None:
         """
-        Compute limit price (zone edge), stop, target and store a pending limit
-        order.
+        Compute limit price (near zone edge), stop (beyond far edge), target,
+        and store a pending limit order.
 
-        Entry geometry (sweep-based — order placed only AFTER liquidity has been swept):
-          SHORT — limit at supply.top   (re-entry as price drops back below sweep level)
-          LONG  — limit at demand.bottom (re-entry as price rallies back above sweep level)
+        Entry geometry (classic order-zone trade — enter at first touch of zone):
+          SHORT — limit at supply.bottom (near edge, closer to current price from below)
+          LONG  — limit at demand.top    (near edge, closer to current price from above)
 
-        Stop geometry:
-          SHORT — stop at supply.top   + 1.5 pts  (just above sweep level)
-          LONG  — stop at demand.bottom - 1.5 pts (just below sweep level)
+        Stop geometry (beyond the far edge + tick-based buffer):
+          SHORT — stop at supply.top    + instrument.stop_buffer_pts
+          LONG  — stop at demand.bottom - instrument.stop_buffer_pts
 
-        Fill direction (reversed from initial approach):
-          LONG  — fills when bar_high >= limit_price (price rallied back up)
-          SHORT — fills when bar_low  <= limit_price (price dropped back down)
+        Risk per trade = zone_width + stop_buffer (much larger than just buffer).
 
-        Zones wider than 10 points are skipped — undefined risk.
-        Order is skipped if zone has not been swept yet.
+        Fill check: bar_low ≤ limit_price ≤ bar_high (both directions).
+
+        Skipped when: zone not yet swept, width outside [min_zone, max_zone].
         """
         zone_state = self._last_zone_state if hasattr(self, "_last_zone_state") else None
         oz_state   = self._last_order_zone_state if hasattr(self, "_last_order_zone_state") else None
         confluence = oz_state.confluence_score if oz_state is not None else 1.0
         atr        = atr_state.atr_daily
 
+        instr = self.instrument
+        min_zone_pts   = instr.min_zone_pts
+        max_zone_pts   = instr.max_zone_pts
+        stop_buffer    = instr.stop_buffer_pts
+        min_target_pts = instr.min_target_pts
+
         zone_width_pts = 0.0
         if direction == -1 and zone_state and zone_state.nearest_supply:
             zone = zone_state.nearest_supply
+            w = zone.top - zone.bottom
             if not zone.was_swept:
                 log.debug("Pending order skipped — supply zone not yet swept")
                 return
-            if zone.top - zone.bottom > MAX_ZONE_WIDTH_PTS:
-                log.debug("Pending order skipped — supply zone too wide", width=round(zone.top - zone.bottom, 2))
+            if w < min_zone_pts or w > max_zone_pts:
+                log.debug("Pending order skipped — supply zone width out of range", width=round(w, 2))
                 return
-            zone_width_pts = zone.top - zone.bottom
-            limit_price = zone.top                              # SHORT: re-entry as price drops back to zone.top
-            stop_price  = zone.top + FIXED_STOP_BUFFER_PTS     # stop just above sweep level
+            zone_width_pts = w
+            limit_price  = zone.bottom                 # near edge
+            stop_price   = zone.top + stop_buffer      # beyond far edge
+            target_price = self._compute_target_price(direction, limit_price, zone_state, atr_state)
+            if abs(target_price - limit_price) < min_target_pts:
+                target_price = limit_price + direction * min_target_pts
         elif direction == 1 and zone_state and zone_state.nearest_demand:
             zone = zone_state.nearest_demand
+            w = zone.top - zone.bottom
             if not zone.was_swept:
                 log.debug("Pending order skipped — demand zone not yet swept")
                 return
-            if zone.top - zone.bottom > MAX_ZONE_WIDTH_PTS:
-                log.debug("Pending order skipped — demand zone too wide", width=round(zone.top - zone.bottom, 2))
+            if w < min_zone_pts or w > max_zone_pts:
+                log.debug("Pending order skipped — demand zone width out of range", width=round(w, 2))
                 return
-            zone_width_pts = zone.top - zone.bottom
-            limit_price = zone.bottom                           # LONG: re-entry as price rallies back to zone.bottom
-            stop_price  = zone.bottom - FIXED_STOP_BUFFER_PTS  # stop just below sweep level
+            zone_width_pts = w
+            limit_price  = zone.top                    # near edge
+            stop_price   = zone.bottom - stop_buffer   # beyond far edge
+            target_price = self._compute_target_price(direction, limit_price, zone_state, atr_state)
+            if abs(target_price - limit_price) < min_target_pts:
+                target_price = limit_price + direction * min_target_pts
         else:
-            # No zone: fall back to current price with ATR-based stop
-            stop_dist   = max(atr * 0.08, MIN_STOP_PTS)
-            limit_price = current_price
-            stop_price  = current_price - direction * stop_dist
+            # No valid zone in this direction — either no zone was ever detected, or
+            # a cut-through just invalidated it.  Either way, do not place a blind
+            # limit at current price: the corrected strategy requires a validated,
+            # swept, width-bounded, un-pierced zone for every entry.
+            log.debug(
+                "Pending order skipped — no valid zone for direction",
+                direction="LONG" if direction == 1 else "SHORT",
+            )
+            return
 
-        # Target: use zone's impulse extreme if available, else ATR projection
-        target_price = self._compute_target_price(direction, limit_price, zone_state, atr_state)
+        # ── Duplicate guard ───────────────────────────────────────────────────
+        # Never stack two pending orders at the same spot.  If an existing pending
+        # already targets the same direction + same limit price (within one tick),
+        # keep the original — do NOT reset its placed_bar_idx or expiry counter.
+        # Re-issuing the same entry signal cannot indefinitely extend a pending
+        # limit's life.
+        existing = self._pending_order
+        if (existing is not None
+                and existing["direction"] == direction
+                and abs(existing["limit_price"] - limit_price) < instr.tick_size):
+            log.debug(
+                "Pending order skipped — duplicate at same spot",
+                direction="LONG" if direction == 1 else "SHORT",
+                limit_price=limit_price,
+                existing_placed_bar_idx=existing["placed_bar_idx"],
+            )
+            return
 
         self._pending_order = {
             "direction":       direction,
@@ -875,15 +957,59 @@ class TradingEnv(gym.Env):
         limit = po["limit_price"]
         return bar_low <= limit <= bar_high
 
-    def _open_from_pending(self, current_bar_idx: int) -> None:
-        """Open a position at the pending limit price and clear the pending order."""
+    def _pending_zone_cut_through(self, bar_high: float, bar_low: float) -> bool:
+        """Return True if the current bar cuts through the pending order's zone.
+
+        A bar that reaches the stop level on the wrong side of the zone invalidates
+        the setup — a just-entered trade would have been stopped out on the same
+        candle.  We cancel the pending limit *before* the fill check so the stop-out
+        never happens.
+
+          LONG  (stop below demand):  cancel when bar_low  ≤ stop_price.
+          SHORT (stop above supply):  cancel when bar_high ≥ stop_price.
+        """
+        po = self._pending_order
+        if po is None:
+            return False
+        direction = po["direction"]
+        stop_price = po["stop_price"]
+        if direction == 1:
+            return bar_low <= stop_price
+        return bar_high >= stop_price
+
+    def _open_from_pending(
+        self,
+        current_bar_idx: int,
+        bar_high: float,
+        bar_low: float,
+    ) -> None:
+        """Open a position at the pending limit price and clear the pending order.
+
+        Enforces the IN-BAR invariant: the fill price MUST satisfy
+            bar_low ≤ limit_price ≤ bar_high
+        for the current candle. If this ever fails (floating-point edge or a
+        caller that bypassed _check_pending_fill), the fill is REFUSED and the
+        pending order stays in place for the next bar. This is the guardrail
+        against the historical "fill outside the candle" bug class.
+        """
         po = self._pending_order
         if po is None:
             return
 
+        limit_price = po["limit_price"]
+        if not (bar_low <= limit_price <= bar_high):
+            log.warning(
+                "Pending fill refused — limit price outside bar range (in-bar invariant)",
+                direction="LONG" if po["direction"] == 1 else "SHORT",
+                limit_price=limit_price,
+                bar_low=bar_low,
+                bar_high=bar_high,
+            )
+            return
+
         success, reason = self.position_manager.enter(
             direction=po["direction"],
-            current_price=po["limit_price"],   # fill at the limit price
+            current_price=limit_price,         # fill at the limit price (inside the bar)
             stop_price=po["stop_price"],
             target_price=po["target_price"],
             current_bar_idx=current_bar_idx,

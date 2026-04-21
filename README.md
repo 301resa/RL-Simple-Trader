@@ -124,18 +124,40 @@ catch the re-entry into the order block.
 
 ### Pending Limit Order Entry
 
-Entry requires a **liquidity sweep** first. The zone's liquidity level must be traded through
-(supply: price ≥ `zone.top`; demand: price ≤ `zone.bottom`) before any order is placed.
-Once swept, a limit is placed at the sweep level to catch the re-entry into the order block:
+Entry requires a **liquidity sweep** first (see `was_swept` flag detected by
+`zone_detector.py` via bar high/low). Once swept, a limit is placed at the **near edge**
+of the zone — the first edge price touches as it returns into the block:
 
-- **LONG**: limit at `demand.bottom` — fills when `bar.high ≥ demand.bottom` (price rallies back up)
-- **SHORT**: limit at `supply.top` — fills when `bar.low ≤ supply.top` (price drops back down)
+- **LONG**: limit at `demand.top` (near edge) — fills when `bar.low ≤ demand.top`
+- **SHORT**: limit at `supply.bottom` (near edge) — fills when `bar.high ≥ supply.bottom`
 - **Sweep gate**: orders are skipped if `zone.was_swept == False` — no order until liquidity taken.
-- **Wide zone filter**: zones wider than **10 points** are skipped entirely.
+- **Zone width filter**: zones outside `[min_zone_pts, max_zone_pts]` are skipped (from the instrument profile — e.g. ES: 1–10 pts, NQ: 4–40 pts).
+- **Cut-through invalidation**: a zone is killed the moment a bar pierces past its far
+  edge by more than `stop_buffer_pts` (or closes past the far edge — no buffer). Demand
+  dies on `bar.low < zone.bottom − stop_buffer_pts` *or* `bar.close < zone.bottom`; supply
+  mirrors. `zone_detector.py` drops the zone from `nearest_supply/demand` immediately,
+  and `trading_env.step()` also cancels the pending limit on the *same bar* if the
+  current candle reaches the stop level on the wrong side — preventing the classic
+  enter-and-stop-on-the-same-candle failure mode.
+- **No duplicate pending at the same spot**: `_place_pending_order` rejects a new
+  order that matches the existing pending's direction AND limit price (within one
+  tick). The original pending is kept — its `placed_bar_idx` and expiry countdown
+  are NOT reset. Re-issuing `ENTER_LONG`/`ENTER_SHORT` on the same setup cannot
+  stack orders or indefinitely extend an old pending's life. A different direction
+  or a different price replaces the existing pending.
+- **In-bar fill invariant**: a pending limit can only fill when
+  `bar_low ≤ limit_price ≤ bar_high`. `_check_pending_fill` gates the fill and
+  `_open_from_pending` re-validates the same inequality before calling
+  `PositionManager.enter()`. If the invariant is ever violated the fill is
+  REFUSED (logged as a warning) and the pending is held for the next bar —
+  no more "fills outside the candle" regressions.
 - **Cancellation**: all pending orders are cancelled automatically at session end, or
-  when the agent places a new entry signal in any direction (cancel-and-replace).
+  when the agent places a valid, different-spot entry signal (cancel-and-replace).
+  An `ENTER_*` action on an invalid/unswept/out-of-range zone no longer silently
+  cancels the existing pending — the original is preserved.
 - **Agent EXIT action** while flat also cancels any open pending order.
-- If no zone is detected, the limit falls back to the current price (immediate fill on the next bar).
+- **No blind-entry fallback**: if no valid, swept, un-pierced zone exists in the chosen
+  direction, `_place_pending_order` skips without placing a limit at current price.
 
 The observation vector includes pending order context: `pending_active`, `pending_direction`,
 `pending_dist_norm` (distance from current price to limit level, ATR-normalised).
@@ -143,12 +165,12 @@ Zone features also include `supply_swept` and `demand_swept` binary flags.
 
 ### Stop Loss
 
-Stop placed **1.5 points beyond the sweep level** — the level that was just taken as
-liquidity. If price continues through that level after filling, the thesis is invalidated.
+Stop is placed **beyond the far edge** of the zone with an instrument-profile buffer
+(e.g. ES = 1.5 pts = 6 ticks; NQ = 6.0 pts = 24 ticks). Risk per trade = `zone_width + stop_buffer`.
 
 ```
-LONG:  stop = demand.bottom − 1.5 pts   (just below the swept low)
-SHORT: stop = supply.top   + 1.5 pts    (just above the swept high)
+LONG:  stop = demand.bottom − stop_buffer_pts   (below the far/lower edge of demand)
+SHORT: stop = supply.top    + stop_buffer_pts   (above the far/upper edge of supply)
 ```
 
 Stop widening is **never** allowed once placed.
@@ -171,35 +193,25 @@ as the natural first profit objective.
 ### Risk Per Trade
 
 - **1% of account equity** per trade (capital-based sizing)
-- **Fractional contract sizes**: `[0.5, 1.0, 1.5, 2.0, 2.5]` — snapped to the largest
-  tier that doesn't exceed the 1% capital risk
+- **Per-instrument contract tiers** (from `environment_config.yaml → contracts.<SYMBOL>.contract_tiers`):
+  - **Minis** (ES / NQ): `[1, 2]` — integer contracts only, hard cap of 2
+  - **Micros** (MES / MNQ): `[1, 2, 3, 5, 8]` — integer contracts only, higher tiers allowed since $ per tick is smaller
 - **Three-constraint sizing** — smallest of all three wins:
 
   1. **Capital constraint**: `risk_dollars / (stop_pts × point_value)` → never exceeds 1% risk
-  2. **Confluence constraint**: graduated score gates the maximum tier:
-
-     | Confluence Score | Max Contracts |
-     |-----------------|---------------|
-     | < 0.60          | 0.5           |
-     | 0.60 – 0.70     | 1.0           |
-     | 0.70 – 0.80     | 1.5           |
-     | 0.80 – 0.90     | 2.0           |
-     | ≥ 0.90          | 2.5           |
-
-     In-zone confluence is now **graduated** (0.55–1.00) based on zone quality
-     (width × 40% + age × 35% + touches × 25%) so all five tiers are reachable.
-
-  3. **Zone-width constraint**: wider zones carry more uncertainty.
-     Size is scaled by `max(0.50, 1 − zone_width / 10)` — a 5-pt zone gets
-     75% of the size a 0-pt zone would get; a 10-pt zone gets 50%.
+  2. **Confluence constraint**: graduated score gates the maximum tier (thresholds from the
+     instrument profile — ES/NQ use `[0.75]` → 1 contract below, 2 contracts at/above).
+  3. **Zone-width constraint**: wider zones carry more uncertainty. Size is scaled by
+     `max(0.50, 1 − zone_width / max_zone_pts)` — a zone at half the instrument's max
+     width gets 75% size; at the max gets 50%.
 
 - **Daily budget guard**: a single trade cannot consume more than **50% of the
-  remaining daily loss budget** — if the day is already down $700 of the $1,000
-  limit, the next trade is capped at $150 risk (50% × $300 remaining).
+  remaining daily loss budget** — if the day is already down $2,100 of the $3,000
+  limit, the next trade is capped at $450 risk (50% × $900 remaining).
 
 - **Dual daily loss limit**: stops trading when **either** limit is reached:
   - **−3R** on the day, OR
-  - **−$1,000** on the day (configurable via `max_daily_loss_dollars` in `risk_config.yaml`)
+  - **−$3,000** on the day (configurable via `max_daily_loss_dollars` in `risk_config.yaml`)
 
 ---
 
@@ -404,24 +416,30 @@ metrics and log results without writing any model files (useful for exploration 
 - **Annualised Sharpe**: All Sharpe calculations use `mean(pnl_r) / std(pnl_r) × √252`
   consistently across training table, eval callback, and test_fold.
 
-- **Sweep-based stop**: `stop = sweep_level ± 1.5 pts`. Entry is at the sweep level
-  (supply.top or demand.bottom); stop is 1.5 points beyond that level. A sustained
-  break back through the sweep level invalidates the setup immediately. This keeps 1R
-  tight and consistent regardless of zone width.
+- **Near-edge entry, far-edge stop**: limit fills at the **near edge** of the zone
+  (demand.top for LONG, supply.bottom for SHORT); stop sits **beyond the far edge** plus
+  an instrument-profile buffer (ES: 6 ticks, NQ: 24 ticks). Risk per trade is therefore
+  `zone_width + stop_buffer` — a clean invalidation if price pushes straight through the
+  block. Zone-width bounds (`min_zone_pts` / `max_zone_pts` in the instrument profile)
+  keep 1R from collapsing (too-tight blocks) or ballooning (oversized blocks).
 
 - **No hard trade cap**: `max_trades_per_day: 999` — the dual daily loss limit (−3R
-  or −$1,000) is the natural brake. The reward's `hold_flat_penalty` is applied
+  or −$3,000) is the natural brake. The reward's `hold_flat_penalty` is applied
   **only when a valid order zone setup is present AND no pending order is already active**
   — the agent is penalised for ignoring a good setup, not for patiently waiting when
   no setup exists or correctly waiting for a pending limit to fill.
 
-- **Pending limit order entry**: agent places a limit at the **far edge** of the zone
-  (demand.bottom for LONG, supply.top for SHORT) — the sweep level where liquidity
-  was taken; this is where a re-entry into the zone begins. Filled on the bar that trades through the limit; cancelled at session
-  end or on a new entry signal. Zones wider than 10 points are skipped.
+- **Pending limit order entry**: agent places a limit at the **near edge** of the zone
+  (demand.top for LONG, supply.bottom for SHORT) — first touch into the zone after an
+  external liquidity sweep of the prior swing. Filled on the bar that trades through the
+  limit; cancelled at session end or on a new entry signal. Zone widths outside
+  `[min_zone_pts, max_zone_pts]` (instrument profile) are skipped — tiny blocks have
+  no room to work, oversized blocks balloon the risk.
 
-- **Confluence-graded sizing**: position size scales from 0.5 to 2.5 contracts in 0.5
-  increments based on the confluence score, capped by the 1%-of-capital risk constraint.
+- **Confluence-graded sizing**: position size is graded by confluence and zone-width
+  tier against per-instrument `contract_tiers` (Minis: `[1, 2]`, Micros: `[1, 2, 3, 5, 8]`
+  — integer only) and capped by the 1%-of-capital risk constraint — the smallest of the
+  three caps wins.
 
 - **VecNormalize**: Normalises observations only (`norm_reward=False`). Stats are saved
   alongside every checkpoint so evaluation always uses matched normalisation.
@@ -468,8 +486,10 @@ metrics and log results without writing any model files (useful for exploration 
     allocations and 1 `timedelta.total_seconds()` call every step.
   - `TradingEnv._compute_action_mask()` accepts optional `portfolio_state` — avoids
     a redundant `get_portfolio_state()` call and a pandas `.iloc` lookup per step.
-  - `ZoneState`, `FIXED_STOP_BUFFER_PTS`, `MIN_STOP_PTS`, and `MAX_ZONE_WIDTH_PTS` are
-    module-level constants in `order_zone_engine.py`; imported once by all callers.
+  - `ZoneState` is a module-level dataclass in `order_zone_engine.py`; zone geometry
+    constants (`stop_buffer_pts`, `min_zone_pts`, `max_zone_pts`, `fallback_stop_pts`)
+    now live on the `InstrumentProfile` loaded from `environment_config.yaml` and are
+    passed into `OrderZoneEngine` at construction time.
   - RTH elapsed-seconds computed via integer arithmetic (`bar_time.hour*3600 + min*60`)
     instead of 2 `pd.Timestamp` allocations per step.
   - Dead O(n×window) vol_ratios fallback loop in `ObservationBuilder.build()` removed;
@@ -498,14 +518,32 @@ metrics and log results without writing any model files (useful for exploration 
 
 ## Instruments
 
-| Symbol | Point Value | Tick Size |
-|--------|------------|-----------|
-| ES | $50 / point | 0.25 |
-| MES | $5 / point | 0.25 |
-| NQ | $20 / point | 0.25 |
-| MNQ | $2 / point | 0.25 |
+| Symbol | Point Value | Tick Size | Tick Value | Stop Buffer | Min Zone | Max Zone |
+|--------|-------------|-----------|------------|-------------|----------|----------|
+| ES     | $50 / pt    | 0.25      | $12.50     | 6 ticks     | 4 ticks  | 40 ticks |
+| MES    | $5  / pt    | 0.25      | $1.25      | 6 ticks     | 4 ticks  | 40 ticks |
+| NQ     | $20 / pt    | 0.25      | $5.00      | 24 ticks    | 16 ticks | 160 ticks|
+| MNQ    | $2  / pt    | 0.25      | $0.50      | 24 ticks    | 16 ticks | 160 ticks|
 
-Default instrument: **ES** (configurable in `environment_config.yaml`).
+Contract tiers (from confluence-graded sizing):
+- **Minis (ES / NQ)**: `[1, 2]` — integer contracts only, capped at 2.
+- **Micros (MES / MNQ)**: `[1, 2, 3, 5, 8]` — integer contracts only.
+
+### Switching instruments
+
+Instrument switching is a **one-line config change**. In `config/environment_config.yaml`:
+
+```yaml
+instruments:
+  default: NQ        # ES | MES | NQ | MNQ
+```
+
+All geometry (stop buffer, zone width bounds, jitter, target, contract tiers, confluence
+thresholds) is expressed in **ticks** under `contracts.<SYMBOL>` and materialised into
+points by `utils/instrument.py → load_instrument_profile()`. Every consumer
+(`OrderZoneEngine`, `PositionManager`, `ObservationBuilder`, `TradingEnv`,
+`OHLCVAugmentor`) accepts an `InstrumentProfile` and pulls its numbers from there — so
+ES↔NQ↔MES↔MNQ requires no code edits.
 
 ---
 

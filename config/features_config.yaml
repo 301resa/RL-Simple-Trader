@@ -1,6 +1,10 @@
 # features_config.yaml
 # =====================
 # Feature engineering parameters for all signal modules.
+#
+# Price-based geometry (stop buffers, zone-width caps, min-zone width)
+# lives in environment_config.yaml under contracts.<SYMBOL> as tick counts
+# and is loaded via utils.instrument.InstrumentProfile.
 
 atr:
   period: 1                       # Previous day's true range — adapts zone/gate thresholds to current volatility
@@ -14,21 +18,22 @@ zone_lookback_bars: 500
 
 zones:
   consolidation_min_bars: 2        # minimum bars in consolidation base
-  consolidation_max_bars: 5       # widened from 8 — allows more zone formations
+  consolidation_max_bars: 7      # widened from 8 — allows more zone formations
   consolidation_range_atr_pct: 0.05   # widened from 0.035 — 8% of ATR; was too tight for 5-min bars
   impulse_min_body_atr_pct: 0.06     # lowered from 0.12 — easier impulse detection
-  max_zone_touches: 3             # allow one extra touch before invalidation
+  max_zone_touches: 4             # allow one extra touch before invalidation
   max_zone_age_bars: 300           # extended from 200 — zones live a little longer
   zone_buffer_atr_pct: 0.03        # slightly wider membership buffer
 
-# trend: section retained only so existing code that reads it doesn't break,
-# but TrendClassifier output is NOT included in the observation or action mask.
-# The LSTM carries directional memory across candles instead.
-trend:
-  min_hh_hl_for_uptrend: 2
-  min_ll_lh_for_downtrend: 2
-  reversal_requires_breaks: 2
-  strength_lookback_bars: 40
+harmonic:
+  enabled: false
+  lookback_bars: 40             # bars to scan for pattern legs (40 × 5min = 3.3 hours)
+  pivot_window: 3               # bars each side required to confirm a swing high/low
+  symmetry_tol_atr_pct: 0.12   # max price diff between two lows/highs (12% of ATR)
+  min_peak_atr_pct: 0.15        # min middle peak/trough height (15% of ATR)
+  min_separation_bars: 5        # minimum bars between the two pivots
+  recency_bars: 6               # second pivot must be within last N bars
+  weight: 0.10                  # weight in confluence score (zone reduced from 0.90 → 0.80)
 
 order_zone:
   min_confluence_score: 0.45       # zone score alone drives confluence
