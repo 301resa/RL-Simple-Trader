@@ -12,31 +12,31 @@ position:
 sizing:
   risk_per_trade_pct: 0.01       # risk 1% of account per trade
   min_contracts: 1               # integer only — no fractional contracts
-  max_contracts: 2               # hard ceiling for minis (instrument profile may cap lower)
+  max_contracts: 3               # hard ceiling for minis (instrument profile may cap lower)
 
 stop_loss:
   allow_stop_widening: false     # HARD RULE: never widen a stop once placed
 
 take_profit:
-  min_rr_ratio: 1.05              # minimum R:R required to enter
+  min_rr_ratio: 1.75            # minimum R:R required to enter
 
 trailing:
-  activate_at_r: 1.2             # activate trailing stop at 1.2R unrealised profit
-  trail_aggressively_at_r: 4.0   # tighten trail at 4R
-  lock_in_r_at_trail: 1.2        # lock in at least 1.2R when trailing activates
+  activate_at_r: 0.8            # activate trailing stop at 1.2R unrealised profit
+  trail_aggressively_at_r: 3.0   # tighten trail at 4R
+  lock_in_r_at_trail: 0.3       # lock in at least 1.2R when trailing activates
 
 atr_gate:
-  block_entries_above_pct: 0.85  # block entries in the EXHAUSTED DIRECTION only at 85% ATR
-                                  # e.g. if sold down 85% of ATR → no more shorts, longs ok
+  block_entries_above_pct: 0.95  # block entries in the EXHAUSTED DIRECTION only at 95% ATR
+                                  # e.g. if sold down 95% of ATR → no more shorts, longs ok
 
 daily_limits:
   max_daily_loss_r: 3.0          # stop trading after -3R on the day
-  max_daily_loss_dollars: 3000.0 # hard $ cap (whichever limit triggers first)
-  max_trades_per_day: 10        # no hard cap — daily loss limit is the natural brake
+  max_daily_loss_dollars: 2000.0 # hard $ cap (whichever limit triggers first)
+  max_trades_per_day: 999        # no hard cap — daily loss limit is the natural brake
   max_consecutive_losses_before_pause: 3
-  pause_bars_after_loss_streak: 30  # bars to sit out after loss streak
+  pause_bars_after_loss_streak: 15  # bars to sit out after loss streak
 
 session:
-  no_entry_last_n_bars: 4        # no new entries in last 3 bars of session
-  min_bars_between_trades: 6    # minimum bars between trade close and next entry (30 min @ 5-min bars)
-  max_pending_order_bars: 24    # cancel pending limit orders older than this many bars (25 min @ 5-min bars)
+  no_entry_last_n_bars: 3        # no new entries in last 3 bars of session
+  min_bars_between_trades: 4    # minimum bars between trade close and next entry (30 min @ 5-min bars)
+  max_pending_order_bars: 12    # cancel pending limit orders older than this many bars (25 min @ 5-min bars)

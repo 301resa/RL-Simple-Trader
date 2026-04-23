@@ -12,24 +12,24 @@ step:
   # entry.  At -0.025/bar the daily hold cost (≈ 78 RTH bars × 0.025 ≈ 1.95/day)
   # exceeds a typical loss (-1R × 0.5 WR ≈ -0.5), forcing at least 4-5
   # trades per day to break even on the inactivity penalty alone.
-  hold_flat_penalty: -0.025             # 5× increase: forces agent to seek entries
+  hold_flat_penalty: -0.01             # 5× increase: forces agent to seek entries
 
 entry_bonuses:
   full_order_zone_confluence: 0.50      # price inside a valid zone with ATR room
-  in_supply_demand_zone: 0.25          # price is inside a valid zone
+  in_supply_demand_zone: 0.3          # price is inside a valid zone
   atr_has_room: 0.15                   # ATR not yet in warning territory
-  high_rr_ratio: 0.40                  # R:R >= minimum
+  high_rr_ratio: 0.7                  # R:R >= minimum
   # liquidity_sweep_present removed — sweep pillar removed from system
   # rejection_candle_present removed — Pillar 3 not used
 
 entry_penalties:
   # ── Entry cost ────────────────────────────────────────────────────────────
-  entry_cost: 0                         # near-zero: don't penalise exploration
+  entry_cost: -0.0015                         # near-zero: don't penalise exploration
 
   # ── Zone/setup penalties ──────────────────────────────────────────────────
-  no_zone_present: -0.20               # increased: entering outside a zone is a clear mistake
+  no_zone_present: -0.15               # increased: entering outside a zone is a clear mistake
   atr_exhausted: -0.40
-  rr_below_minimum: -0.25             # increased: bad R:R is a sniper failure
+  rr_below_minimum: -0.2             # increased: bad R:R is a sniper failure
   overtrading: 0.0                      # daily loss limit (-3R) is the brake
 
   # ── MAE (max adverse excursion) ───────────────────────────────────────────
@@ -39,7 +39,7 @@ entry_penalties:
   mae_threshold_r: 0.40               # MAE below this is acceptable (R multiples)
 
 exit_rewards:
-  trailing_stop_correctly: 0.30       # used trail stop before exit
+  trailing_stop_correctly: 0.5       # used trail stop before exit
   aggressive_trail_at_4r: 0.20        # trailed aggressively at 4R profit
   exit_at_atr_target: 0.20            # hit the ATR-based profit target
 
@@ -54,3 +54,18 @@ violations:
 discipline:
   re_entry_after_loss_streak_penalty: -0.5
   loss_streak_threshold: 4
+
+
+# need to be written in a way that allows for easy tuning of selectivity vs. frequency tradeoff
+selectivity:
+  no_trade_reward: 0.05
+  weak_zone_penalty: -0.05
+  min_confluence_for_entry: 0.5
+
+
+
+time_management:
+  max_bars_before_penalty: 12        # ~1 hour on 5min TF
+  penalty_per_bar: -0.01             # after threshold
+  bonus_fast_resolution: 0.10        # if TP hit quickly
+  fast_trade_bars: 6                 # reward if TP within this

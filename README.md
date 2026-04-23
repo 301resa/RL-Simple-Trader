@@ -248,11 +248,46 @@ python main.py --mode test_fold \
     --out-dir logs/walk_forward/fold_00/test_results \
     --n-workers 8
 ```
-Every run **automatically deletes** all `.xlsx` and `*_journal.html` files in
+Every run **automatically deletes** all `.xlsx` and `*_<suffix>.html` files in
 `--out-dir` before writing new results. Produces:
 - Per-model Plotly HTML journal (candlestick + per-trade PnL bars + cumulative PnL)
 - Per-model Excel journal (Trades / Daily / Metrics sheets)
 - `leaderboard.xlsx` — all models ranked best-first by composite score
+
+Extra flags (passed through to `evaluation/test_fold.py`):
+- `--best-only` — only write a journal for the single best model.
+- `--rank-by` — `score` (default) | `pnl_dollars` | `pnl_r` | `sharpe`.
+- `--journal-suffix` — suffix used in journal filenames (default: `journal`).
+
+### Training journal (pick best model on TRAIN data, one HTML)
+```bash
+python main.py --mode training_journal \
+    --models-dir logs/walk_forward/fold_00/models \
+    --config config/ --data data/ \
+    --train-start 2020-01-02 --train-end 2025-12-31
+```
+Runs every saved model deterministically across the training date range with
+**real, un-augmented OHLC bars**, ranks by total dollar PnL, and writes a
+single comprehensive Plotly HTML + Excel journal for the winner:
+
+```
+logs/walk_forward/fold_00/training_journal/
+├── <best_model>_training_journal.html   # candlestick + entry/SL/TP + cum-PnL + trade table
+├── <best_model>_training_journal.xlsx   # Trades / Daily / Metrics sheets
+├── leaderboard.xlsx                      # all models ranked
+└── test_fold_results.txt
+```
+
+The HTML mirrors the test-fold journal layout: OHLC candles with LONG/SHORT
+entry markers, per-trade SL and TP lines, exit markers coloured by win/loss,
+per-trade PnL bar chart, cumulative PnL curve, and a sortable trade-by-trade
+data grid with `#, Date, Dir, Entry/Exit time, Entry/Exit price, SL, TP,
+Lots, PnL (R/pts/$), Exit reason, MAE (R)`.
+
+Use this to verify that training produced a working policy and that order
+zones/entries land at sensible locations on the actual training data. If
+`--models-dir` is omitted, it defaults to the first `logs/walk_forward/fold_*/models`
+directory found; `--out-dir` defaults to `<fold>/training_journal`.
 
 ### Analyse a saved journal
 ```bash

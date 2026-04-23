@@ -206,12 +206,44 @@ class RewardCalculator:
             active, HOLD is the *correct* action (waiting for fill) and must
             not be penalised.
         """
+
+
+        '''
+    # add this later 
+    if position.is_open:
+
+        trade_duration = position.bars_in_trade
+
+        # ── Penalty for overstaying ─────────────────────
+        if trade_duration > cfg.time_management.max_bars_before_penalty:
+            extra_bars = trade_duration - cfg.time_management.max_bars_before_penalty
+            reward += extra_bars * cfg.time_management.penalty_per_bar
+
+        # ── Bonus for efficient trades ──────────────────
+        if position.just_closed and position.pnl_r > 0:
+            if trade_duration <= cfg.time_management.fast_trade_bars:
+                reward += cfg.time_management.bonus_fast_resolution
+if not position.is_open:
+
+    confluence = state.order_zone.confluence_score
+
+    # ── GOOD: staying flat when no edge ─────────────
+    if confluence < cfg.selectivity.min_confluence_for_entry:
+        if action == Action.HOLD:
+            reward += cfg.selectivity.no_trade_reward
+
+        if action in (Action.ENTER_LONG, Action.ENTER_SHORT):
+            reward += cfg.selectivity.weak_zone_penalty
+
+
+    '''
+       
         reward = 0.0
         entry_bonus = 0.0
         entry_penalty = 0.0
         step_penalty = 0.0
         note = ""
-
+        
         # ── Hold / WAIT penalty ───────────────────────────────
         # Penalise idling ONLY when a valid zone setup is present AND no pending
         # order is already waiting.  If a pending order is active the agent has
@@ -297,6 +329,10 @@ class RewardCalculator:
             elif unrealised_r >= 2.0:
                 entry_bonus += self.exit_bonuses["trailing_stop_correctly"] * self.shaping_scale
                 note += "trail_at_2r "
+
+
+
+
 
         reward = (entry_bonus + entry_penalty + step_penalty) * self.core_scale
 

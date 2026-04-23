@@ -1008,6 +1008,21 @@ def main(argv: Optional[List[str]] = None) -> None:
         "--out-dir", default=None,
         help="Directory to write HTML/Excel journals and results (default: models-dir/test_results)",
     )
+    parser.add_argument(
+        "--best-only", action="store_true",
+        help="Only generate a journal for the single best model (by --rank-by).",
+    )
+    parser.add_argument(
+        "--rank-by",
+        choices=["score", "pnl_dollars", "pnl_r", "sharpe"],
+        default="score",
+        help="Ranking metric for --best-only. Default: score (composite).",
+    )
+    parser.add_argument(
+        "--journal-suffix",
+        default="journal",
+        help="Suffix appended to journal filenames (<name>_<suffix>.html/.xlsx). Default: journal.",
+    )
     args = parser.parse_args(argv)
 
     models_dir = Path(args.models_dir)
@@ -1015,8 +1030,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Clean previous results ────────────────────────────────────────────────
+    suffix = args.journal_suffix
     removed = 0
-    for pattern in ("*.xlsx", "*_journal.html"):
+    for pattern in ("*.xlsx", f"*_{suffix}.html"):
         for f in out_dir.glob(pattern):
             f.unlink()
             removed += 1
@@ -1283,31 +1299,23 @@ def main(argv: Optional[List[str]] = None) -> None:
             "episodes":  episodes,
         })
 
-        # Per-checkpoint interactive trade journal (HTML)
-        if PLOTLY_OK:
-            journal_path = out_dir / f"{name}_journal.html"
-            try:
-                _build_journal(name, trades, m, score, data_loader, test_days, journal_path)
-            except Exception as exc:
-                _log.warning("Journal HTML failed", ckpt=name, error=str(exc))
-
-        # Per-checkpoint Excel journal
-        excel_path = out_dir / f"{name}_journal.xlsx"
-        try:
-            _build_excel_journal(name, trades, m, score, test_days, excel_path)
-        except Exception as exc:
-            _log.warning("Journal Excel failed", ckpt=name, error=str(exc))
-
     print(sep)
 
     if not results:
         print("No results to rank.")
         return
 
-    # ── Ranked summary (ascending score — best last) ──────────────────────────
-    results.sort(key=lambda r: r["score"])
+    # ── Ranked summary (ascending by rank metric — best last) ────────────────
+    _rank_key_fns = {
+        "score":        lambda r: r["score"],
+        "pnl_dollars":  lambda r: r["metrics"]["total_pnl_dollars"],
+        "pnl_r":        lambda r: r["metrics"]["total_pnl_r"],
+        "sharpe":       lambda r: r["metrics"]["sharpe"],
+    }
+    rank_fn = _rank_key_fns[args.rank_by]
+    results.sort(key=rank_fn)
 
-    print("\n── Ranked Summary (best last) ──────────────────────────────────────────\n")
+    print(f"\n── Ranked Summary (by {args.rank_by}, best last) ──────────────────────\n")
     print(sep)
     print(_header_row())
     print(sep)
@@ -1317,13 +1325,37 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     best = results[-1]
     bm = best["metrics"]
-    print(f"\n  Best checkpoint: {best['name']}")
+    print(f"\n  Best checkpoint (by {args.rank_by}): {best['name']}")
     print(f"  Score={best['score']:.3f}  "
           f"Trades={bm['n_trades']}  "
           f"WR={bm['win_rate']*100:.1f}%  "
           f"PnL=${bm['total_pnl_dollars']:+,.0f}  "
           f"$PF={bm['profit_factor_usd']:.2f}  "
           f"Sharpe={bm['sharpe']:.3f}")
+
+    # ── Write per-model journals (best-only or all) ───────────────────────────
+    to_journal = [best] if args.best_only else results
+    print(f"\n  Writing {len(to_journal)} journal file(s) to {out_dir} ...")
+    for r in to_journal:
+        name_r = r["name"]
+        if PLOTLY_OK:
+            journal_path = out_dir / f"{name_r}_{suffix}.html"
+            try:
+                _build_journal(
+                    name_r, r["trades"], r["metrics"], r["score"],
+                    data_loader, test_days, journal_path,
+                )
+            except Exception as exc:
+                _log.warning("Journal HTML failed", ckpt=name_r, error=str(exc))
+
+        excel_path = out_dir / f"{name_r}_{suffix}.xlsx"
+        try:
+            _build_excel_journal(
+                name_r, r["trades"], r["metrics"], r["score"],
+                test_days, excel_path,
+            )
+        except Exception as exc:
+            _log.warning("Journal Excel failed", ckpt=name_r, error=str(exc))
 
     # ── Leaderboard Excel (all models, ranked) ────────────────────────────────
     lb_path = out_dir / "leaderboard.xlsx"
@@ -1349,8 +1381,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     lines += [sep, "", f"Best: {best['name']}  score={best['score']:.4f}"]
     txt_path.write_text("\n".join(lines), encoding="utf-8")
 
-    htmls   = list(out_dir.glob("*_journal.html"))
-    excels  = list(out_dir.glob("*_journal.xlsx"))
+    htmls   = list(out_dir.glob(f"*_{suffix}.html"))
+    excels  = list(out_dir.glob(f"*_{suffix}.xlsx"))
     print(f"\n  Leaderboard  → {lb_path}")
     print(f"  Results txt  → {txt_path}")
     print(f"  HTML journals: {len(htmls)} file(s)")

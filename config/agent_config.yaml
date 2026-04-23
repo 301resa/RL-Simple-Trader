@@ -15,12 +15,12 @@ ppo:
   learning_rate_schedule: cosine   # "linear", "cosine", or "constant"
   n_steps: 2048                    # rollout buffer per env
   batch_size: 256                  # mini-batch (must divide n_steps × n_envs)
-  n_epochs: 6                      # gradient passes per rollout
+  n_epochs: 8                     # gradient passes per rollout
   gamma: 0.99                      # discount factor
   gae_lambda: 0.95                 # GAE lambda
   clip_range: 0.2                  # PPO clip range
   ent_coef: 0.01                   # entropy coefficient (initial; annealed by exploration:)
-  vf_coef: 0.5                     # value function coefficient
+  vf_coef: 0.8                     # value function coefficient
   max_grad_norm: 0.5               # gradient clipping
   total_timesteps: 4_000_000       # total training steps
   eval_freq: 100_000               # evaluate every N steps
@@ -28,17 +28,17 @@ ppo:
 network:
   net_arch:
     pi: [128, 128]                 # policy MLP layers after LSTM
-    vf: [128, 128]                 # value  MLP layers after LSTM
+    vf: [256, 256]                 # value  MLP layers after LSTM
   use_layer_norm: true
   use_lstm: true                   # RecurrentPPO requires true
-  lstm_hidden_size: 256            # LSTM units
-  n_lstm_layers: 1
+  lstm_hidden_size: 192            # LSTM units
+  n_lstm_layers: 2
   activation_fn: ReLU              # "ReLU", "Tanh", "ELU"
   ortho_init: true                 # orthogonal weight initialisation
 
 exploration:
-  ent_coef_start: 0.05             # entropy at start of training
-  ent_coef_end:   0.005            # entropy at end of annealing
+  ent_coef_start: 0.09             # entropy at start of training
+  ent_coef_end:   0.001            # entropy at end of annealing
   ent_coef_decay_steps: 2_000_000  # steps over which to anneal (50% of total)
 
 checkpointing:
@@ -49,8 +49,8 @@ evaluation:
   eval_freq:       100_000         # run val metrics every N training steps
   n_eval_episodes: 20              # val episodes per evaluation run
   save_enabled:    true            # false = log eval metrics without saving any models
-  warmup_steps:    400_000         # no early stopping before this step
-  patience_steps:  550_000         # stop if no composite improvement for N steps
+  warmup_steps:    600_000         # no early stopping before this step
+  patience_steps:  750_000         # stop if no composite improvement for N steps
   # Composite save score weights
   w_sharpe: 0.40                   # Sharpe ratio (primary signal)
   w_pnl:    0.30                   # Total P&L in R
@@ -60,8 +60,8 @@ evaluation:
 hotsave:
   # Gate 1 — Profit Factor / Win Rate
   # Requires min_envs_passing envs to simultaneously satisfy all criteria.
-  pf_threshold:     1.60           # minimum profit factor
-  wr_threshold:     0.40           # minimum win rate (0–1)
+  pf_threshold:     1.45           # minimum profit factor
+  wr_threshold:     0.38           # minimum win rate (0–1)
   min_envs_passing: 2              # envs that must simultaneously clear Gate 1
   cooldown_steps:   50_000         # minimum steps between Gate-1 saves
 
@@ -72,26 +72,26 @@ hotsave:
   # Criteria: cumulative PnL > elite_pnl_multiplier × initial_capital
   #           AND WR × PF   > elite_wr_pf_threshold
   #           AND Sharpe    > elite_sharpe_threshold
-  elite_pnl_multiplier:   1.5      # required cumulative return multiple
-  elite_wr_pf_threshold:  1.5      # WR × PF combined quality score
-  elite_sharpe_threshold: 3.0      # annualised Sharpe (elite tier)
+  elite_pnl_multiplier:   1.08      # required cumulative return multiple
+  elite_wr_pf_threshold:  1.7      # WR × PF combined quality score
+  elite_sharpe_threshold: 2.2      # annualised Sharpe (elite tier)
   elite_cooldown_steps:   50_000    # minimum steps between Gate-3 saves
 
   # Minimum trade count — scaled by training date range length.
   # Formula: max(10, n_trading_days × min_trades_per_week ÷ 5)
   # Examples: 12 months (~252 days) → 151 trades | 6 months (~126 days) → 75 trades
-  min_trades_per_week: 3           # trades per trading week required on average
+  min_trades_per_week: 0.5           # trades per trading week required on average
 
 augmentation:
   # max_jitter_pts comes from the instrument profile (jitter_ticks × tick_size).
   trend_scale:    0.15   # session return scaling ±15%
 
 multiprocessing:
-  n_envs: 16             # parallel training environments
+  n_envs: 8              # parallel training environments
   use_subprocess: true   # SubprocVecEnv (true) or DummyVecEnv (false)
 
 walk_forward:
   n_folds: 1             # folds to train (-1 = all possible)
-  train_months: 12       # training window (~252 trading days)
-  val_weeks: 2           # validation window (~10 trading days)
+  train_months: 60       # training window (~252 trading days)
+  val_weeks: 2          # validation window (~10 trading days)
   output_dir: logs/walk_forward
