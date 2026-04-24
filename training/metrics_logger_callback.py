@@ -153,6 +153,14 @@ def _fmt_dd_pct(pct: float) -> str:
     return f"{pct:.1f}%"
 
 
+def _fmt_wr5(wr: float) -> str:
+    """Format win-rate for width-5 column; 100% drops decimal to stay ≤5 chars."""
+    pct = wr * 100.0
+    if pct >= 100.0:
+        return "100%"       # 4 chars ✓
+    return f"{pct:.1f}%"   # "0.0%"–"99.9%" = 4–5 chars ✓
+
+
 def _row(env_idx: int | str, info: dict) -> str:
     n_trades = int(round(info.get("n_trades", 0)))
     win_rate = info.get("win_rate", 0.0)
@@ -182,7 +190,7 @@ def _row(env_idx: int | str, info: dict) -> str:
     cells = [
         (env_str,                  3, "l"),
         (_fmt_count(n_trades, 4),  4, "r"),
-        (f"{win_rate*100:.1f}%",   5, "r"),
+        (_fmt_wr5(win_rate),       5, "r"),
         (_fmt_pnl(pnl_d),          7, "r"),
         (_fmt_pf(pf),              5, "r"),
         (f"{sh:.2f}",              5, "r"),
