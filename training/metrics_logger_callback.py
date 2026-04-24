@@ -57,6 +57,11 @@ _COLS = [
     ("AvgL", 6, "r"),
     ("RR",   4, "r"),
     ("Dur",  4, "r"),
+    # ── Exit breakdown ──
+    ("TP",   4, "r"),
+    ("SC",   4, "r"),
+    ("SL",   4, "r"),
+    ("AEx",  4, "r"),
 ]
 
 _SEP  = "+"
@@ -111,6 +116,43 @@ def _fmt_pf(pf: float) -> str:
     return f"{pf:.2f}"
 
 
+def _fmt_count(n: int, w: int) -> str:
+    """Format an integer count to fit exactly in w chars; K/M for large values."""
+    s = str(n)
+    if len(s) <= w:
+        return s
+    k = n // 1000
+    s_k = f"{k}K"
+    if len(s_k) <= w:
+        return s_k
+    m = n // 1_000_000
+    return f"{m}M"
+
+
+def _fmt_rr(rr: float) -> str:
+    """Format RR/PF-style ratio for width-4 column."""
+    if rr >= 100.0:
+        return "99+"
+    if rr >= 10.0:
+        return f"{rr:.1f}"   # "10.0"–"99.9" = 4 chars
+    return f"{rr:.2f}"       # "0.00"–"9.99" = 4 chars
+
+
+def _fmt_dur(minutes: float) -> str:
+    """Format duration for width-4 column; switches to hours above 999 min."""
+    m = int(minutes)
+    if m < 1000:
+        return f"{m}m"
+    return f"{m // 60}h"
+
+
+def _fmt_dd_pct(pct: float) -> str:
+    """Format drawdown % for width-5 column; cap at '100%' to prevent overflow."""
+    if pct >= 100.0:
+        return "100%"
+    return f"{pct:.1f}%"
+
+
 def _row(env_idx: int | str, info: dict) -> str:
     n_trades = int(round(info.get("n_trades", 0)))
     win_rate = info.get("win_rate", 0.0)
@@ -130,29 +172,37 @@ def _row(env_idx: int | str, info: dict) -> str:
     avg_l    = info.get("avg_loss_dollars", 0.0)
     rr       = info.get("avg_rr", 0.0)
     dur      = info.get("avg_duration_minutes", 0.0)
+    n_tp     = int(round(info.get("n_tp", 0)))
+    n_sc     = int(round(info.get("n_sc", 0)))
+    n_sl     = int(round(info.get("n_sl", 0)))
+    n_aex    = int(round(info.get("n_agent_exit", 0)))
 
     env_str = f"{env_idx:>3}" if isinstance(env_idx, int) else f"{str(env_idx):>3}"
 
     cells = [
-        (env_str,               3, "l"),
-        (f"{n_trades}",         4, "r"),
-        (f"{win_rate*100:.1f}%",5, "r"),
-        (_fmt_pnl(pnl_d),       7, "r"),
-        (_fmt_pf(pf),           5, "r"),
-        (f"{sh:.2f}",           5, "r"),
-        (f"{dd_pct:.1f}%",      5, "r"),
-        (f"{rth_tr}",           4, "r"),
-        (f"{rth_wr*100:.0f}%",  4, "r"),
-        (_fmt_pf(rth_pf),       5, "r"),
-        (f"{rth_rr:.2f}",       4, "r"),
-        (f"{eth_tr}",           4, "r"),
-        (f"{eth_wr*100:.0f}%",  4, "r"),
-        (_fmt_pf(eth_pf),       5, "r"),
-        (f"{eth_rr:.2f}",       4, "r"),
-        (_fmt_dollars(avg_w),   6, "r"),
-        (_fmt_dollars(avg_l),   6, "r"),
-        (f"{rr:.2f}",           4, "r"),
-        (f"{dur:.0f}m",         4, "r"),
+        (env_str,                  3, "l"),
+        (_fmt_count(n_trades, 4),  4, "r"),
+        (f"{win_rate*100:.1f}%",   5, "r"),
+        (_fmt_pnl(pnl_d),          7, "r"),
+        (_fmt_pf(pf),              5, "r"),
+        (f"{sh:.2f}",              5, "r"),
+        (_fmt_dd_pct(dd_pct),      5, "r"),
+        (_fmt_count(rth_tr, 4),    4, "r"),
+        (f"{rth_wr*100:.0f}%",     4, "r"),
+        (_fmt_pf(rth_pf),          5, "r"),
+        (_fmt_rr(rth_rr),          4, "r"),
+        (_fmt_count(eth_tr, 4),    4, "r"),
+        (f"{eth_wr*100:.0f}%",     4, "r"),
+        (_fmt_pf(eth_pf),          5, "r"),
+        (_fmt_rr(eth_rr),          4, "r"),
+        (_fmt_dollars(avg_w),      6, "r"),
+        (_fmt_dollars(avg_l),      6, "r"),
+        (_fmt_rr(rr),              4, "r"),
+        (_fmt_dur(dur),            4, "r"),
+        (_fmt_count(n_tp,  4),     4, "r"),
+        (_fmt_count(n_sc,  4),     4, "r"),
+        (_fmt_count(n_sl,  4),     4, "r"),
+        (_fmt_count(n_aex, 4),     4, "r"),
     ]
 
     parts = []
@@ -370,6 +420,7 @@ class MetricsPrinterCallback(BaseCallback):
 
 _INT_KEYS = {
     "n_trades", "n_wins", "n_losses",
+    "n_tp", "n_sc", "n_sl", "n_agent_exit",
     "rth_trades", "rth_wins", "eth_trades", "eth_wins",
     "min_duration_minutes", "max_duration_minutes",
 }

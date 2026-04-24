@@ -583,13 +583,19 @@ class TradingEnv(gym.Env):
         else:
             # Step-level reward (entry quality shaping, etc.)
             order_zone_state = self._get_current_order_zone_state()
+            _ps = self.position_manager.state
+            bars_in_trade = (
+                self._current_step - _ps.entry_bar_idx
+                if _ps.is_open else 0
+            )
             reward_breakdown = self.reward_calculator.step_reward(
                 action=action,
-                is_position_open=self.position_manager.state.is_open,
+                is_position_open=_ps.is_open,
                 atr_state=atr_state,
                 order_zone_state=order_zone_state,
                 portfolio_state=portfolio_state,
                 pending_order=self._pending_order,
+                bars_in_trade=bars_in_trade,
             )
 
         # ── Check termination conditions ──────────────────────
@@ -1046,16 +1052,27 @@ class TradingEnv(gym.Env):
         Determine the take-profit target.
 
         Priority:
-          1. Zone impulse extreme — the high of the bullish impulse bar (LONG target)
-             or the low of the bearish impulse bar (SHORT target).  This is the
-             natural swing level the market already reached once from this zone,
-             making it a realistic, strategy-faithful objective.
-          2. ATR projection fallback — used when no zone or impulse_extreme is 0.
-
-        The target is validated: for LONG it must be above entry; for SHORT below.
-        If the impulse extreme fails validation (e.g. zone formed from a small bar),
-        we fall back to the ATR projection.
+          1. Opposing zone near edge — the structural liquidity target.
+             LONG: nearest_supply.bottom (resistance ceiling above entry).
+             SHORT: nearest_demand.top  (support floor below entry).
+             This matches the range-high / range-low that price was rejected
+             from before the sweep that created the entry setup.
+          2. Impulse extreme of the entry zone — fallback when no opposing
+             zone exists on the correct side.
+          3. ATR projection — final fallback.
         """
+        # ── Priority 1: opposing zone near edge ───────────────────────────────
+        if zone_state is not None:
+            if direction == 1 and zone_state.nearest_supply is not None:
+                candidate = zone_state.nearest_supply.bottom
+                if candidate > entry_price:
+                    return candidate
+            elif direction == -1 and zone_state.nearest_demand is not None:
+                candidate = zone_state.nearest_demand.top
+                if candidate < entry_price:
+                    return candidate
+
+        # ── Priority 2: impulse extreme of the entry zone ─────────────────────
         zone = None
         if direction == 1 and zone_state and zone_state.nearest_demand:
             zone = zone_state.nearest_demand
@@ -1064,12 +1081,12 @@ class TradingEnv(gym.Env):
 
         if zone is not None and abs(zone.impulse_extreme) > 1e-6:
             extreme = zone.impulse_extreme
-            # Validate direction: LONG target must be above entry, SHORT below
             if direction == 1 and extreme > entry_price:
                 return extreme
             if direction == -1 and extreme < entry_price:
                 return extreme
 
+        # ── Priority 3: ATR projection ────────────────────────────────────────
         return ATRCalculator.compute_atr_target_price(entry_price, direction, atr_state)
 
     def _sample_episode_day(self) -> str:
@@ -1273,6 +1290,7 @@ class TradingEnv(gym.Env):
                     "is_win":         t.is_win,
                     "is_rth":         _trade_is_rth[i],
                     "mae_r":          round(t.max_adverse_excursion, 4),
+                    "mfe_r":          round(getattr(t, "max_favorable_excursion", 0.0), 4),
                 }
                 for i, t in enumerate(trades)
             ],

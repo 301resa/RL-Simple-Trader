@@ -23,7 +23,8 @@ class EnvCumulative:
 
     __slots__ = (
         "n_trades", "n_wins", "n_losses",
-        "n_episodes",                           # completed episodes — used for Tr/wk
+        "n_tp", "n_sl", "n_sc", "n_agent_exit",  # exit reason breakdown (TP+SC+SL+AEx = n_trades)
+        "n_episodes",                            # completed episodes — used for Tr/wk
         "total_pnl_r", "total_pnl_dollars",
         "gross_win_r", "gross_loss_r",
         "gross_win_dollars", "gross_loss_dollars",
@@ -44,6 +45,7 @@ class EnvCumulative:
 
     def __init__(self) -> None:
         self.n_trades = self.n_wins = self.n_losses = 0
+        self.n_tp = self.n_sl = self.n_sc = self.n_agent_exit = 0
         self.n_episodes = 0
         self.total_pnl_r = self.total_pnl_dollars = 0.0
         self.gross_win_r = self.gross_loss_r = 0.0
@@ -106,6 +108,15 @@ class EnvCumulative:
             t_pnl_r = float(t.get("pnl_r", 0.0))
             t_dur   = float(t.get("duration_min", 0.0))
             t_win   = bool(t.get("is_win", False))
+            _reason = t.get("exit_reason", "")
+            if _reason == "take_profit":
+                self.n_tp += 1
+            elif _reason == "scale_out":
+                self.n_sc += 1
+            elif _reason in ("stop_loss", "trailing_stop", "session_end", "max_drawdown"):
+                self.n_sl += 1
+            elif _reason == "agent_exit":
+                self.n_agent_exit += 1
             if t.get("is_rth", True):
                 if t_win:
                     self.rth_gross_win_r += t_pnl_r
@@ -226,6 +237,10 @@ class EnvCumulative:
             "n_trades":             n,
             "n_wins":               nw,
             "n_losses":             nl,
+            "n_tp":                 self.n_tp,
+            "n_sc":                 self.n_sc,
+            "n_sl":                 self.n_sl,
+            "n_agent_exit":         self.n_agent_exit,
             "trades_per_week":      trades_per_week,
             "win_rate":             win_rate,
             "total_pnl_r":          self.total_pnl_r,

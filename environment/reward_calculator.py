@@ -108,10 +108,13 @@ class RewardCalculator:
         exit_penalties: Optional[dict] = None,
         violations: Optional[dict] = None,
         discipline: Optional[dict] = None,
+        time_management: Optional[dict] = None,
+        selectivity: Optional[dict] = None,
         entry_cost: float = -0.05,
         gave_back_profit_weight: float = 0.30,
         mae_penalty_weight: float = 0.40,
         mae_threshold_r: float = 0.40,
+        mfe_efficiency_weight: float = 0.15,
     ) -> None:
         self.core_scale = core_scale
         self.hold_flat_penalty = hold_flat_penalty
@@ -119,6 +122,20 @@ class RewardCalculator:
         self.gave_back_profit_weight = gave_back_profit_weight
         self.mae_penalty_weight = mae_penalty_weight
         self.mae_threshold_r = mae_threshold_r
+        self.mfe_efficiency_weight = mfe_efficiency_weight
+        self.time_management = time_management or {
+            "max_bars_before_penalty": 12,
+            "penalty_per_bar": -0.01,
+            "bonus_fast_resolution": 0.10,
+            "fast_trade_bars": 6,
+            "min_hold_bars": 2,
+            "too_fast_penalty": -0.10,
+        }
+        self.selectivity = selectivity or {
+            "no_trade_reward": 0.05,
+            "weak_zone_penalty": -0.05,
+            "min_confluence_for_entry": 0.5,
+        }
 
         # Shaping scale: 1.0 = full shaping, 0.0 = pure P&L only.
         # Decayed externally by ShapingDecayCallback during training.
@@ -183,6 +200,7 @@ class RewardCalculator:
         portfolio_state: dict,
         min_rr_ratio: float = 2.0,
         pending_order: dict | None = None,
+        bars_in_trade: int = 0,
     ) -> RewardBreakdown:
         """
         Compute the per-step reward (excluding trade close rewards).
@@ -205,57 +223,35 @@ class RewardCalculator:
             Current pending limit order, if any.  When a pending order is
             active, HOLD is the *correct* action (waiting for fill) and must
             not be penalised.
+        bars_in_trade : int
+            Number of bars the current position has been open (0 when flat).
         """
-
-
-        '''
-    # add this later 
-    if position.is_open:
-
-        trade_duration = position.bars_in_trade
-
-        # ── Penalty for overstaying ─────────────────────
-        if trade_duration > cfg.time_management.max_bars_before_penalty:
-            extra_bars = trade_duration - cfg.time_management.max_bars_before_penalty
-            reward += extra_bars * cfg.time_management.penalty_per_bar
-
-        # ── Bonus for efficient trades ──────────────────
-        if position.just_closed and position.pnl_r > 0:
-            if trade_duration <= cfg.time_management.fast_trade_bars:
-                reward += cfg.time_management.bonus_fast_resolution
-if not position.is_open:
-
-    confluence = state.order_zone.confluence_score
-
-    # ── GOOD: staying flat when no edge ─────────────
-    if confluence < cfg.selectivity.min_confluence_for_entry:
-        if action == Action.HOLD:
-            reward += cfg.selectivity.no_trade_reward
-
-        if action in (Action.ENTER_LONG, Action.ENTER_SHORT):
-            reward += cfg.selectivity.weak_zone_penalty
-
-
-    '''
-       
         reward = 0.0
         entry_bonus = 0.0
         entry_penalty = 0.0
         step_penalty = 0.0
         note = ""
-        
-        # ── Hold / WAIT penalty ───────────────────────────────
-        # Penalise idling ONLY when a valid zone setup is present AND no pending
-        # order is already waiting.  If a pending order is active the agent has
-        # already committed — HOLD is correct and must not be penalised.
+
+        # ── Time management: overstay penalty (per bar beyond threshold) ──────
+        if is_position_open and bars_in_trade > self.time_management.get("max_bars_before_penalty", 12):
+            step_penalty += self.time_management.get("penalty_per_bar", -0.01) * self.shaping_scale
+            note += "overstaying "
+
+        # ── Hold / WAIT logic ─────────────────────────────────────────────────
         if action == 0 and not is_position_open:
             setup_present = (
                 order_zone_state.in_bearish_order_zone
                 or order_zone_state.in_bullish_order_zone
             )
             if setup_present and pending_order is None:
+                # Zone is present but agent is doing nothing — penalise inaction
                 step_penalty += self.hold_flat_penalty
-                note = "hold_flat_in_zone"
+                note += "hold_flat_in_zone "
+            elif (not setup_present
+                  and order_zone_state.confluence_score < self.selectivity.get("min_confluence_for_entry", 0.5)):
+                # No valid setup — reward disciplined waiting
+                step_penalty += self.selectivity.get("no_trade_reward", 0.05)
+                note += "patience_no_setup "
 
         # ── Entry bonuses & penalties ─────────────────────────
         elif action in (1, 2):  # ENTER_SHORT or ENTER_LONG
@@ -285,6 +281,12 @@ if not position.is_open:
             if order_zone_state.rr_ratio < min_rr_ratio:
                 entry_penalty += self.entry_penalties["rr_below_minimum"] * self.shaping_scale
                 note += "rr_too_low "
+
+            # Selectivity: penalise entering when confluence is below threshold
+            if (order_zone_state.confluence_score
+                    < self.selectivity.get("min_confluence_for_entry", 0.5)):
+                entry_penalty += self.selectivity.get("weak_zone_penalty", -0.05) * self.shaping_scale
+                note += "weak_confluence "
 
             # Zone presence check
             in_zone = (
@@ -412,6 +414,36 @@ if not position.is_open:
             exit_penalty -= self.mae_penalty_weight * mae_excess * self.shaping_scale
             note += f"mae_{trade.max_adverse_excursion:.2f}r "
 
+        # ── MFE efficiency: reward capturing a high fraction of the max move ──
+        # Only applies when the trade had meaningful upside (MFE > 0.1R).
+        # efficiency = pnl_r / mfe_r — capped at 1.5 to handle TP overshoots.
+        # Losing trades with prior upside score 0 (not additionally penalised;
+        # MAE penalty and core_r loss already handle that).
+        # SCALE_OUT excluded — partial exits always score < 1 by construction.
+        mfe_r = getattr(trade, "max_favorable_excursion", 0.0)
+        if (mfe_r > 0.1
+                and trade.exit_reason != ExitReason.SCALE_OUT
+                and self.mfe_efficiency_weight > 0.0):
+            efficiency = float(np.clip(trade.pnl_r / mfe_r, 0.0, 1.5))
+            exit_bonus += self.mfe_efficiency_weight * efficiency * self.shaping_scale
+            note += f"mfe_eff_{efficiency:.2f} "
+
+        # ── Duration rewards / penalties ──────────────────────────────────────
+        # Penalise agent-initiated exits that close far too quickly (noise trades).
+        # Reward TP hits within the "sweet spot" window (high-quality sniper entries
+        # that work quickly and cleanly — minimal overstay, minimal noise).
+        duration_bars = trade.exit_bar_idx - trade.entry_bar_idx
+        min_hold = self.time_management.get("min_hold_bars", 2)
+        fast_bars = self.time_management.get("fast_trade_bars", 6)
+        if duration_bars < min_hold and trade.exit_reason == ExitReason.AGENT_EXIT:
+            exit_penalty += self.time_management.get("too_fast_penalty", -0.10) * self.shaping_scale
+            note += f"too_fast_exit_{duration_bars}bars "
+        elif (min_hold <= duration_bars <= fast_bars
+              and trade.exit_reason == ExitReason.TAKE_PROFIT
+              and trade.pnl_r > 0):
+            exit_bonus += self.time_management.get("bonus_fast_resolution", 0.10) * self.shaping_scale
+            note += "fast_resolution "
+
         # core_r is NEVER scaled — always full P&L signal
         total = (core_r + exit_bonus + exit_penalty) * self.core_scale
 
@@ -466,8 +498,11 @@ if not position.is_open:
             exit_penalties=cfg.get("exit_penalties", {}),
             violations=cfg.get("violations", {}),
             discipline=cfg.get("discipline", {}),
+            time_management=cfg.get("time_management", {}),
+            selectivity=cfg.get("selectivity", {}),
             entry_cost=ep.get("entry_cost", -0.05),
             gave_back_profit_weight=cfg.get("exit_penalties", {}).get("gave_back_profit_pct", 0.30),
             mae_penalty_weight=ep.get("mae_penalty_weight", 0.40),
             mae_threshold_r=ep.get("mae_threshold_r", 0.40),
+            mfe_efficiency_weight=cfg.get("exit_rewards", {}).get("mfe_efficiency_weight", 0.15),
         )

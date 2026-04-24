@@ -33,10 +33,15 @@ daily_limits:
   max_daily_loss_r: 3.0          # stop trading after -3R on the day
   max_daily_loss_dollars: 2000.0 # hard $ cap (whichever limit triggers first)
   max_trades_per_day: 999        # no hard cap — daily loss limit is the natural brake
-  max_consecutive_losses_before_pause: 3
-  pause_bars_after_loss_streak: 15  # bars to sit out after loss streak
+  max_consecutive_losses_before_pause: 5
+  pause_bars_after_loss_streak: 8   # bars to sit out after loss streak
 
 session:
   no_entry_last_n_bars: 3        # no new entries in last 3 bars of session
-  min_bars_between_trades: 4    # minimum bars between trade close and next entry (30 min @ 5-min bars)
+  min_bars_between_trades: 2    # minimum bars between trade close and next entry (10 min @ 5-min bars)
   max_pending_order_bars: 12    # cancel pending limit orders older than this many bars (25 min @ 5-min bars)
+
+scale_out:
+  enabled: true
+  at_r: 1.0           # close fraction at this unrealised R (intrabar high/low)
+  fraction: 0.5        # fraction of contracts to close (0.5 = half)

@@ -115,6 +115,64 @@ class CurriculumCallback(BaseCallback):
             pass  # SubprocVecEnv — more complex; skip for now
 
 
+class BadWorkerMonitorCallback(BaseCallback):
+    """
+    Detects chronically-losing env workers and force-resets them.
+
+    Tracks each worker's episode-level PnL (R) over a rolling window.
+    If a worker's mean PnL stays below loss_threshold_r for a full window,
+    its env is reset via env_method — unsticking degenerate exploration states.
+    Only acts on envs with enough episodes to have a reliable signal.
+    """
+
+    def __init__(
+        self,
+        pnl_window: int = 30,
+        loss_threshold_r: float = -4.0,
+        check_freq: int = 5_000,
+        verbose: int = 0,
+    ) -> None:
+        super().__init__(verbose)
+        self._pnl_window = pnl_window
+        self._loss_threshold_r = loss_threshold_r
+        self._check_freq = check_freq
+        self._env_pnl: Dict[int, List[float]] = {}
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [])
+        dones = self.locals.get("dones", [])
+
+        for i, (info, done) in enumerate(zip(infos, dones)):
+            if done and "total_pnl_r" in info and info.get("n_trades", 0) > 0:
+                buf = self._env_pnl.setdefault(i, [])
+                buf.append(info["total_pnl_r"])
+                if len(buf) > self._pnl_window:
+                    del buf[0]
+
+        if self.num_timesteps > 0 and self.num_timesteps % self._check_freq == 0:
+            self._check_and_reset()
+
+        return True
+
+    def _check_and_reset(self) -> None:
+        for i, buf in self._env_pnl.items():
+            if len(buf) < self._pnl_window:
+                continue
+            avg = float(np.mean(buf))
+            if avg < self._loss_threshold_r:
+                try:
+                    self.training_env.env_method("reset", indices=[i])
+                    buf.clear()
+                    log.info(
+                        "BadWorker reset",
+                        env_idx=i,
+                        avg_pnl_r=round(avg, 2),
+                        threshold=self._loss_threshold_r,
+                    )
+                except Exception as exc:
+                    log.warning("BadWorker reset failed", env_idx=i, error=str(exc))
+
+
 class EntropyAnnealingCallback(BaseCallback):
     """
     Linearly anneals the entropy coefficient during training.
@@ -402,7 +460,17 @@ class Trainer:
             )
         )
 
-        # 9. Curriculum (optional)
+        # 9. Bad-worker monitor — resets chronically-losing env workers
+        cbs.append(
+            BadWorkerMonitorCallback(
+                pnl_window=30,
+                loss_threshold_r=-4.0,
+                check_freq=5_000,
+                verbose=0,
+            )
+        )
+
+        # 10. Curriculum (optional)
         if self.curriculum_scheduler is not None:
             cbs.append(CurriculumCallback(self.curriculum_scheduler))
 

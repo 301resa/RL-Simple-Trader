@@ -177,11 +177,18 @@ Stop widening is **never** allowed once placed.
 
 ### Take Profit
 
-Target = the **high of the last up-leg** (for a LONG) or the **low of the last down-leg** (for a SHORT).
+Three-priority target selection (`_compute_target_price`):
 
-This is the swing extreme of the most recent directional move before the pullback/dip
-that created the supply/demand zone. The agent targets that prior swing high or low
-as the natural first profit objective.
+1. **Opposing zone near edge** *(primary)* — the structural liquidity level on the far side of the range:
+   - LONG: `nearest_supply.bottom` (bottom of the nearest overhead supply zone)
+   - SHORT: `nearest_demand.top` (top of the nearest underlying demand zone)
+   This mirrors how the trade is entered: range low for shorts, range high for longs.
+
+2. **Impulse extreme of the entry zone** *(fallback 1)* — the actual high (supply) or low (demand)
+   of the impulse bar that confirmed the zone, used when no valid opposing zone is present.
+
+3. **ATR projection** *(fallback 2)* — 1× ATR from entry, used only when both zone-based
+   targets are unavailable.
 
 ### Trailing Stop
 
@@ -489,10 +496,10 @@ metrics and log results without writing any model files (useful for exploration 
   demand zone whose `top` edge is nearest (LONG limit placed at demand.top).
   Selection is by the entry-side edge so the closest actionable zone is always chosen.
 
-- **Impulse-extreme take-profit**: each detected zone stores the `impulse_extreme` — the
-  actual high (supply) or low (demand) of the impulse bar that confirmed the zone. This
-  swing extreme is used as the primary take-profit target, replacing the ATR-projection
-  approximation. Falls back to ATR projection only when `impulse_extreme` is absent.
+- **Opposing-zone take-profit** (three-priority): primary target is the near edge of the
+  opposing zone (`nearest_supply.bottom` for LONG, `nearest_demand.top` for SHORT) — the
+  structural liquidity level at the far side of the range. Falls back to the entry zone's
+  `impulse_extreme` when no opposing zone is present, then to ATR projection as last resort.
 
 - **Dollar-based Profit Factor** (`profit_factor_usd`): `test_fold` scoring uses
   gross-profit-dollars / gross-loss-dollars as the primary metric. R-based PF can show

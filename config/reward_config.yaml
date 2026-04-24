@@ -42,6 +42,7 @@ exit_rewards:
   trailing_stop_correctly: 0.5       # used trail stop before exit
   aggressive_trail_at_4r: 0.20        # trailed aggressively at 4R profit
   exit_at_atr_target: 0.20            # hit the ATR-based profit target
+  mfe_efficiency_weight: 0.15         # reward for capturing fraction of max favorable move
 
 exit_penalties:
   held_past_4r_no_trail: -0.50        # held past 4R without trailing
@@ -66,6 +67,8 @@ selectivity:
 
 time_management:
   max_bars_before_penalty: 12        # ~1 hour on 5min TF
-  penalty_per_bar: -0.01             # after threshold
-  bonus_fast_resolution: 0.10        # if TP hit quickly
+  penalty_per_bar: -0.01             # per-bar penalty after threshold
+  bonus_fast_resolution: 0.10        # if TP hit within fast_trade_bars
   fast_trade_bars: 6                 # reward if TP within this
+  min_hold_bars: 2                   # penalize agent_exit before this many bars
+  too_fast_penalty: -0.10            # penalty for agent-exiting too quickly

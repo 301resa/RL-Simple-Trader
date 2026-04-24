@@ -23,7 +23,6 @@ ppo:
   vf_coef: 0.8                     # value function coefficient
   max_grad_norm: 0.5               # gradient clipping
   total_timesteps: 4_000_000       # total training steps
-  eval_freq: 100_000               # evaluate every N steps
 
 network:
   net_arch:
@@ -84,7 +83,7 @@ hotsave:
 
 augmentation:
   # max_jitter_pts comes from the instrument profile (jitter_ticks × tick_size).
-  trend_scale:    0.15   # session return scaling ±15%
+  trend_scale:    0.08   # session return scaling ±8%
 
 multiprocessing:
   n_envs: 8              # parallel training environments

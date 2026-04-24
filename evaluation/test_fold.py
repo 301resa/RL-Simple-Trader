@@ -216,7 +216,12 @@ def _run_checkpoint(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
-    """Compute summary metrics from raw trade list."""
+    """Compute summary metrics from raw trade list.
+
+    SCALE_OUT partial closes are excluded from win-rate / count / W:L
+    calculations (they always win at 1R and would inflate those stats),
+    but their P&L is included in total_pnl totals.
+    """
     if not trades:
         return {
             "n_trades": 0, "win_rate": 0.0,
@@ -228,8 +233,13 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
             "avg_duration_min": 0.0,
         }
 
-    pnl_r   = [t["pnl_r"] for t in trades]
-    pnl_usd = [t.get("pnl_dollars", 0.0) for t in trades]
+    # Separate scale-out partials from complete trades
+    full_trades = [t for t in trades if t.get("exit_reason") != "scale_out"]
+    if not full_trades:
+        full_trades = trades  # fallback — shouldn't happen in normal runs
+
+    pnl_r   = [t["pnl_r"] for t in full_trades]
+    pnl_usd = [t.get("pnl_dollars", 0.0) for t in full_trades]
     wins_r   = [p for p in pnl_r   if p > 0]
     losses_r = [p for p in pnl_r   if p <= 0]
     wins_u   = [p for p in pnl_usd if p > 0]
@@ -237,8 +247,9 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
     n = len(pnl_r)
 
     win_rate   = len(wins_r) / n
-    total_pnl  = sum(pnl_r)
-    total_usd  = sum(pnl_usd)
+    # Total P&L includes scale-out partial contributions (real money)
+    total_pnl  = sum(t["pnl_r"] for t in trades)
+    total_usd  = sum(t.get("pnl_dollars", 0.0) for t in trades)
     avg_win    = float(np.mean(wins_r))   if wins_r   else 0.0
     avg_loss   = float(abs(np.mean(losses_r))) if losses_r else 0.0
     avg_win_u  = float(np.mean(wins_u))   if wins_u   else 0.0
@@ -263,9 +274,11 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
         sd = float(np.std(ep_pnls))
         sharpe = (mu / sd) * np.sqrt(252) if sd > 1e-9 else 0.0
 
-    # Max drawdown (R and $)
-    eq_r   = np.cumsum(pnl_r)
-    eq_usd = np.cumsum(pnl_usd)
+    # Max drawdown using all trades in chronological order (including scale-outs)
+    all_pnl_r   = [t["pnl_r"] for t in trades]
+    all_pnl_usd = [t.get("pnl_dollars", 0.0) for t in trades]
+    eq_r   = np.cumsum(all_pnl_r)
+    eq_usd = np.cumsum(all_pnl_usd)
     peak_r   = np.maximum.accumulate(eq_r)
     peak_usd = np.maximum.accumulate(eq_usd)
     max_dd   = float((peak_r   - eq_r).max())   if n > 0 else 0.0
@@ -273,8 +286,15 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
 
     avg_dur = float(np.mean([t.get("duration_min", 0) for t in trades]))
 
+    n_tp       = sum(1 for t in full_trades if t.get("exit_reason") == "take_profit")
+    n_sl       = sum(1 for t in full_trades if t.get("exit_reason") in ("stop_loss", "trailing_stop"))
+    n_agent_exit = sum(1 for t in full_trades if t.get("exit_reason") == "agent_exit")
+
     return {
         "n_trades":           n,
+        "n_tp":               n_tp,
+        "n_sl":               n_sl,
+        "n_agent_exit":       n_agent_exit,
         "win_rate":           round(win_rate,    4),
         "total_pnl_r":        round(total_pnl,   4),
         "total_pnl_dollars":  round(total_usd,   2),
@@ -353,6 +373,9 @@ _COL_W = {
     "sharpe":     8,
     "dd":         9,   # dollars: e.g. $12,345
     "dur":        7,
+    "tp":         5,
+    "sl":         5,
+    "aex":        5,
     "comp":       7,
 }
 
@@ -366,6 +389,9 @@ def _header_row() -> str:
         f"{'Sharpe':>{_COL_W['sharpe']}}"
         f"{'MaxDD($)':>{_COL_W['dd']}}"
         f"{'AvgMin':>{_COL_W['dur']}}"
+        f"{'TP':>{_COL_W['tp']}}"
+        f"{'SL':>{_COL_W['sl']}}"
+        f"{'AEx':>{_COL_W['aex']}}"
         f"{'Score':>{_COL_W['comp']}}"
     )
 
@@ -383,6 +409,9 @@ def _data_row(name: str, m: dict, score: float) -> str:
         f"{m['sharpe']:>{_COL_W['sharpe']}.3f}"
         f"{dd_str:>{_COL_W['dd']}}"
         f"{m['avg_duration_min']:>{_COL_W['dur']}.1f}"
+        f"{m.get('n_tp', 0):>{_COL_W['tp']}}"
+        f"{m.get('n_sl', 0):>{_COL_W['sl']}}"
+        f"{m.get('n_agent_exit', 0):>{_COL_W['aex']}}"
         f"{score:>{_COL_W['comp']}.3f}"
     )
 
@@ -501,19 +530,40 @@ def _build_journal(
     pnl_vals:  List[float] = []
 
     for t in trades:
-        is_long    = t["direction"].upper() == "LONG"
-        is_win     = t["is_win"]
-        entry_px   = t["entry_price"]
-        stop_px    = t["stop_price"]
-        tgt_px     = t["initial_target"]
-        exit_px    = t["exit_price"]
-        pnl_r      = t["pnl_r"]
-        entry_time = t["entry_time"]
-        exit_time  = t["exit_time"]
-        reason     = t.get("exit_reason", "")
-        dur_min    = t.get("duration_min", 0)
-        contracts  = t.get("n_contracts", 1)
-        pnl_pts    = t.get("pnl_points", 0.0)
+        is_long     = t["direction"].upper() == "LONG"
+        is_win      = t["is_win"]
+        is_scale_out = t.get("exit_reason") == "scale_out"
+        entry_px    = t["entry_price"]
+        stop_px     = t["stop_price"]
+        tgt_px      = t["initial_target"]
+        exit_px     = t["exit_price"]
+        pnl_r       = t["pnl_r"]
+        entry_time  = t["entry_time"]
+        exit_time   = t["exit_time"]
+        reason      = t.get("exit_reason", "")
+        dur_min     = t.get("duration_min", 0)
+        contracts   = t.get("n_contracts", 1)
+        pnl_pts     = t.get("pnl_points", 0.0)
+
+        if is_scale_out:
+            # Scale-out partial: render as a single orange diamond at exit price/time.
+            # No entry marker, no SL/TP lines — this is a mid-trade partial exit.
+            fig.add_trace(go.Scatter(
+                x=[exit_time], y=[exit_px], mode="markers",
+                marker=dict(symbol="diamond", color="#FFA726", size=10,
+                            line=dict(width=1, color="white")),
+                showlegend=False,
+                hovertemplate=(
+                    f"<b>⚡ Scale Out</b><br>"
+                    f"Time : {exit_time}<br>"
+                    f"Price: {exit_px}<br>"
+                    f"Lots : {contracts}<br>"
+                    f"PnL  : {pnl_r:+.2f}R<extra></extra>"
+                ),
+            ), row=1, col=1)
+            pnl_times.append(exit_time)
+            pnl_vals.append(pnl_r)
+            continue  # skip entry marker / SL-TP lines for partial exits
 
         entry_sym = "triangle-up"   if is_long else "triangle-down"
         entry_col = "#2196F3"
@@ -560,7 +610,7 @@ def _build_journal(
             showlegend=False, hoverinfo="skip",
         ), row=1, col=1)
 
-        # SL line (solid red, entry→exit) — use Scatter so it renders on the correct subplot
+        # SL line (solid red, entry→exit)
         fig.add_trace(go.Scatter(
             x=[entry_time, exit_time], y=[stop_px, stop_px],
             mode="lines",
@@ -569,7 +619,7 @@ def _build_journal(
             hovertemplate=f"<b>Stop Loss</b>: {stop_px}<extra></extra>",
         ), row=1, col=1)
 
-        # TP line (solid green, entry→exit) — same reason
+        # TP line (solid green, entry→exit)
         fig.add_trace(go.Scatter(
             x=[entry_time, exit_time], y=[tgt_px, tgt_px],
             mode="lines",
@@ -648,6 +698,14 @@ def _build_journal(
             f'</div>'
         )
 
+    n_tp  = m.get("n_tp", 0)
+    n_sl  = m.get("n_sl", 0)
+    n_aex = m.get("n_agent_exit", 0)
+    n_full = m["n_trades"]
+    tp_pct  = f" ({n_tp/n_full*100:.0f}%)"  if n_full else ""
+    sl_pct  = f" ({n_sl/n_full*100:.0f}%)"  if n_full else ""
+    aex_pct = f" ({n_aex/n_full*100:.0f}%)" if n_full else ""
+
     pos = "pos" if m["total_pnl_r"] >= 0 else "neg"
     tiles = "".join([
         tile("Trades",       str(m["n_trades"])),
@@ -661,19 +719,34 @@ def _build_journal(
         tile("Avg Win",      f"${m['avg_win_dollars']:,.0f}",           "pos"),
         tile("Avg Loss",     f"-${m['avg_loss_dollars']:,.0f}",         "neg"),
         tile("Avg Dur",      f"{m['avg_duration_min']:.0f} min"),
+        tile("TP Exits",     f"{n_tp}{tp_pct}",                         "pos"),
+        tile("SL Exits",     f"{n_sl}{sl_pct}",                         "neg" if n_sl > n_tp else ""),
+        tile("Agent Exits",  f"{n_aex}{aex_pct}"),
         tile("Score",        f"{score:.3f}",                             "pos" if score >= 0.2 else "neg"),
     ])
 
     # ── Trade table ───────────────────────────────────────────────────────────
+    full_trades_count = sum(1 for t in trades if t.get("exit_reason") != "scale_out")
+    scale_out_count   = sum(1 for t in trades if t.get("exit_reason") == "scale_out")
+    table_caption = f"{full_trades_count} full trades"
+    if scale_out_count:
+        table_caption += f" + {scale_out_count} scale-out partials (⚡ orange rows)"
+
     rows_html = ""
     for i, t in enumerate(sorted(trades, key=lambda x: x["entry_time"]), 1):
-        cls = "win-row" if t["is_win"] else "loss-row"
+        is_scale_out = t.get("exit_reason") == "scale_out"
+        if is_scale_out:
+            cls = "scaleout-row"
+            dir_label = f"⚡ {'▲' if t['direction'].upper()=='LONG' else '▼'} SO"
+        else:
+            cls = "win-row" if t["is_win"] else "loss-row"
+            dir_label = "▲ LONG" if t["direction"].upper() == "LONG" else "▼ SHORT"
         pnl_cls = "pos" if t["pnl_r"] >= 0 else "neg"
         rows_html += (
             f'<tr class="{cls}">'
             f'<td>{i}</td>'
             f'<td>{t["date"]}</td>'
-            f'<td>{"▲ LONG" if t["direction"].upper()=="LONG" else "▼ SHORT"}</td>'
+            f'<td>{dir_label}</td>'
             f'<td>{t["entry_time"][11:16] if len(t["entry_time"]) > 10 else t["entry_time"]}</td>'
             f'<td>{t["exit_time"][11:16]  if len(t["exit_time"])  > 10 else t["exit_time"]}</td>'
             f'<td>{t["duration_min"]} min</td>'
@@ -733,8 +806,9 @@ def _build_journal(
   th:nth-child(-n+3) {{ text-align: left; }}
   td {{ padding: 6px 10px; border-bottom: 1px solid #1e222d; text-align: right; }}
   td:nth-child(-n+3) {{ text-align: left; }}
-  tr.win-row  td {{ background: rgba(38,166,154,0.04); }}
-  tr.loss-row td {{ background: rgba(239,83,80,0.04); }}
+  tr.win-row      td {{ background: rgba(38,166,154,0.04); }}
+  tr.loss-row     td {{ background: rgba(239,83,80,0.04); }}
+  tr.scaleout-row td {{ background: rgba(255,167,38,0.08); }}
   tr:hover td {{ background: rgba(255,255,255,0.04) !important; }}
 </style>
 </head>
@@ -743,7 +817,7 @@ def _build_journal(
 <div class="subtitle">Test period: {period_str}</div>
 <div class="tiles">{tiles}</div>
 <div class="chart-wrap">{chart_html}</div>
-<h2>Trade Journal — {len(trades)} trades</h2>
+<h2>Trade Journal — {table_caption}</h2>
 {table_html}
 </body>
 </html>"""
@@ -776,10 +850,11 @@ def _build_excel_journal(
     from openpyxl.styles import PatternFill, Font, Alignment
     from openpyxl.utils import get_column_letter
 
-    GREEN_FILL  = PatternFill("solid", fgColor="C8E6C9")
-    RED_FILL    = PatternFill("solid", fgColor="FFCDD2")
-    HEADER_FONT = Font(bold=True)
-    CENTER      = Alignment(horizontal="center")
+    GREEN_FILL   = PatternFill("solid", fgColor="C8E6C9")
+    RED_FILL     = PatternFill("solid", fgColor="FFCDD2")
+    ORANGE_FILL  = PatternFill("solid", fgColor="FFE0B2")  # scale-out rows
+    HEADER_FONT  = Font(bold=True)
+    CENTER       = Alignment(horizontal="center")
 
     _TRADE_COLS = [
         "date", "direction", "entry_time", "exit_time",
@@ -813,13 +888,23 @@ def _build_excel_journal(
             cell.font = HEADER_FONT
             cell.alignment = CENTER
 
-        # find is_win column index for row fills
+        # find column indices for row fills
         is_win_col = next(
             (i for i, cell in enumerate(ws_t[1], 1) if cell.value == "is_win"),
             None,
         )
+        exit_reason_col = next(
+            (i for i, cell in enumerate(ws_t[1], 1) if cell.value == "exit_reason"),
+            None,
+        )
         for row in ws_t.iter_rows(min_row=2):
-            fill = GREEN_FILL if (is_win_col and row[is_win_col - 1].value) else RED_FILL
+            reason_val = row[exit_reason_col - 1].value if exit_reason_col else ""
+            if reason_val == "scale_out":
+                fill = ORANGE_FILL
+            elif is_win_col and row[is_win_col - 1].value:
+                fill = GREEN_FILL
+            else:
+                fill = RED_FILL
             for cell in row:
                 cell.fill = fill
         _auto_width(ws_t)
@@ -859,6 +944,9 @@ def _build_excel_journal(
             ("Test Days",          len(test_days)),
             ("",                   ""),
             ("Trades",             metrics.get("n_trades", 0)),
+            ("  TP Exits",         metrics.get("n_tp", 0)),
+            ("  SL Exits",         metrics.get("n_sl", 0)),
+            ("  Agent Exits",      metrics.get("n_agent_exit", 0)),
             ("Win Rate",           f"{metrics.get('win_rate', 0)*100:.1f}%"),
             ("Total PnL (R)",      f"{metrics.get('total_pnl_r', 0):+.4f}"),
             ("Total PnL ($)",      f"${metrics.get('total_pnl_dollars', 0):+,.2f}"),
@@ -915,6 +1003,9 @@ def _build_leaderboard_excel(
             "Model":         r["name"],
             "Score":         r["score"],
             "Trades":        m["n_trades"],
+            "TP":            m.get("n_tp", 0),
+            "SL":            m.get("n_sl", 0),
+            "AgentExit":     m.get("n_agent_exit", 0),
             "WR%":           round(m["win_rate"] * 100, 1),
             "PnL_R":         m["total_pnl_r"],
             "PnL_$":         m["total_pnl_dollars"],
@@ -1187,6 +1278,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         "zone_buffer_atr_pct":          0.02,
     }
 
+    _scale_out_cfg = risk_cfg.get("scale_out", {})
+
     def make_position_manager():
         return PositionManager(
             real_capital=real_capital,
@@ -1207,6 +1300,9 @@ def main(argv: Optional[List[str]] = None) -> None:
             contract_tiers=instrument_profile.contract_tiers,
             confluence_tier_thresholds=instrument_profile.confluence_tier_thresholds,
             max_zone_pts=instrument_profile.max_zone_pts,
+            enable_scale_out=_scale_out_cfg.get("enabled", False),
+            scale_out_r=_scale_out_cfg.get("at_r", 1.0),
+            scale_out_fraction=_scale_out_cfg.get("fraction", 0.5),
         )
 
     session_start = session_cfg.get("rth_start_utc", "08:30")

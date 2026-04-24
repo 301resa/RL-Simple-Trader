@@ -289,6 +289,7 @@ def build_components(
     trail_cfg = risk_cfg.get("trailing", {})
     real_capital = float(account_cfg.get("initial_balance", 2500))
     point_value = instrument_profile.point_value
+    _scale_out_cfg = risk_cfg.get("scale_out", {})
 
     def make_position_manager():
         return PositionManager(
@@ -310,6 +311,9 @@ def build_components(
             contract_tiers=instrument_profile.contract_tiers,
             confluence_tier_thresholds=instrument_profile.confluence_tier_thresholds,
             max_zone_pts=instrument_profile.max_zone_pts,
+            enable_scale_out=_scale_out_cfg.get("enabled", False),
+            scale_out_r=_scale_out_cfg.get("at_r", 1.0),
+            scale_out_fraction=_scale_out_cfg.get("fraction", 0.5),
         )
 
     # ── Reward Calculator ─────────────────────────────────────
@@ -940,6 +944,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         max_jitter_pts=instrument_profile.jitter_pts,
         trend_scale=float(aug_cfg.get("trend_scale", 0.15)),
     )
+    _scale_out_cfg = risk_cfg.get("scale_out", {})
 
     def make_position_manager():
         return PositionManager(
@@ -961,6 +966,9 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             contract_tiers=instrument_profile.contract_tiers,
             confluence_tier_thresholds=instrument_profile.confluence_tier_thresholds,
             max_zone_pts=instrument_profile.max_zone_pts,
+            enable_scale_out=_scale_out_cfg.get("enabled", False),
+            scale_out_r=_scale_out_cfg.get("at_r", 1.0),
+            scale_out_fraction=_scale_out_cfg.get("fraction", 0.5),
         )
 
     def make_env(day_list, is_eval=False, worker_seed_offset=0):

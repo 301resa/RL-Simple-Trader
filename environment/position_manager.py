@@ -32,6 +32,7 @@ class ExitReason(str, Enum):
     SESSION_END  = "session_end"
     MAX_DRAWDOWN = "max_drawdown"
     TRAILING_STOP = "trailing_stop"
+    SCALE_OUT    = "scale_out"
 
 
 class PositionDirection(Enum):
@@ -57,6 +58,7 @@ class Trade:
     is_win: bool
     exit_reason: ExitReason
     max_adverse_excursion: float = 0.0
+    max_favorable_excursion: float = 0.0
     duration_bars: int = 0
     confluence_score: float = 0.0   # score at entry time
 
@@ -83,8 +85,11 @@ class PositionState:
     daily_pnl_dollars: float = 0.0
     initial_risk_pts: float = 0.0
     mae_pts: float = 0.0
+    mfe_pts: float = 0.0
     confluence_score: float = 0.0
     last_close_bar: int = -9999   # bar index of last completed trade (for min-gap enforcement)
+    partial_exit_done: bool = False  # True after scale-out fires; prevents double scale-out
+    moved_to_be: bool = False        # True after stop has been moved to break-even
 
 
 class PositionManager:
@@ -146,6 +151,9 @@ class PositionManager:
         contract_tiers: Optional[List[float]] = None,
         confluence_tier_thresholds: Optional[List[float]] = None,
         max_zone_pts: float = 10.0,
+        enable_scale_out: bool = False,
+        scale_out_r: float = 1.0,
+        scale_out_fraction: float = 0.5,
     ) -> None:
         self.real_capital = real_capital
         self.risk_per_trade_pct = risk_per_trade_pct
@@ -171,6 +179,9 @@ class PositionManager:
             else DEFAULT_CONFLUENCE_THRESHOLDS
         )
         self._max_zone_pts: float = max_zone_pts
+        self.enable_scale_out: bool = enable_scale_out
+        self.scale_out_r: float = scale_out_r
+        self.scale_out_fraction: float = scale_out_fraction
 
         self._state = PositionState(
             n_contracts=min_contracts,
@@ -325,7 +336,10 @@ class PositionManager:
         s.trailing_stop_price = stop_price
         s.initial_risk_pts = initial_risk
         s.mae_pts = 0.0
+        s.mfe_pts = 0.0
         s.confluence_score = confluence_score
+        s.partial_exit_done = False
+        s.moved_to_be = False
 
         return True, "ok"
 
@@ -356,12 +370,42 @@ class PositionManager:
         direction = s.direction
         dir_int = 1 if direction == PositionDirection.LONG else -1
 
-        # ── Track MAE (max adverse excursion in pts) ──────────
+        # ── Track MAE and MFE (in pts, using intrabar extremes) ──────────
         if direction == PositionDirection.LONG:
-            adverse_move = s.entry_price - current_bar_low
+            adverse_move   = s.entry_price - current_bar_low
+            favorable_move = current_bar_high - s.entry_price
         else:
-            adverse_move = current_bar_high - s.entry_price
+            adverse_move   = current_bar_high - s.entry_price
+            favorable_move = s.entry_price - current_bar_low
         s.mae_pts = max(s.mae_pts, adverse_move)
+        s.mfe_pts = max(s.mfe_pts, favorable_move)
+
+        # ── Scale-out at target R (intrabar high/low check) ───
+        if self.enable_scale_out and not s.partial_exit_done and s.n_contracts > 1:
+            if direction == PositionDirection.LONG:
+                bar_r = (current_bar_high - s.entry_price) / max(s.initial_risk_pts, 1e-6)
+                scale_price = s.entry_price + self.scale_out_r * s.initial_risk_pts
+            else:
+                bar_r = (s.entry_price - current_bar_low) / max(s.initial_risk_pts, 1e-6)
+                scale_price = s.entry_price - self.scale_out_r * s.initial_risk_pts
+            if bar_r >= self.scale_out_r:
+                n_to_close = max(1, int(s.n_contracts * self.scale_out_fraction))
+                if n_to_close < s.n_contracts:
+                    self._partial_close(scale_price, current_bar_idx, n_to_close, atr)
+
+        # ── Break-even at 0.8R ────────────────────────────────
+        if not s.moved_to_be:
+            unrealised_r = self._compute_pnl_r(current_price)
+            if unrealised_r >= 0.8:
+                if direction == PositionDirection.LONG:
+                    s.stop_price = max(s.stop_price, s.entry_price)
+                    if s.trailing_active:
+                        s.trailing_stop_price = max(s.trailing_stop_price, s.entry_price)
+                else:
+                    s.stop_price = min(s.stop_price, s.entry_price)
+                    if s.trailing_active:
+                        s.trailing_stop_price = min(s.trailing_stop_price, s.entry_price)
+                s.moved_to_be = True
 
         # ── Activate trailing stop if requested and profitable ─
         if agent_wants_trail and not s.trailing_active:
@@ -390,6 +434,13 @@ class PositionManager:
         exit_reason: Optional[ExitReason] = None
         exit_price  = current_price
 
+        # ── Same-bar fill guard ───────────────────────────────
+        # A pending limit filled on THIS bar: the position did not exist when
+        # the bar opened, so it is unrealistic for the stop to trigger on the
+        # same candle.  Skip stop checks; take-profit checks are still allowed
+        # (an immediate TP fill on a runaway bar is realistic).
+        same_bar_entry = (current_bar_idx == s.entry_bar_idx)
+
         # ── Conservative same-bar rule ────────────────────────
         # When a single candle touches BOTH the stop loss and the take-profit
         # the order of fills is unknown.  We always assume the stop was hit
@@ -400,7 +451,8 @@ class PositionManager:
         #
         # This prevents the model from learning to exploit ambiguous candles
         # as free take-profits.
-        if s.target_price > 0:
+        # Exception: same_bar_entry — stop is skipped; only TP is checked.
+        if s.target_price > 0 and not same_bar_entry:
             if (direction == PositionDirection.LONG
                     and current_bar_low  <= active_stop
                     and current_bar_high >= s.target_price):
@@ -414,7 +466,8 @@ class PositionManager:
                 exit_reason = stop_type
 
         # 1. Stop hit (single-sided — target NOT also hit)
-        if exit_reason is None:
+        # Skipped on same-bar fills: position just opened, stop cannot trigger yet.
+        if exit_reason is None and not same_bar_entry:
             if direction == PositionDirection.LONG and current_bar_low <= active_stop:
                 exit_price  = active_stop
                 exit_reason = stop_type
@@ -493,6 +546,71 @@ class PositionManager:
 
     # ── Private helpers ───────────────────────────────────────
 
+    def _partial_close(
+        self,
+        exit_price: float,
+        current_bar_idx: int,
+        n_to_close: float,
+        atr: float,
+    ) -> Trade:
+        """Close n_to_close contracts at exit_price, keep the rest running.
+
+        Records a SCALE_OUT Trade and automatically activates a trailing stop
+        on the remaining position so the remainder is risk-managed from 1R+.
+        Does NOT update trades_today (this is an exit event, not an entry).
+        Does NOT update consecutive_losses (scale-out is always at a profit).
+        Does NOT update last_close_bar (position is still open).
+        """
+        s = self._state
+        dir_int = 1 if s.direction == PositionDirection.LONG else -1
+        pnl_points = dir_int * (exit_price - s.entry_price)
+        pnl_r = pnl_points / s.initial_risk_pts if s.initial_risk_pts > 0 else 0.0
+        pnl_dollars = pnl_points * n_to_close * self.point_value
+        mae_r = s.mae_pts / s.initial_risk_pts if s.initial_risk_pts > 0 else 0.0
+        mfe_r = s.mfe_pts / s.initial_risk_pts if s.initial_risk_pts > 0 else 0.0
+
+        trade = Trade(
+            direction=s.direction,
+            entry_price=s.entry_price,
+            exit_price=exit_price,
+            stop_price=s.stop_price,
+            initial_target=s.target_price,
+            n_contracts=n_to_close,
+            entry_bar_idx=s.entry_bar_idx,
+            exit_bar_idx=current_bar_idx,
+            pnl_r=pnl_r,
+            pnl_points=pnl_points,
+            pnl_dollars=pnl_dollars,
+            is_win=pnl_r > 0,
+            exit_reason=ExitReason.SCALE_OUT,
+            max_adverse_excursion=mae_r,
+            max_favorable_excursion=mfe_r,
+            duration_bars=current_bar_idx - s.entry_bar_idx,
+            confluence_score=s.confluence_score,
+        )
+
+        # Track realized P&L
+        s.daily_pnl_dollars += pnl_dollars
+        s.realised_pnl_r += pnl_r
+        s.max_drawdown_remaining = self.max_daily_loss_r + s.daily_pnl_r
+
+        # Reduce contract count
+        s.n_contracts -= n_to_close
+        s.partial_exit_done = True
+
+        # Auto-activate trailing on the remaining position
+        if not s.trailing_active:
+            s.trailing_active = True
+            trail_dist = atr * self.trail_step_atr_pct
+            if s.direction == PositionDirection.LONG:
+                # Trail below the scale-out price — lock in at least breakeven
+                s.trailing_stop_price = max(s.stop_price, exit_price - trail_dist)
+            else:
+                s.trailing_stop_price = min(s.stop_price, exit_price + trail_dist)
+
+        self._completed_trades.append(trade)
+        return trade
+
     def _compute_pnl_r(self, current_price: float) -> float:
         """Compute unrealised P&L in R-multiples."""
         s = self._state
@@ -516,6 +634,7 @@ class PositionManager:
         pnl_dollars = pnl_points * s.n_contracts * self.point_value
         is_win = pnl_r > 0
         mae_r = s.mae_pts / s.initial_risk_pts if s.initial_risk_pts > 0 else 0.0
+        mfe_r = s.mfe_pts / s.initial_risk_pts if s.initial_risk_pts > 0 else 0.0
 
         trade = Trade(
             direction=s.direction,
@@ -532,6 +651,7 @@ class PositionManager:
             is_win=is_win,
             exit_reason=exit_reason,
             max_adverse_excursion=mae_r,
+            max_favorable_excursion=mfe_r,
             duration_bars=current_bar_idx - s.entry_bar_idx,
             confluence_score=s.confluence_score,
         )
