@@ -9,28 +9,6 @@ a multi-bar lookback window in the observation vector.
 
 ---
 
-## ⚠️ IMPORTANT — For AI Assistants / Low-Context Sessions
-> always start any task by refering or carefully reading readme file.
-
-> **Do NOT remove, rename, or stub out any existing function, class, method, callback,
-> or file unless the user explicitly asks you to delete it.**
-
->work through this systematically, starting with a file-by-file plan. Set up the todo list and start working systematically.
-
-> This codebase is large. If you are running low on context or tokens:
-> - Edit only the specific lines/functions you were asked to change.
-> - Leave all surrounding code untouched.
-> - Do not "clean up" imports, remove unused variables, or refactor adjacent code.
-> - Do not replace working implementations with `pass` or `raise NotImplementedError`.
-> - If unsure whether something is used, assume it IS used and leave it alone.
-> - before you change the code read Readme.md and if you change code update the READme.md for the change that made
-
- > -  work through this systematically, starting with a file-by-file plan. Set up the todo list and start working systematically.  Tidy up the codes without losing functionalities or breaking the codes, make sure the speed and accuracy of the code is achieved - double checks before you go to next part of the code. everything should be clean code, fast  and performance to  highest quality
-
->- make sure you remove the redunant codes, variables and tidy up the code without losing functionalities or breaking the codes.  make sure codes are clean, readable, professional and comply with highest coding standards.
-> - once you review the code, make a note of all the bottleknecks in the codes and let user know the effect of improving on the speed , perforamce and stabilty or anyother metric in the code execution.
->- update the Readme file once finish 
----
 
 ## Project Structure
 

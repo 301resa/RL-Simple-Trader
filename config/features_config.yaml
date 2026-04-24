@@ -36,7 +36,7 @@ harmonic:
   weight: 0.10                  # weight in confluence score (zone reduced from 0.90 → 0.80)
 
 order_zone:
-  min_confluence_score: 0.2       # zone score alone drives confluence
+  min_confluence_score: 0.25       # zone score alone drives confluence
   weights:                         # sweep removed — zone is the dominant signal
     zone: 0.85                     # supply/demand zone membership
     atr: 0.15                      # ATR room remaining (directional)
