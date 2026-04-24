@@ -170,10 +170,14 @@ Three-priority target selection (`_compute_target_price`):
 
 ### Trailing Stop
 
-| Trigger | Action |
-|---------|--------|
-| Profit reaches 1.2R | Trailing stop activates; locks in 1.2R minimum |
-| Profit reaches 3R | Trail tightens aggressively |
+The trailing stop is a **two-phase mechanism**:
+
+| Phase | Trigger | Behaviour |
+|-------|---------|-----------|
+| Activation | Agent selects `TRAIL_STOP` while unrealised P&L ≥ `trail_activate_r` (default 1.2R) | `trailing_active = True`; initial stop level set at `current_price − trail_dist` |
+| Ratcheting | Every subsequent bar while `trailing_active` | Stop advances mechanically toward price — agent does **not** need to keep pressing `TRAIL_STOP` |
+
+Once active, the stop is a one-way ratchet: it only moves in the profitable direction (`max` for LONG, `min` for SHORT). The agent's only remaining decision is when to activate it.
 
 ### Risk Per Trade
 
@@ -478,6 +482,24 @@ metrics and log results without writing any model files (useful for exploration 
   opposing zone (`nearest_supply.bottom` for LONG, `nearest_demand.top` for SHORT) — the
   structural liquidity level at the far side of the range. Falls back to the entry zone's
   `impulse_extreme` when no opposing zone is present, then to ATR projection as last resort.
+
+- **Stationary core reward**: `core_reward = pnl_r` (raw R-multiple). A previous
+  `pnl_r × win_rate` formulation was removed — it violated reward stationarity because
+  the same (state, action) pair yielded different rewards depending on session history.
+  It also amplified loss penalties as WR rose, incentivising premature Agent-Exit to
+  protect the multiplier. Win rate is observable in `portfolio_state`; the critic learns
+  its importance without a hardcoded multiplier.
+
+- **Always-on discipline penalties**: `hold_flat_penalty` and `penalty_per_bar`
+  (overstay) are **never** multiplied by `shaping_scale`. Both are behavioural
+  guardrails, not training wheels. Decaying the overstay penalty while keeping
+  `hold_flat_penalty` active creates a Stage 3 exploit where the agent camps in
+  stale breakeven trades to avoid the flat penalty. Both always remain live.
+
+- **Masked-action penalty**: `RecurrentPPO` has no native action-masking support.
+  When the agent selects an invalid action (overridden to `HOLD`), a fixed −0.05
+  step penalty is applied. This teaches the actor network to push masked-action
+  logits toward zero without relying on the environment override alone.
 
 - **Dollar-based Profit Factor** (`profit_factor_usd`): `test_fold` scoring uses
   gross-profit-dollars / gross-loss-dollars as the primary metric. R-based PF can show

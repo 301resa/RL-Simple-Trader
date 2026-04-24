@@ -3,17 +3,12 @@ environment/reward_calculator.py
 ==================================
 Reward Function — the complete signal that shapes agent behaviour.
 
-All rewards are denominated in R-multiples (multiples of initial risk)
-scaled by the episode's rolling win rate:
-
-    core_reward = pnl_r × win_rate
-
-  where win_rate is the smoothed episode win rate (Laplace prior → starts at
-  0.5 before any trades, updates after each closed trade).
+All rewards are denominated in R-multiples (multiples of initial risk).
 
 Design philosophy:
-  - Core reward = pnl_r × win_rate  (outcome × consistency)
+  - Core reward = pnl_r  (raw outcome — stationary, no trajectory multiplier)
   - Shaping rewards = bonuses/penalties for PROCESS quality (following rules)
+  - Discipline penalties (hold_flat, overstay) = always active, never decayed
   - Violations = hard penalties for breaking risk guardrails
 
 Every reward component is configurable via reward_config.yaml.
@@ -139,13 +134,9 @@ class RewardCalculator:
 
         # Shaping scale: 1.0 = full shaping, 0.0 = pure P&L only.
         # Decayed externally by ShapingDecayCallback during training.
+        # NOTE: discipline penalties (hold_flat, penalty_per_bar) are NOT multiplied
+        # by shaping_scale — they are always-on behavioural guardrails, not training wheels.
         self.shaping_scale: float = 1.0
-
-        # Episode win-rate tracking.  Reset each episode via reset_episode_stats().
-        # win_rate = (wins + 1) / (trades + 2)  — Laplace smoothing gives a 0.5
-        # prior before the first trade so the first reward is never zero.
-        self._ep_wins:   int = 0
-        self._ep_trades: int = 0
 
         # Default reward values (overridden by config)
         self.entry_bonuses = entry_bonuses or {
@@ -180,14 +171,7 @@ class RewardCalculator:
     # ── Episode stats ─────────────────────────────────────────
 
     def reset_episode_stats(self) -> None:
-        """Reset win-rate counters at the start of each episode."""
-        self._ep_wins   = 0
-        self._ep_trades = 0
-
-    @property
-    def _win_rate(self) -> float:
-        """Smoothed episode win rate with Laplace prior (range ~0.1–0.9)."""
-        return (self._ep_wins + 1) / (self._ep_trades + 2)
+        """No-op — retained for interface compatibility."""
 
     # ── Step-level reward (called every bar) ─────────────────
 
@@ -233,8 +217,9 @@ class RewardCalculator:
         note = ""
 
         # ── Time management: overstay penalty (per bar beyond threshold) ──────
+        # Not multiplied by shaping_scale — discipline guardrail, always active.
         if is_position_open and bars_in_trade > self.time_management.get("max_bars_before_penalty", 12):
-            step_penalty += self.time_management.get("penalty_per_bar", -0.01) * self.shaping_scale
+            step_penalty += self.time_management.get("penalty_per_bar", -0.01)
             note += "overstaying "
 
         # ── Hold / WAIT logic ─────────────────────────────────────────────────
@@ -374,14 +359,12 @@ class RewardCalculator:
         peak_unrealised_r : float
             Maximum unrealised R reached during the trade (MFE in R).
         """
-        # ── Core reward: pnl_r × win_rate ────────────────────
-        # Update episode win-rate counters before computing the multiplier
-        # so the current trade's outcome immediately influences its own reward.
-        self._ep_trades += 1
-        if trade.pnl_r > 0:
-            self._ep_wins += 1
-
-        core_r = trade.pnl_r * self._win_rate
+        # ── Core reward: raw pnl_r ────────────────────────────
+        # Win-rate multiplier removed — it violated reward stationarity.
+        # Multiplying pnl_r by the running WR amplified loss penalties when
+        # WR was high, driving premature Agent-Exit to protect the multiplier.
+        # The critic learns WR's value from portfolio_state observations instead.
+        core_r = trade.pnl_r
 
         exit_bonus = 0.0
         exit_penalty = 0.0
@@ -444,7 +427,6 @@ class RewardCalculator:
             exit_bonus += self.time_management.get("bonus_fast_resolution", 0.10) * self.shaping_scale
             note += "fast_resolution "
 
-        # core_r is NEVER scaled — always full P&L signal
         total = (core_r + exit_bonus + exit_penalty) * self.core_scale
 
         log.debug(

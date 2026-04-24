@@ -528,9 +528,14 @@ class TradingEnv(gym.Env):
         portfolio_state = self.position_manager.get_portfolio_state(current_price)
         is_open = self.position_manager.state.is_open
         mask = self._compute_action_mask(atr_state, portfolio_state=portfolio_state)
+        masked_action_penalty = 0.0
         if mask[action] == 0.0:
-            # Agent chose a masked action — treat as HOLD
+            # Agent chose a masked/invalid action — override to HOLD and penalise.
+            # RecurrentPPO has no native mask support; the small penalty teaches the
+            # actor to push masked-action logits toward zero without destabilising
+            # early training.
             log.debug("Masked action overridden to HOLD", action=Action(action).name)
+            masked_action_penalty = -0.05
             action = Action.HOLD
 
         # ── Execute action ────────────────────────────────────
@@ -665,9 +670,10 @@ class TradingEnv(gym.Env):
             obs = self._last_obs if hasattr(self, "_last_obs") else np.zeros(self._obs_dim or 1, dtype=np.float32)
             info = self._episode_summary()
 
-        self._episode_rewards.append(reward_breakdown.total)
+        total_reward = reward_breakdown.total + masked_action_penalty
+        self._episode_rewards.append(total_reward)
 
-        return obs, float(reward_breakdown.total), terminated, truncated, info
+        return obs, float(total_reward), terminated, truncated, info
 
     def action_masks(self) -> np.ndarray:
         """

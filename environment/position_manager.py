@@ -419,7 +419,10 @@ class PositionManager:
                     s.trailing_stop_price = current_price + trail_dist
 
         # ── Update trailing stop level ────────────────────────
-        if s.trailing_active and agent_wants_trail:
+        # Ratchets mechanically every bar once activated — agent does not need
+        # to keep pressing TRAIL_STOP.  Activation (above) still requires the
+        # agent to select Action.TRAIL_STOP at least once while profitable.
+        if s.trailing_active:
             trail_dist = atr * self.trail_step_atr_pct
             if direction == PositionDirection.LONG:
                 new_trail = current_price - trail_dist
