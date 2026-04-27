@@ -486,18 +486,55 @@ def _build_journal(
 
     # ── Load all bars for the test period ─────────────────────────────────────
     bars_list = []
+    test_days_loaded = []
     for d in test_days:
         try:
             db = data_loader.get_day_bars(d)
             if db is not None and not db.empty:
                 bars_list.append(db)
+                test_days_loaded.append(d)
         except Exception:
             pass
 
     has_bars = bool(bars_list)
+    tick_vals = []
+    tick_text = []
+
     if has_bars:
+        # Build day-offset map: date → first global bar index for that day
+        day_offset_map: dict = {}
+        day_bar_lens: dict = {}
+        offset = 0
+        for d, db in zip(test_days_loaded, bars_list):
+            day_offset_map[d] = offset
+            day_bar_lens[d] = len(db)
+            offset += len(db)
+
         all_bars = pd.concat(bars_list).sort_index().reset_index()
         time_col = all_bars.columns[0]
+        all_bars["bar_idx"] = range(len(all_bars))  # sequential integer index
+
+        # Build date tick labels at day boundaries
+        seen_dates = set()
+        for i, row in all_bars.iterrows():
+            date_str = str(row[time_col])[:10]  # "YYYY-MM-DD"
+            if date_str not in seen_dates:
+                seen_dates.add(date_str)
+                tick_vals.append(int(row["bar_idx"]))
+                tick_text.append(date_str[5:])  # "MM-DD" for compact labels
+
+        # Compute global bar indices for each trade
+        for t in trades:
+            date = t["date"]
+            if date in day_offset_map:
+                off = day_offset_map[date]
+                n = day_bar_lens[date]
+                t["entry_bar_global"] = off + min(int(t.get("entry_bar_idx", 0)), n - 1)
+                t["exit_bar_global"] = off + min(int(t.get("exit_bar_idx", 0)), n - 1)
+            else:
+                # Fallback if date not in loaded bars
+                t["entry_bar_global"] = 0
+                t["exit_bar_global"] = 0
 
     # ── Build candlestick + PnL chart ─────────────────────────────────────────
     # Rows 2 & 3 use trade-index x-axis (not shared) so bars always fill width
@@ -512,7 +549,7 @@ def _build_journal(
     if has_bars:
         fig.add_trace(
             go.Candlestick(
-                x=all_bars[time_col],
+                x=all_bars["bar_idx"],  # use continuous integer bar index, not datetime
                 open=all_bars["open"],
                 high=all_bars["high"],
                 low=all_bars["low"],
@@ -548,8 +585,9 @@ def _build_journal(
         if is_scale_out:
             # Scale-out partial: render as a single orange diamond at exit price/time.
             # No entry marker, no SL/TP lines — this is a mid-trade partial exit.
+            exit_bar = t.get("exit_bar_global", 0)
             fig.add_trace(go.Scatter(
-                x=[exit_time], y=[exit_px], mode="markers",
+                x=[exit_bar], y=[exit_px], mode="markers",
                 marker=dict(symbol="diamond", color="#FFA726", size=10,
                             line=dict(width=1, color="white")),
                 showlegend=False,
@@ -568,6 +606,9 @@ def _build_journal(
         entry_sym = "triangle-up"   if is_long else "triangle-down"
         entry_col = "#2196F3"
         exit_col  = "#26a69a"       if is_win  else "#ef5350"
+
+        entry_bar = t.get("entry_bar_global", 0)
+        exit_bar = t.get("exit_bar_global", 0)
 
         hover_entry = (
             f"<b>{'LONG ▲' if is_long else 'SHORT ▼'} Entry</b><br>"
@@ -588,7 +629,7 @@ def _build_journal(
 
         # Entry marker
         fig.add_trace(go.Scatter(
-            x=[entry_time], y=[entry_px], mode="markers",
+            x=[entry_bar], y=[entry_px], mode="markers",
             marker=dict(symbol=entry_sym, color=entry_col, size=13,
                         line=dict(width=1, color="white")),
             showlegend=False, hovertemplate=hover_entry,
@@ -596,7 +637,7 @@ def _build_journal(
 
         # Exit marker
         fig.add_trace(go.Scatter(
-            x=[exit_time], y=[exit_px], mode="markers",
+            x=[exit_bar], y=[exit_px], mode="markers",
             marker=dict(symbol="x", color=exit_col, size=11,
                         line=dict(width=2, color=exit_col)),
             showlegend=False, hovertemplate=hover_exit,
@@ -604,7 +645,7 @@ def _build_journal(
 
         # Entry→exit connector (thin white dashed line)
         fig.add_trace(go.Scatter(
-            x=[entry_time, exit_time], y=[entry_px, exit_px],
+            x=[entry_bar, exit_bar], y=[entry_px, exit_px],
             mode="lines",
             line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dot"),
             showlegend=False, hoverinfo="skip",
@@ -612,7 +653,7 @@ def _build_journal(
 
         # SL line (solid red, entry→exit)
         fig.add_trace(go.Scatter(
-            x=[entry_time, exit_time], y=[stop_px, stop_px],
+            x=[entry_bar, exit_bar], y=[stop_px, stop_px],
             mode="lines",
             line=dict(color="rgba(239,83,80,0.80)", width=1.5, dash="dash"),
             showlegend=False,
@@ -621,7 +662,7 @@ def _build_journal(
 
         # TP line (solid green, entry→exit)
         fig.add_trace(go.Scatter(
-            x=[entry_time, exit_time], y=[tgt_px, tgt_px],
+            x=[entry_bar, exit_bar], y=[tgt_px, tgt_px],
             mode="lines",
             line=dict(color="rgba(38,166,154,0.80)", width=1.5, dash="dash"),
             showlegend=False,
@@ -672,7 +713,13 @@ def _build_journal(
     fig.update_yaxes(title_text="Price",              row=1, col=1)
     fig.update_yaxes(title_text="PnL (R)",            row=2, col=1)
     fig.update_yaxes(title_text="Cumulative PnL (R)", row=3, col=1)
-    fig.update_xaxes(rangeslider=dict(visible=False), row=1, col=1)
+    fig.update_xaxes(
+        rangeslider=dict(visible=False),
+        tickvals=tick_vals,
+        ticktext=tick_text,
+        tickangle=-45,
+        row=1, col=1,
+    )
     fig.update_xaxes(rangeslider=dict(visible=False), row=2, col=1)
     fig.update_xaxes(title_text="Trade #",
                      rangeslider=dict(visible=True, thickness=0.04, bgcolor="#1e222d"),
@@ -1276,6 +1323,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         "max_zone_age_bars":            200,
         "max_zone_touches":             3,
         "zone_buffer_atr_pct":          0.02,
+        "detection_mode":               "consolidation",
+        "ob_length":                    3,
+        "ob_threshold_pct":             0.0,
+        "ob_use_wicks":                 False,
+        "ob_sensitivity":               28,
     }
 
     _scale_out_cfg = risk_cfg.get("scale_out", {})
@@ -1364,7 +1416,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         name = _checkpoint_base(ckpt)
         vn   = _vecnorm_path(ckpt)
 
-        print(f"  → Evaluating {name} ...", end="", flush=True)
+        print(f"  → Evaluating {name} ...", flush=True)
         try:
             trades, episodes = _run_checkpoint(
                 ckpt, vn, env_factory,
@@ -1372,7 +1424,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 n_workers=args.n_workers,
             )
         except Exception as exc:
-            print(f" FAILED: {exc}")
+            print(f"     FAILED: {exc}")
             continue
 
         # Enrich trades with entry/exit timestamps
@@ -1384,7 +1436,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         m     = _compute_metrics(trades, episodes)
         score = _composite(m)
 
-        print(f"\r{_data_row(name, m, score)}")
+        n_tr = m.get("n_trades", 0)
+        print(f"     done — {n_tr} trade(s)")
+        print(_data_row(name, m, score))
 
         results.append({
             "name":      name,
