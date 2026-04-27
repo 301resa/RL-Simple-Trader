@@ -54,6 +54,9 @@ _ZONE_DETECTOR_DEFAULTS: dict = {
     "consolidation_min_bars": 2, "consolidation_max_bars": 8,
     "consolidation_range_atr_pct": 0.20, "impulse_min_body_atr_pct": 0.15,
     "max_zone_age_bars": 200, "max_zone_touches": 3, "zone_buffer_atr_pct": 0.02,
+    "detection_mode": "consolidation",
+    "ob_length": 3, "ob_threshold_pct": 0.0, "ob_use_wicks": False,
+    "ob_sensitivity": 28,
 }
 
 
@@ -235,6 +238,11 @@ def build_components(
         max_zone_touches=zones_cfg.get("max_zone_touches", 3),
         zone_buffer_atr_pct=zones_cfg.get("zone_buffer_atr_pct", 0.02),
         break_buffer_pts=instrument_profile.stop_buffer_pts,
+        detection_mode=zones_cfg.get("detection_mode", "consolidation"),
+        ob_length=zones_cfg.get("ob_length", 3),
+        ob_threshold_pct=zones_cfg.get("ob_threshold_pct", 0.0),
+        ob_use_wicks=zones_cfg.get("ob_use_wicks", False),
+        ob_sensitivity=zones_cfg.get("ob_sensitivity", 28),
     )
 
     # ── Order Zone Engine ─────────────────────────────────────
@@ -633,10 +641,10 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
         ent_coef_decay_steps=exp_cfg.get("ent_coef_decay_steps", 1_000_000),
         log_dir=str(log_dir),
         models_dir=str(models_dir),
-        train_date_range=f"{c.split.train[0]}→{c.split.train[-1]}",
+        train_date_range=f"{c.split.train[0]}-{c.split.train[-1]}",
         vec_normalize=c.vec_normalize,
         resume=bool(args.checkpoint),
-        initial_capital=real_capital,
+        initial_capital=c.real_capital,
         hotsave_pf=hotsave_cfg.get("pf_threshold",                1.60),
         hotsave_wr=hotsave_cfg.get("wr_threshold",                0.40),
         hotsave_min_trades=hotsave_min_trades,

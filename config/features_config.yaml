@@ -17,6 +17,17 @@ atr:
 zone_lookback_bars: 500
 
 zones:
+  # Detection mode:
+  #   "consolidation" — tight coil + impulse bar (original method)
+  #   "wugamlo"       — last red candle before N consecutive green candles (bullish OB)
+  #                     last green candle before N consecutive red candles (bearish OB)
+  #   "sonarlab"      — ROC momentum crossover → first opposing candle 4-15 bars back
+  detection_mode: "sonarlab"
+  ob_length: 3                     # wugamlo: consecutive confirming candles required
+  ob_threshold_pct: 0.0            # wugamlo: min % move from OB close to last confirm bar (0 = off)
+  ob_use_wicks: false              # wugamlo: use full High-Low (true) or Open-Low/High (false)
+  ob_sensitivity: 28                # sonarlab: ROC threshold × 0.01 (28 → ±0.28% 4-bar open move)
+
   consolidation_min_bars: 2        # minimum bars in consolidation base
   consolidation_max_bars: 8      # widened from 8 — allows more zone formations
   consolidation_range_atr_pct: 0.05   # widened from 0.035 — 8% of ATR; was too tight for 5-min bars
@@ -38,5 +49,5 @@ harmonic:
 order_zone:
   min_confluence_score: 0.25       # zone score alone drives confluence
   weights:                         # sweep removed — zone is the dominant signal
-    zone: 0.85                     # supply/demand zone membership
-    atr: 0.15                      # ATR room remaining (directional)
+    zone: 0.60                     # supply/demand zone membership
+    atr: 0.40                      # ATR room remaining (directional)

@@ -7,7 +7,7 @@ to the console (and mirrored to logs/metrics.log).
 Output format (after every rollout):
 
   ######################################################################
-  # STEP: 65,536 | ALL 16 ENVS | TRAIN: 2024-10-16→2025-10-03
+  # STEP: 65,536 | ALL 16 ENVS | TRAIN: 2024-10-16-2025-10-03
   ######################################################################
   +------+------+-------+---------+-------+-------+------+ ... +
   | ENV  | Tr   | WR%   |   PnL   |  PF   |  Sh   | DD%  | ... |
@@ -37,6 +37,8 @@ from training.env_cumulative import EnvCumulative
 _COLS = [
     ("ENV",  3, "l"),
     ("Tr",   4, "r"),
+    ("L",    4, "r"),
+    ("S",    4, "r"),
     ("WR%",  5, "r"),
     ("PnL",  7, "r"),
     ("PF",   5, "r"),
@@ -163,6 +165,8 @@ def _fmt_wr5(wr: float) -> str:
 
 def _row(env_idx: int | str, info: dict) -> str:
     n_trades = int(round(info.get("n_trades", 0)))
+    n_longs  = int(round(info.get("n_longs",  0)))
+    n_shorts = int(round(info.get("n_shorts", 0)))
     win_rate = info.get("win_rate", 0.0)
     pnl_d    = info.get("total_pnl_dollars", 0.0)
     pf       = info.get("profit_factor", 0.0)
@@ -190,6 +194,8 @@ def _row(env_idx: int | str, info: dict) -> str:
     cells = [
         (env_str,                  3, "l"),
         (_fmt_count(n_trades, 4),  4, "r"),
+        (_fmt_count(n_longs,  4),  4, "r"),
+        (_fmt_count(n_shorts, 4),  4, "r"),
         (_fmt_wr5(win_rate),       5, "r"),
         (_fmt_pnl(pnl_d),          7, "r"),
         (_fmt_pf(pf),              5, "r"),
@@ -237,6 +243,8 @@ def _avg_row(infos_list: List[dict]) -> str:
     n_envs = len(infos_list)
     agg = {
         "n_trades":             _mean("n_trades"),
+        "n_longs":              _mean("n_longs"),
+        "n_shorts":             _mean("n_shorts"),
         "win_rate":             _mean("win_rate"),
         "total_pnl_dollars":    _mean("total_pnl_dollars"),
         "profit_factor":        _mean("profit_factor"),
@@ -397,18 +405,18 @@ class MetricsPrinterCallback(BaseCallback):
         lines.append("  " + div)
 
         # ── RL Assessment ─────────────────────────────────────
-        lines.append("  ┌─ TRAINING ASSESSMENT " + "─" * 46)
+        lines.append("  +- TRAINING ASSESSMENT " + "-" * 46)
         if entropy is not None:
             bar = _progress_bar(entropy / 1.6094)
-            lines.append(f"  │  Entropy          : {entropy:.4f}  [{_entropy_label(entropy)}]")
-            lines.append(f"  │                    {bar}")
+            lines.append(f"  |  Entropy          : {entropy:.4f}  [{_entropy_label(entropy)}]")
+            lines.append(f"  |                    {bar}")
         else:
-            lines.append("  │  Entropy          : (awaiting first update)")
+            lines.append("  |  Entropy          : (awaiting first update)")
         if ev is not None:
-            lines.append(f"  │  Explained Var.   : {ev:.4f}  [{_ev_label(ev)}]")
+            lines.append(f"  |  Explained Var.   : {ev:.4f}  [{_ev_label(ev)}]")
         else:
-            lines.append("  │  Explained Var.   : (awaiting first update)")
-        lines.append("  └" + "─" * 68)
+            lines.append("  |  Explained Var.   : (awaiting first update)")
+        lines.append("  +" + "-" * 68)
 
         _print_lines(lines)
 
@@ -427,7 +435,7 @@ class MetricsPrinterCallback(BaseCallback):
 
 
 _INT_KEYS = {
-    "n_trades", "n_wins", "n_losses",
+    "n_trades", "n_wins", "n_losses", "n_longs", "n_shorts",
     "n_tp", "n_sc", "n_sl", "n_agent_exit",
     "rth_trades", "rth_wins", "eth_trades", "eth_wins",
     "min_duration_minutes", "max_duration_minutes",
@@ -454,4 +462,4 @@ def _avg_info(infos: List[dict]) -> dict:
 
 def _progress_bar(fraction: float, width: int = 20) -> str:
     filled = int(round(max(0.0, min(1.0, fraction)) * width))
-    return "[" + "█" * filled + "░" * (width - filled) + "]"
+    return "[" + "=" * filled + "-" * (width - filled) + "]"
