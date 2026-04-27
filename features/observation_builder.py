@@ -9,7 +9,9 @@ The observation is a flat float32 numpy array containing:
   3. Zone features (distance, in-zone, width, age, sweep_weight)         [10]
   4. Order zone / confluence features (score, R:R, pending order state)  [10]
   5. Portfolio state (position, P&L, drawdown, trade counts)             [8]
-  6. Session timing + market context                                      [4]
+  6. Session timing + market context                                      [6]
+       session_time_pct, bars_remaining_pct, is_rth, rth_time_pct,
+       sin_time, cos_time  ← cyclical time encoding (no discontinuity)
   7. Engineered features — 15 pre-computed signals:                      [15]
        Price location (5): session drift, dist from session high/low, prior day high/low
        Momentum (2): 5-bar, 12-bar (1h) log-returns
@@ -27,12 +29,18 @@ Sweep weight replaces binary sweep flag:
   0.0 = zone not swept OR sweep is stale (>40 bars ago)
   Decays linearly from 1→0 over 40 bars after formation.
 
-Total fixed features: 36 + 15 = 51
-Observation vector size: 20 × 4 + 51 = 131
+sin/cos time encoding:
+  t = session_time_pct ∈ [0, 1]
+  sin_time = sin(2πt),  cos_time = cos(2πt)
+  Gives the agent cyclical regime awareness (open/midday/close) without discontinuity.
+
+Total fixed features: 38 + 15 = 53
+Observation vector size: 20 × 4 + 53 = 133
 """
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import numpy as np
@@ -43,7 +51,7 @@ from features.zone_detector import ZoneState
 from features.order_zone_engine import OrderZoneState
 
 # Structured feature counts
-_N_STRUCTURED  = 36   # ATR(4) + Zone(10) + OrderZone(10) + Portfolio(8) + Session(4)
+_N_STRUCTURED  = 38   # ATR(4) + Zone(10) + OrderZone(10) + Portfolio(8) + Session(6)
 _N_ENGINEERED  = 15   # PriceLocation(5) + Momentum(2) + VolRegime(2) + BarCharacter(1) + HTFContext(5)
 
 # Sweep weight decays to zero after this many bars
@@ -282,11 +290,14 @@ class ObservationBuilder:
         ])
 
         # ── 6. Session timing + market context ───────────────────────────────
+        t = float(np.clip(session_info.get("session_time_pct", 0.5), 0.0, 1.0))
         features.extend([
-            float(np.clip(session_info.get("session_time_pct",   0.5), 0.0, 1.0)),
+            t,
             float(np.clip(session_info.get("bars_remaining_pct", 0.5), 0.0, 1.0)),
             float(session_info.get("is_rth", 0.0)),
             float(np.clip(session_info.get("rth_time_pct", 0.0), 0.0, 1.0)),
+            math.sin(2.0 * math.pi * t),
+            math.cos(2.0 * math.pi * t),
         ])
 
         # ── 7. Engineered features ────────────────────────────────────────────
