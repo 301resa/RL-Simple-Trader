@@ -1216,7 +1216,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     from environment.reward_calculator  import RewardCalculator
     from environment.trading_env        import TradingEnv
     from features.atr_calculator        import ATRCalculator
-    from features.harmonic_detector     import HarmonicDetector
     from features.observation_builder   import ObservationBuilder
     from features.order_zone_engine     import OrderZoneEngine
     from features.zone_detector         import ZoneDetector
@@ -1280,15 +1279,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     real_capital = float(account_cfg.get("initial_balance", 100000.0))
     point_value  = instrument_profile.point_value
 
-    harm_cfg = feat_cfg.get("harmonic", {})
-    harmonic_detector = HarmonicDetector(
-        lookback_bars=harm_cfg.get("lookback_bars", 40),
-        pivot_window=harm_cfg.get("pivot_window", 3),
-        symmetry_tol_atr_pct=harm_cfg.get("symmetry_tol_atr_pct", 0.12),
-        min_peak_atr_pct=harm_cfg.get("min_peak_atr_pct", 0.15),
-        min_separation_bars=harm_cfg.get("min_separation_bars", 5),
-        recency_bars=harm_cfg.get("recency_bars", 6),
-    ) if harm_cfg.get("enabled", True) else None
     observation_builder = ObservationBuilder(
         clip_value=obs_cfg.get("clip_observations", 10.0),
         normalize_observations=obs_cfg.get("normalize_observations", True),
@@ -1385,7 +1375,6 @@ def main(argv: Optional[List[str]] = None) -> None:
             bar_minutes=bar_minutes,
             curriculum_filter_fn=None,
             augmentor=None,
-            harmonic_detector=harmonic_detector,
             session_type=session_type,
             random_start=False,
             seed=agent_cfg.get("seed", 42) + 999,

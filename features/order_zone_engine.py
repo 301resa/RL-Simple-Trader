@@ -3,16 +3,14 @@ features/order_zone_engine.py
 ==============================
 Confluence scoring engine — determines if the current setup warrants a trade.
 
-The Order Zone concept requires ONE pillar:
-  1. Supply or Demand zone (price at a key structural level)
+Three weighted components:
+  1. Zone quality     — was price inside a valid supply/demand zone?
+  2. ATR room         — directional room remaining before exhaustion
+  3. Sweep freshness  — how recently was the zone's liquidity swept?
 
-Additional filter:
-  2. ATR room remaining (directional)
-
-All factors are weighted and combined into a [0, 1] confluence score.
-Liquidity sweep (Pillar 2) has been removed — the LSTM learns sweep context
-from the raw observation features directly.
-Rejection candle (Pillar 3) was previously removed for the same reason.
+All factors normalised to [0, 1] and combined into a single confluence score.
+Weights are configurable in features_config.yaml → order_zone.weights.
+Default: zone=0.50, atr=0.30, sweep=0.20.
 """
 
 from __future__ import annotations
@@ -25,12 +23,29 @@ import numpy as np
 import pandas as pd
 
 from features.atr_calculator import ATRState
-from features.harmonic_detector import HarmonicState, HARMONIC_NONE
 from features.zone_detector import ZoneState, ZoneType
 
 # Zone quality scoring constants
-_ZONE_MAX_AGE_BARS: int = 300   # matches max_zone_age_bars in features_config.yaml
-_ZONE_MAX_TOUCHES: int  = 3     # matches max_zone_touches in features_config.yaml
+_ZONE_MAX_AGE_BARS: int  = 300   # matches max_zone_age_bars in features_config.yaml
+_ZONE_MAX_TOUCHES: int   = 3     # matches max_zone_touches in features_config.yaml
+_SWEEP_DECAY_BARS: float = 40.0  # sweep score decays from 1.0 → 0.0 over this many bars
+
+
+def _sweep_freshness_score(zone, current_bar_idx: int) -> float:
+    """
+    Sweep recency weight.
+
+    Returns 1.0 if the zone was swept very recently, decaying linearly to 0.0
+    at _SWEEP_DECAY_BARS bars after formation.  Returns 0.0 if the zone was
+    never swept.
+
+    For Sonarlab zones, was_swept=True at creation and bar_formed_idx is the
+    ROC crossover bar — so this naturally rewards fresh institutional setups.
+    """
+    if zone is None or not zone.is_valid or not zone.was_swept:
+        return 0.0
+    bars_since = current_bar_idx - zone.bar_formed_idx
+    return float(max(0.0, 1.0 - bars_since / _SWEEP_DECAY_BARS))
 
 
 def _zone_quality_score(zone, current_bar_idx: int, max_zone_width_pts: float) -> float:
@@ -96,21 +111,12 @@ class OrderZoneEngine:
     """
     Computes the Order Zone confluence score for each bar.
 
-    Three factors:
-      1. Supply/Demand zone membership  (zone_weight     = 0.80)
-      2. W/M harmonic pattern           (harmonic_weight = 0.10)
-      3. ATR room remaining             (atr_weight      = 0.10)
+    Three weighted components:
+      1. Zone quality    (zone_weight  = 0.50) — supply/demand membership + quality
+      2. ATR room        (atr_weight   = 0.30) — directional room remaining
+      3. Sweep freshness (sweep_weight = 0.20) — how recently the zone was swept
 
-    Harmonic is directional — W score used for bullish, M score for bearish.
-
-    Parameters
-    ----------
-    min_confluence_score : float
-        Minimum score required for trade_worthwhile = True.
-    min_rr_ratio : float
-        Minimum R:R ratio required for trade_worthwhile = True.
-    weights : dict, optional
-        Keys: "zone", "atr", "harmonic"
+    Configurable via features_config.yaml → order_zone.weights.
     """
 
     def __init__(
@@ -118,12 +124,12 @@ class OrderZoneEngine:
         min_confluence_score: float = 0.35,
         min_rr_ratio: float = 1.5,
         weights: Optional[dict] = None,
-        zone_weight: float = 0.80,
-        atr_weight: float = 0.10,
-        harmonic_weight: float = 0.10,
-        max_zone_pts: float = 10.0,       # tick-based; sourced from InstrumentProfile
-        stop_buffer_pts: float = 1.5,     # tick-based
-        fallback_stop_pts: float = 3.0,   # tick-based; used when no zone is in play
+        zone_weight: float = 0.50,
+        atr_weight: float = 0.30,
+        sweep_weight: float = 0.20,
+        max_zone_pts: float = 10.0,
+        stop_buffer_pts: float = 1.5,
+        fallback_stop_pts: float = 3.0,
     ) -> None:
         self.min_confluence_score = min_confluence_score
         self.min_rr_ratio         = min_rr_ratio
@@ -132,15 +138,15 @@ class OrderZoneEngine:
         self.fallback_stop_pts    = fallback_stop_pts
 
         if weights is not None:
-            self.zone_weight     = float(weights.get("zone",     zone_weight))
-            self.atr_weight      = float(weights.get("atr",      atr_weight))
-            self.harmonic_weight = float(weights.get("harmonic", harmonic_weight))
+            self.zone_weight  = float(weights.get("zone",  zone_weight))
+            self.atr_weight   = float(weights.get("atr",   atr_weight))
+            self.sweep_weight = float(weights.get("sweep", sweep_weight))
         else:
-            self.zone_weight     = zone_weight
-            self.atr_weight      = atr_weight
-            self.harmonic_weight = harmonic_weight
+            self.zone_weight  = zone_weight
+            self.atr_weight   = atr_weight
+            self.sweep_weight = sweep_weight
 
-        self._total_weight = self.zone_weight + self.atr_weight + self.harmonic_weight
+        self._total_weight = self.zone_weight + self.atr_weight + self.sweep_weight
 
     def compute(
         self,
@@ -149,13 +155,9 @@ class OrderZoneEngine:
         atr_state: ATRState,
         zone_state: Optional[ZoneState],
         current_price: Optional[float] = None,
-        harmonic_state: Optional[HarmonicState] = None,
+        harmonic_state=None,   # kept for call-site compat — unused
     ) -> OrderZoneState:
-        """Score the current setup and return an OrderZoneState.
-
-        Pass ``current_price`` directly to avoid a bars.iloc[current_bar_idx] lookup.
-        Pass ``harmonic_state`` to include W/M pattern confluence.
-        """
+        """Score the current setup and return an OrderZoneState."""
         if current_price is None:
             current_price = float(bars.iloc[current_bar_idx]["close"])
         atr = atr_state.atr_daily
@@ -201,23 +203,25 @@ class OrderZoneEngine:
         atr_score_bearish = 0.0 if atr_state.atr_short_exhausted else atr_base
         atr_score_bullish = 0.0 if atr_state.atr_long_exhausted  else atr_base
 
-        # ── 3. Harmonic W/M pattern (directional) ────────────────────────────
-        # M pattern = double-top → bearish confluence
-        # W pattern = double-bottom → bullish confluence
-        hs = harmonic_state if harmonic_state is not None else HARMONIC_NONE
-        harmonic_score_bearish = float(hs.m_score)
-        harmonic_score_bullish = float(hs.w_score)
+        # ── 3. Sweep freshness (directional) ──────────────────────────────────
+        # 1.0 = zone swept very recently; decays to 0.0 over _SWEEP_DECAY_BARS.
+        # Unswept zones score 0.0 — forces the confluence floor to be lower,
+        # making trade_worthwhile harder to achieve without a confirmed sweep.
+        s_zone = zone_state.nearest_supply if zone_state else None
+        d_zone = zone_state.nearest_demand if zone_state else None
+        sweep_score_bearish = _sweep_freshness_score(s_zone, current_bar_idx)
+        sweep_score_bullish = _sweep_freshness_score(d_zone, current_bar_idx)
 
         # ── 4. Weighted confluence scores ─────────────────────────────────────
         raw_bearish = (
-            zone_score_bearish     * self.zone_weight
-            + harmonic_score_bearish * self.harmonic_weight
-            + atr_score_bearish      * self.atr_weight
+            zone_score_bearish  * self.zone_weight
+            + atr_score_bearish * self.atr_weight
+            + sweep_score_bearish * self.sweep_weight
         )
         raw_bullish = (
-            zone_score_bullish     * self.zone_weight
-            + harmonic_score_bullish * self.harmonic_weight
-            + atr_score_bullish      * self.atr_weight
+            zone_score_bullish  * self.zone_weight
+            + atr_score_bullish * self.atr_weight
+            + sweep_score_bullish * self.sweep_weight
         )
 
         bearish_score = float(np.clip(raw_bearish / self._total_weight, 0.0, 1.0))
@@ -258,12 +262,12 @@ class OrderZoneEngine:
         )
 
         component_scores = {
-            "zone_bearish":      zone_score_bearish,
-            "zone_bullish":      zone_score_bullish,
-            "harmonic_bearish":  harmonic_score_bearish,
-            "harmonic_bullish":  harmonic_score_bullish,
-            "atr_room_bearish":  atr_score_bearish,
-            "atr_room_bullish":  atr_score_bullish,
+            "zone_bearish":    zone_score_bearish,
+            "zone_bullish":    zone_score_bullish,
+            "atr_bearish":     atr_score_bearish,
+            "atr_bullish":     atr_score_bullish,
+            "sweep_bearish":   sweep_score_bearish,
+            "sweep_bullish":   sweep_score_bullish,
         }
 
         return OrderZoneState(

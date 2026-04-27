@@ -88,7 +88,7 @@ A trade is only entered when the **zone pillar** is present. Weighted factors:
 
 | Factor | Weight | Condition |
 |--------|--------|-----------|
-| Supply/Demand Zone | 90% | Price is inside a valid consolidation-then-impulse zone |
+| Supply/Demand Zone | 90% | Price is inside a valid order block zone (sonarlab/wugamlo/consolidation) |
 | ATR Room | 10% | Directional ATR move < 85% of daily ATR in the entry direction |
 
 A **liquidity sweep** is required before any entry is placed. Price must first trade
@@ -98,7 +98,7 @@ demand is swept when `bar.low ≤ zone.bottom`. Once swept, a pending limit is p
 catch the re-entry into the order block.
 
 - Minimum confluence score: **0.55** (configurable in `features_config.yaml`)
-- Minimum R:R ratio: **1.5:1** before an entry is allowed
+- Minimum R:R ratio: **1.75:1** (hard gate in `_place_pending_order`, reads `risk_config.yaml → take_profit.min_rr_ratio`) — pending order is rejected if the actual computed target/stop prices yield R:R below this threshold
 
 ### Pending Limit Order Entry
 
@@ -110,6 +110,10 @@ of the zone — the first edge price touches as it returns into the block:
 - **SHORT**: limit at `supply.bottom` (near edge) — fills when `bar.high ≥ supply.bottom`
 - **Sweep gate**: orders are skipped if `zone.was_swept == False` — no order until liquidity taken.
 - **Zone width filter**: zones outside `[min_zone_pts, max_zone_pts]` are skipped (from the instrument profile — e.g. ES: 1–10 pts, NQ: 4–40 pts).
+- **50% midpoint guard**: a pending order is rejected when the current bar has already violated the inner half of the zone — LONG blocked if `bar.low < zone.midpoint`; SHORT blocked if `bar.high > zone.midpoint`. Configurable via `features_config.yaml → zones.detection_mode`.
+- **Hard R:R gate**: after computing the actual limit, stop, and target prices, the pending order is rejected if `(target − limit) / (stop − limit) < min_rr_ratio` (reads `risk_config.yaml → take_profit.min_rr_ratio`, currently **1.75**).
+- **Sonarlab Order Block detection** (`detection_mode: "sonarlab"`, **default**): ROC-triggered institutional OB method. A 4-bar open-to-open Rate of Change is computed each bar; when ROC crosses ±`ob_sensitivity/100`% (default 28 → ±0.28%), the detector walks back 4–15 bars to find the *first opposing candle* — that candle is the true institutional order block origin. Bullish cross (ROC crosses above +threshold) → look back for last bearish candle → demand zone `[low, high]`; Bearish cross → look back for last bullish candle → supply zone `[low, high]`. `was_swept=True` at creation (momentum cross confirms price left the zone). 5-bar cooldown prevents duplicate triggers on the same move. Configurable: `ob_sensitivity` (ROC threshold × 0.01). Active by default at `detection_mode: "sonarlab"` in `features_config.yaml`.
+- **Wugamlo Order Block detection** (`detection_mode: "wugamlo"`): zones formed at the *last opposing candle before N consecutive same-direction candles*. Bullish OB = last red candle before `ob_length` consecutive green candles → demand zone `[low, open]`; Bearish OB = last green candle before `ob_length` consecutive red candles → supply zone `[open, high]`. An optional `ob_threshold_pct` filters for minimum % move. `ob_use_wicks: true` extends the zone to the full `[low, high]`. `was_swept=True` at creation. Produces ~50% more zones than consolidation mode with 100% sweep rate.
 - **Cut-through invalidation**: a zone is killed the moment a bar pierces past its far
   edge by more than `stop_buffer_pts` (or closes past the far edge — no buffer). Demand
   dies on `bar.low < zone.bottom − stop_buffer_pts` *or* `bar.close < zone.bottom`; supply

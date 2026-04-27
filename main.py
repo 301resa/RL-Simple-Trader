@@ -123,7 +123,6 @@ def build_components(
     from environment.reward_calculator import RewardCalculator
     from environment.trading_env import TradingEnv
     from features.atr_calculator import ATRCalculator
-    from features.harmonic_detector import HarmonicDetector
     from features.observation_builder import ObservationBuilder
     from features.order_zone_engine import OrderZoneEngine
     from features.zone_detector import ZoneDetector
@@ -256,17 +255,6 @@ def build_components(
         fallback_stop_pts=instrument_profile.fallback_stop_pts,
     )
 
-    # ── Harmonic Detector ─────────────────────────────────────
-    harm_cfg = feat_cfg.get("harmonic", {})
-    harmonic_detector = HarmonicDetector(
-        lookback_bars=harm_cfg.get("lookback_bars", 40),
-        pivot_window=harm_cfg.get("pivot_window", 3),
-        symmetry_tol_atr_pct=harm_cfg.get("symmetry_tol_atr_pct", 0.12),
-        min_peak_atr_pct=harm_cfg.get("min_peak_atr_pct", 0.15),
-        min_separation_bars=harm_cfg.get("min_separation_bars", 5),
-        recency_bars=harm_cfg.get("recency_bars", 6),
-    ) if harm_cfg.get("enabled", True) else None
-
     # ── Observation Builder ───────────────────────────────────
     obs_cfg = env_cfg.get("observation", {})
     observation_builder = ObservationBuilder(
@@ -376,7 +364,6 @@ def build_components(
             bar_minutes=bar_minutes,
             curriculum_filter_fn=None,
             augmentor=augmentor,
-            harmonic_detector=harmonic_detector,
             session_type=session_type,
             random_start=not is_eval,
             seed=env_seed,
@@ -778,7 +765,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     from environment.reward_calculator import RewardCalculator
     from environment.trading_env import TradingEnv
     from features.atr_calculator import ATRCalculator
-    from features.harmonic_detector import HarmonicDetector
     from features.observation_builder import ObservationBuilder
     from features.order_zone_engine import OrderZoneEngine
     from features.zone_detector import ZoneDetector
@@ -921,15 +907,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         stop_buffer_pts=instrument_profile.stop_buffer_pts,
         fallback_stop_pts=instrument_profile.fallback_stop_pts,
     )
-    harm_cfg = feat_cfg.get("harmonic", {})
-    harmonic_detector = HarmonicDetector(
-        lookback_bars=harm_cfg.get("lookback_bars", 40),
-        pivot_window=harm_cfg.get("pivot_window", 3),
-        symmetry_tol_atr_pct=harm_cfg.get("symmetry_tol_atr_pct", 0.12),
-        min_peak_atr_pct=harm_cfg.get("min_peak_atr_pct", 0.15),
-        min_separation_bars=harm_cfg.get("min_separation_bars", 5),
-        recency_bars=harm_cfg.get("recency_bars", 6),
-    ) if harm_cfg.get("enabled", True) else None
     observation_builder = ObservationBuilder(
         clip_value=obs_cfg.get("clip_observations", 10.0),
         normalize_observations=obs_cfg.get("normalize_observations", True),
@@ -1003,7 +980,6 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             bar_minutes=bar_minutes,
             curriculum_filter_fn=None,
             augmentor=None if is_eval else train_augmentor,
-            harmonic_detector=harmonic_detector,
             session_type=session_type,
             random_start=not is_eval,
             seed=agent_cfg.get("seed", 42) + worker_seed_offset + (100 if is_eval else 0),

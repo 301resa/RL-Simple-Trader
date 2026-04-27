@@ -36,7 +36,6 @@ from environment.position_manager import ExitReason, PositionDirection, Position
 from environment.reward_calculator import RewardCalculator, RewardBreakdown
 from features.atr_calculator import ATRCalculator, ATRState
 from features.observation_builder import ObservationBuilder
-from features.harmonic_detector import HarmonicDetector, HarmonicState, HARMONIC_NONE
 from features.order_zone_engine import OrderZoneEngine, OrderZoneState
 from features.zone_detector import ZoneDetector, ZoneState
 from utils.instrument import InstrumentProfile
@@ -151,7 +150,7 @@ class TradingEnv(gym.Env):
         bar_minutes: int = 5,
         curriculum_filter_fn: Optional[Any] = None,
         augmentor: Optional[OHLCVAugmentor] = None,
-        harmonic_detector: Optional[HarmonicDetector] = None,
+        harmonic_detector=None,   # kept for call-site compat — unused
         session_type: str = "RTH",
         random_start: bool = False,
         seed: Optional[int] = None,
@@ -417,16 +416,6 @@ class TradingEnv(gym.Env):
                 current_bar_idx=combined_idx,
             )
 
-            # W/M harmonic pattern detection (optional — None if detector not provided)
-            harm_s: HarmonicState = HARMONIC_NONE
-            if self.harmonic_detector is not None:
-                harm_s = self.harmonic_detector.detect(
-                    highs=_np_high,
-                    lows=_np_low,
-                    current_bar_idx=combined_idx,
-                    atr=atr_s.atr_daily,
-                )
-
             # Filter wide zones before scoring — agent cannot trade them, so
             # confluence scores must not reflect their presence.
             current_price = float(_np_close[combined_idx])
@@ -440,18 +429,11 @@ class TradingEnv(gym.Env):
                     self.instrument.max_zone_pts,
                 ),
                 current_price=current_price,
-                harmonic_state=harm_s,
             )
-            # Freeze ZoneState: Zone objects in the detector's lists are mutable
-            # and will be updated by future bars — snapshot them cheaply with
-            # dataclasses.replace() instead of copy.deepcopy() (~10-50× faster).
-            # ATRState and OrderZoneState are created fresh each iteration → safe to
-            # store directly with no copy.
             self._precomputed_states.append({
-                "atr":      atr_s,
-                "zone":     _freeze_zone_state(zone_s),
-                "oz":       oz_s,
-                "harmonic": harm_s,
+                "atr":  atr_s,
+                "zone": _freeze_zone_state(zone_s),
+                "oz":   oz_s,
             })
 
         # Build initial observation
@@ -742,7 +724,6 @@ class TradingEnv(gym.Env):
         atr_state        = states["atr"]
         zone_state       = states["zone"]
         order_zone_state = states["oz"]
-        harmonic_state   = states.get("harmonic", HARMONIC_NONE)
 
         self._current_atr_state     = atr_state
         self._last_zone_state       = zone_state
@@ -783,8 +764,7 @@ class TradingEnv(gym.Env):
             portfolio_state=portfolio_state,
             session_info=session_info,
             pending_order=self._pending_order,
-            harmonic_state=harmonic_state,
-        )
+            )
 
         self._last_obs = obs
         self._last_zone_state = zone_state
