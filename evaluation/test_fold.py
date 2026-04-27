@@ -1378,6 +1378,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             instrument=instrument_profile,
             rth_start=session_start,
             rth_end=session_end,
+            force_close_time=session_risk.get("force_close_time", "15:55"),
             no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
             early_terminate_on_max_dd=env_cfg.get("episode", {}).get(
                 "early_termination_on_max_drawdown", True),

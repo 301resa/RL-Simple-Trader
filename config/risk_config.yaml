@@ -11,8 +11,8 @@ position:
 
 sizing:
   risk_per_trade_pct: 0.01       # risk 1% of account per trade
-  min_contracts: 1               # integer only — no fractional contracts
-  max_contracts: 3               # hard ceiling for minis (instrument profile may cap lower)
+  min_contracts: 2               # integer only — no fractional contracts
+  max_contracts: 4               # hard ceiling for minis (instrument profile may cap lower)
 
 stop_loss:
   allow_stop_widening: false     # HARD RULE: never widen a stop once placed
@@ -21,9 +21,9 @@ take_profit:
   min_rr_ratio: 1.75            # minimum R:R required to enter
 
 trailing:
-  activate_at_r: 0.8            # activate trailing stop at 1.2R unrealised profit
+  activate_at_r: 1.0            # activate trailing stop at 1.2R unrealised profit
   trail_aggressively_at_r: 3.0   # tighten trail at 4R
-  lock_in_r_at_trail: 0.3       # lock in at least 1.2R when trailing activates
+  lock_in_r_at_trail: 0.5        # lock in at least 1.2R when trailing activates
 
 atr_gate:
   block_entries_above_pct: 0.95  # block entries in the EXHAUSTED DIRECTION only at 95% ATR
@@ -37,8 +37,9 @@ daily_limits:
   pause_bars_after_loss_streak: 8   # bars to sit out after loss streak
 
 session:
+  force_close_time: "15:55"      # close all trades and pending orders before this time (3:55 PM ET)
   no_entry_last_n_bars: 3        # no new entries in last 3 bars of session
-  min_bars_between_trades: 2    # minimum bars between trade close and next entry (10 min @ 5-min bars)
+  min_bars_between_trades: 6    # minimum bars between trade close and next entry (10 min @ 5-min bars)
   max_pending_order_bars: 12    # cancel pending limit orders older than this many bars (25 min @ 5-min bars)
 
 scale_out:

@@ -145,6 +145,7 @@ class TradingEnv(gym.Env):
         instrument: InstrumentProfile,
         rth_start: str = "09:30",
         rth_end: str = "16:00",
+        force_close_time: str = "15:55",
         no_entry_last_n_bars: int = 3,
         early_terminate_on_max_dd: bool = True,
         bar_minutes: int = 5,
@@ -173,8 +174,10 @@ class TradingEnv(gym.Env):
         # Pre-compute RTH time constants once — avoids pd.Timestamp allocation per step
         _rth_start_ts = pd.Timestamp(f"2000-01-01 {rth_start}")
         _rth_end_ts   = pd.Timestamp(f"2000-01-01 {rth_end}")
+        _force_close_ts = pd.Timestamp(f"2000-01-01 {force_close_time}")
         self._rth_start_time  = _rth_start_ts.time()
         self._rth_end_time    = _rth_end_ts.time()
+        self._force_close_time = _force_close_ts.time()
         self._rth_total_secs  = (_rth_end_ts - _rth_start_ts).total_seconds()
         self._rth_start_secs  = _rth_start_ts.timestamp() % 86400  # seconds since midnight
         self.no_entry_last_n_bars = no_entry_last_n_bars
@@ -316,38 +319,35 @@ class TradingEnv(gym.Env):
         self.zone_detector.reset()
         self.reward_calculator.reset_episode_stats()
 
-        # Random start: agent begins at a random bar within the session.
-        # 70% of episodes use zone-biased start (begins near a price extreme /
-        # zone area); 30% are purely random.  Both respect the 75% cap so
-        # there are always enough bars for a meaningful episode.
+        # Random start: purely random within two trading windows.
+        # Window 1: 8:15 PM – 10:50 PM ET (evening Asia/London)
+        # Window 2: 12:00 PM – 2:30 PM ET (NY Afternoon)
+        from datetime import time as dt_time
+
         n_bars = len(self._session_bars)
         start_offset = 0
         if self.random_start and n_bars > 5:
-            max_offset = max(1, int(n_bars * 0.75))
+            evening_start = dt_time(20, 15)  # 8:15 PM ET
+            evening_end   = dt_time(22, 50)  # 10:50 PM ET
+            afternoon_start = dt_time(12, 0)   # 12:00 PM ET (noon)
+            afternoon_end   = dt_time(14, 30)  # 2:30 PM ET
 
-            if self._rng.random() < 0.70:
-                # Zone-biased: pick a start within 5 bars before a price extreme.
-                # Uses session high/low as a proxy for zone areas — ES tends to
-                # form supply/demand zones near intraday extremes.
-                closes = self._session_bars["close"].to_numpy()
-                highs  = self._session_bars["high"].to_numpy()
-                lows   = self._session_bars["low"].to_numpy()
-                s_high = float(highs.max())
-                s_low  = float(lows.min())
-                zone_range = daily_atr * 0.18   # within 18% ATR of extremes
-                near_zone  = (
-                    (closes >= s_high - zone_range) |
-                    (closes <= s_low  + zone_range)
-                )
-                candidates = np.where(near_zone)[0]
-                candidates = candidates[candidates < max_offset]
-                if len(candidates) > 0:
-                    target_bar  = int(self._rng.choice(candidates))
-                    start_offset = max(0, target_bar - 5)
-                else:
-                    start_offset = int(self._rng.integers(0, max_offset))
+            session_times = [ts.time() for ts in self._session_bars.index]
+            valid_indices = []
+
+            for i, bar_time in enumerate(session_times):
+                # Include bars in either trading window
+                in_evening = evening_start <= bar_time <= evening_end
+                in_afternoon = afternoon_start <= bar_time <= afternoon_end
+                if in_evening or in_afternoon:
+                    valid_indices.append(i)
+
+            if len(valid_indices) > 0:
+                # Randomly pick a bar from the valid time windows
+                start_offset = int(self._rng.choice(valid_indices))
             else:
-                start_offset = int(self._rng.integers(0, max_offset))
+                # Fallback: if no bars in window, start at 0
+                start_offset = 0
 
             self._session_bars = self._session_bars.iloc[start_offset:]   # preserve DatetimeIndex
             self._atr_series   = self._atr_series.iloc[start_offset:].reset_index(drop=True)
@@ -393,12 +393,16 @@ class TradingEnv(gym.Env):
         # Pre-extract numpy arrays from the combined bars once per episode.
         # Passing these to zone_detector avoids repeated pandas .iloc row access
         # inside the precompute loop (~50x faster than pandas in a tight Python loop).
-        _np_open  = self._combined_bars["open"].to_numpy()
-        _np_high  = self._combined_bars["high"].to_numpy()
-        _np_low   = self._combined_bars["low"].to_numpy()
-        _np_close = self._combined_bars["close"].to_numpy()
-        _np_atr   = self._combined_atr_series.to_numpy() if self._combined_atr_series is not None else None
-        self.zone_detector.set_bars_numpy(_np_open, _np_high, _np_low, _np_close, _np_atr)
+        _np_open   = self._combined_bars["open"].to_numpy()
+        _np_high   = self._combined_bars["high"].to_numpy()
+        _np_low    = self._combined_bars["low"].to_numpy()
+        _np_close  = self._combined_bars["close"].to_numpy()
+        _np_atr    = self._combined_atr_series.to_numpy() if self._combined_atr_series is not None else None
+        _np_volume = (
+            self._combined_bars["volume"].to_numpy()
+            if "volume" in self._combined_bars.columns else None
+        )
+        self.zone_detector.set_bars_numpy(_np_open, _np_high, _np_low, _np_close, _np_atr, _np_volume)
 
         self._precomputed_states: list = []
         for bar_idx in range(self._n_steps):
@@ -553,9 +557,15 @@ class TradingEnv(gym.Env):
             # rejected (preserving the original placed_bar_idx / expiry timer);
             # a new order in a different direction or at a different price
             # overwrites.  If no valid zone exists, the existing pending is kept.
-            self._place_pending_order(direction=-1, current_price=current_price, atr_state=atr_state)
+            self._place_pending_order(
+                direction=-1, current_price=current_price, atr_state=atr_state,
+                current_high=current_high, current_low=current_low,
+            )
         elif action == Action.ENTER_LONG:
-            self._place_pending_order(direction=1, current_price=current_price, atr_state=atr_state)
+            self._place_pending_order(
+                direction=1, current_price=current_price, atr_state=atr_state,
+                current_high=current_high, current_low=current_low,
+            )
         elif action == Action.EXIT:
             # Cancel pending order when flat, or close open position below
             if not self.position_manager.state.is_open and self._pending_order is not None:
@@ -636,6 +646,19 @@ class TradingEnv(gym.Env):
                 )
             if self.early_terminate_on_max_dd:
                 terminated = True
+
+        # ── Force close before 3:55 PM ET ──────────────────────────────────
+        # Hard rule: close all trades and pending orders before force_close_time
+        if (not trade_closed_this_step
+                and self.position_manager.state.is_open):
+            _bar_time_now = self._session_times[self._current_step]
+            if _bar_time_now >= self._force_close_time:
+                _fc_closed = self.position_manager.force_close(
+                    current_price, self._current_step, ExitReason.SESSION_END
+                )
+                if _fc_closed is not None:
+                    trade_closed_this_step = True
+                self._pending_order = None  # also cancel any pending orders
 
         # ── RTH-end force close (FULL / GLOBEX sessions only) ─────────────────
         # When trading the full 23-hour session, close any open position the
@@ -844,7 +867,12 @@ class TradingEnv(gym.Env):
         return mask
 
     def _place_pending_order(
-        self, direction: int, current_price: float, atr_state: ATRState
+        self,
+        direction: int,
+        current_price: float,
+        atr_state: ATRState,
+        current_high: float = 0.0,
+        current_low: float = 0.0,
     ) -> None:
         """
         Compute limit price (near zone edge), stop (beyond far edge), target,
@@ -862,7 +890,12 @@ class TradingEnv(gym.Env):
 
         Fill check: bar_low ≤ limit_price ≤ bar_high (both directions).
 
-        Skipped when: zone not yet swept, width outside [min_zone, max_zone].
+        Skipped when:
+          - zone not yet swept, width outside [min_zone, max_zone]
+          - current bar violates the 50% midpoint rule:
+              LONG  blocked if bar low  < zone midpoint (candle cut through lower half)
+              SHORT blocked if bar high > zone midpoint (candle cut through upper half)
+          - computed R:R < min_rr_ratio (from risk_config.yaml)
         """
         zone_state = self._last_zone_state if hasattr(self, "_last_zone_state") else None
         oz_state   = self._last_order_zone_state if hasattr(self, "_last_order_zone_state") else None
@@ -885,6 +918,15 @@ class TradingEnv(gym.Env):
             if w < min_zone_pts or w > max_zone_pts:
                 log.debug("Pending order skipped — supply zone width out of range", width=round(w, 2))
                 return
+            # ── 50% midpoint guard (SHORT) ─────────────────────────────────────
+            # If the current bar high is above the zone midpoint, the candle cut
+            # through the upper half of the supply zone — entry is invalid.
+            if current_high > 0.0 and current_high > zone.midpoint:
+                log.debug(
+                    "Pending order skipped — bar high above supply zone midpoint",
+                    bar_high=current_high, zone_midpoint=round(zone.midpoint, 2),
+                )
+                return
             zone_width_pts = w
             limit_price  = zone.bottom                 # near edge
             stop_price   = zone.top + stop_buffer      # beyond far edge
@@ -900,6 +942,15 @@ class TradingEnv(gym.Env):
             if w < min_zone_pts or w > max_zone_pts:
                 log.debug("Pending order skipped — demand zone width out of range", width=round(w, 2))
                 return
+            # ── 50% midpoint guard (LONG) ──────────────────────────────────────
+            # If the current bar low is below the zone midpoint, the candle cut
+            # through the lower half of the demand zone — entry is invalid.
+            if current_low > 0.0 and current_low < zone.midpoint:
+                log.debug(
+                    "Pending order skipped — bar low below demand zone midpoint",
+                    bar_low=current_low, zone_midpoint=round(zone.midpoint, 2),
+                )
+                return
             zone_width_pts = w
             limit_price  = zone.top                    # near edge
             stop_price   = zone.bottom - stop_buffer   # beyond far edge
@@ -913,6 +964,20 @@ class TradingEnv(gym.Env):
             # swept, width-bounded, un-pierced zone for every entry.
             log.debug(
                 "Pending order skipped — no valid zone for direction",
+                direction="LONG" if direction == 1 else "SHORT",
+            )
+            return
+
+        # ── R:R guard — hard minimum from risk_config.yaml ───────────────────
+        # Use actual computed prices, not an ATR estimate.
+        _risk_pts   = abs(stop_price   - limit_price)
+        _reward_pts = abs(target_price - limit_price)
+        _min_rr     = self.order_zone_engine.min_rr_ratio
+        if _risk_pts > 0 and _reward_pts / _risk_pts < _min_rr:
+            log.debug(
+                "Pending order skipped — R:R below minimum",
+                rr=round(_reward_pts / max(_risk_pts, 1e-9), 2),
+                min_rr=_min_rr,
                 direction="LONG" if direction == 1 else "SHORT",
             )
             return
@@ -1137,9 +1202,11 @@ class TradingEnv(gym.Env):
         wins    = [t for t in trades if t.is_win]
         losses  = [t for t in trades if not t.is_win]
 
-        n_trades = len(trades)
-        n_wins   = len(wins)
-        n_losses = len(losses)
+        n_trades  = len(trades)
+        n_wins    = len(wins)
+        n_losses  = len(losses)
+        n_longs   = sum(1 for t in trades if t.direction.name == "LONG")
+        n_shorts  = n_trades - n_longs
 
         # ── P&L ───────────────────────────────────────────────
         total_r       = sum(t.pnl_r      for t in trades)
@@ -1240,6 +1307,8 @@ class TradingEnv(gym.Env):
             "total_pnl_dollars":       total_dollars,
             # Counts
             "n_trades":                n_trades,
+            "n_longs":                 n_longs,
+            "n_shorts":                n_shorts,
             "n_wins":                  n_wins,
             "n_losses":                n_losses,
             "win_rate":                win_rate,
