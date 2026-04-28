@@ -43,9 +43,63 @@ At the beginning of every conversation, before doing anything else:
 >- make sure you remove the redudant codes, variables and tidy up the code without losing functionalities or breaking the codes.  make sure codes are clean, readable, professional and comply with highest coding standards.
 > - once you review the code, make a note of all the bottleknecks in the codes and let user know the effect of improving on the speed , perforamce and stabilty or anyother metric in the code execution.
 >- update the Readme file once finish 
+
+>- all python test shall be executed in cmd not Powershell
 ---
 
 
+
+## Critical TP and SL Configuration (⚠️ DO NOT CHANGE)
+
+**Take-Profit and Stop-Loss settings are tightly coupled and must remain synchronized.**
+
+**DO NOT modify** `take_profit.swing_multiplier` or stop-loss placement without explicit user request.
+
+**Why:**
+- **Take-Profit**: Controlled by `risk_config.yaml → take_profit.swing_multiplier` (default 0.6)
+  - TP = entry + (swing - entry) × multiplier
+  - Currently set to 60% of swing-high/low distance
+  - Located in: `environment/trading_env.py:_compute_target_price()` (lines 1140–1148)
+
+- **R:R Gate**: The `min_rr_ratio: 1.75` gate in `risk_config.yaml` uses the **FULL swing distance (no multiplier)**
+  - TP target = entry + (swing - entry) × 0.6 (easier hits)
+  - R:R validation = (full swing - entry) / (entry - stop) (conservative entry)
+  - This DECOUPLES swing_multiplier from R:R validation
+  - Gate calculation: `environment/trading_env.py:_place_pending_order()` (lines 949–976)
+
+- **Stop-Loss**: Placed `stop_buffer_pts` beyond the zone far edge (never widened)
+  - Located in: `environment/position_manager.py` and `trading_env.py:_place_pending_order()`
+  - SL widening is hard-blocked with `allow_stop_widening: false`
+
+**Note on swing_multiplier**: Changing it only affects TP distance, NOT entry acceptance (R:R gate uses full swing). Safer to tune TP without destabilizing entry validation.
+
+---
+
+## Critical Trade Management Rules (⚠️ DO NOT CHANGE)
+
+These rules are foundational to the agent's risk management and must remain unchanged unless explicitly requested:
+
+### Conservative Same-Candle Exit Rule
+**Location:** `environment/position_manager.py` — `check_exit()` method (lines 440–510)
+
+**Rule:** When a position **enters and exits within the same 5-minute candle**, apply conservative penalties:
+1. **Stop loss is skipped** — Stop cannot trigger on the entry candle (SL only active from next bar onward)
+2. **Take-profit is forced to loss** — If TP is touched same-candle, exit at SL price (marked as loss) instead
+3. **Ambiguous both-hit candle** — If both SL and TP touched in same candle, assume SL was hit first (worst-case)
+
+**Rationale:** Prevents agent from exploiting unreliable intrabar fills and sweep-and-recover moves. One-candle trades are unlikely to be genuine; the conservative exit forces multi-candle holding periods.
+
+**Code signature:**
+```python
+same_bar_entry = (current_bar_idx == s.entry_bar_idx)
+if same_bar_entry and s.target_price > 0:
+    exit_price = active_stop  # Exit at SL, not TP
+    exit_reason = STOP_LOSS
+```
+
+**Do NOT remove, weaken, or bypass this rule without explicit user approval.**
+
+---
 
 ## Project Overview
 

@@ -4,7 +4,8 @@ features/observation_builder.py
 Assembles the neural network observation vector from all feature states.
 
 The observation is a flat float32 numpy array containing:
-  1. Recent OHLC price history — 20-bar sliding window (log-returns)     [80]
+  1. Recent OHLC price history (log-returns) — configurable via environment_config.yaml → observation.lookback_bars
+     Currently 40-bar window = 40 × 4 = [160]
   2. ATR features (exhaustion, remaining room)                            [4]
   3. Zone features (distance, in-zone, width, age, sweep_weight)         [10]
   4. Order zone / confluence features (score, R:R, pending order state)  [10]
@@ -35,7 +36,7 @@ sin/cos time encoding:
   Gives the agent cyclical regime awareness (open/midday/close) without discontinuity.
 
 Total fixed features: 38 + 15 = 53
-Observation vector size: 20 × 4 + 53 = 133
+Observation vector size: lookback_bars × 4 + 53 (e.g. 40 × 4 + 53 = 213)
 """
 
 from __future__ import annotations

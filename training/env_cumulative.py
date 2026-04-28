@@ -22,7 +22,7 @@ class EnvCumulative:
     """Running totals for one env across the full training run."""
 
     __slots__ = (
-        "n_trades", "n_wins", "n_losses",
+        "n_trades", "n_wins", "n_losses", "n_longs", "n_shorts",
         "n_tp", "n_sl", "n_sc", "n_agent_exit",  # exit reason breakdown (TP+SC+SL+AEx = n_trades)
         "n_episodes",                            # completed episodes — used for Tr/wk
         "total_pnl_r", "total_pnl_dollars",
@@ -44,7 +44,7 @@ class EnvCumulative:
     )
 
     def __init__(self) -> None:
-        self.n_trades = self.n_wins = self.n_losses = 0
+        self.n_trades = self.n_wins = self.n_losses = self.n_longs = self.n_shorts = 0
         self.n_tp = self.n_sl = self.n_sc = self.n_agent_exit = 0
         self.n_episodes = 0
         self.total_pnl_r = self.total_pnl_dollars = 0.0
@@ -83,6 +83,8 @@ class EnvCumulative:
         self.n_trades  += n
         self.n_wins    += nw
         self.n_losses  += nl
+        self.n_longs   += ep.get("n_longs",  0)
+        self.n_shorts  += ep.get("n_shorts", 0)
 
         pnl_r = ep.get("total_pnl_r",       0.0)
         pnl_d = ep.get("total_pnl_dollars",  0.0)
@@ -235,6 +237,8 @@ class EnvCumulative:
 
         return {
             "n_trades":             n,
+            "n_longs":              self.n_longs,
+            "n_shorts":             self.n_shorts,
             "n_wins":               nw,
             "n_losses":             nl,
             "n_tp":                 self.n_tp,

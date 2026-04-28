@@ -368,6 +368,7 @@ def build_components(
             random_start=not is_eval,
             seed=env_seed,
             zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
+            tp_swing_multiplier=risk_cfg.get("take_profit", {}).get("swing_multiplier", 1.0),
         )
 
     # ── Vectorised training env (multiprocessing) ─────────────
@@ -984,6 +985,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             random_start=not is_eval,
             seed=agent_cfg.get("seed", 42) + worker_seed_offset + (100 if is_eval else 0),
             zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
+            tp_swing_multiplier=risk_cfg.get("take_profit", {}).get("swing_multiplier", 1.0),
         )
 
     from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv

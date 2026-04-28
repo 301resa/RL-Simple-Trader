@@ -154,7 +154,7 @@ class RewardCalculator:
         self.exit_bonuses = exit_bonuses or {
             "trailing_stop_correctly": 0.30,
             "aggressive_trail_at_4r": 0.20,
-            "exit_at_atr_target": 0.20,
+            "tp_hit_bonus": 0.50,
         }
         self.exit_penalties = exit_penalties or {
             "held_past_4r_no_trail": -0.50,
@@ -216,10 +216,15 @@ class RewardCalculator:
         step_penalty = 0.0
         note = ""
 
-        # ── Time management: overstay penalty (per bar beyond threshold) ──────
+        # ── Time management: graduated overstay penalty ───────────────────────
+        # Ramps linearly from 50% at penalty_start_bar to 100% at max_bars_before_penalty.
         # Not multiplied by shaping_scale — discipline guardrail, always active.
-        if is_position_open and bars_in_trade > self.time_management.get("max_bars_before_penalty", 12):
-            step_penalty += self.time_management.get("penalty_per_bar", -0.01)
+        penalty_start = self.time_management.get("penalty_start_bar", 6)
+        penalty_max = self.time_management.get("max_bars_before_penalty", 12)
+        penalty_per_bar = self.time_management.get("penalty_per_bar", -0.01)
+        if is_position_open and bars_in_trade > penalty_start:
+            ramp = min(1.0, (bars_in_trade - penalty_start) / max(1, penalty_max - penalty_start))
+            step_penalty += penalty_per_bar * (0.5 + 0.5 * ramp)
             note += "overstaying "
 
         # ── Hold / WAIT logic ─────────────────────────────────────────────────
@@ -234,8 +239,10 @@ class RewardCalculator:
                 note += "hold_flat_in_zone "
             elif (not setup_present
                   and order_zone_state.confluence_score < self.selectivity.get("min_confluence_for_entry", 0.5)):
-                # No valid setup — reward disciplined waiting
-                step_penalty += self.selectivity.get("no_trade_reward", 0.05)
+                # No valid setup — neutral wait (no reward for inaction)
+                no_trade_val = self.selectivity.get("no_trade_reward", 0.0)
+                if no_trade_val != 0.0:
+                    step_penalty += no_trade_val
                 note += "patience_no_setup "
 
         # ── Entry bonuses & penalties ─────────────────────────
@@ -254,12 +261,13 @@ class RewardCalculator:
             is_bullish_action = direction == 1
 
             # ATR gate violation — directional: penalise only if entering in the exhausted direction
+            # Scaled by shaping_scale so it fades as training matures.
             dir_exhausted = (
                 (is_bearish_action and atr_state.atr_short_exhausted)
                 or (is_bullish_action and atr_state.atr_long_exhausted)
             )
             if dir_exhausted:
-                entry_penalty += self.entry_penalties["atr_exhausted"]
+                entry_penalty += self.entry_penalties["atr_exhausted"] * self.shaping_scale
                 note += "atr_exhausted "
 
             # R:R check (shaping penalty — scaled)
@@ -283,28 +291,30 @@ class RewardCalculator:
                     entry_penalty += self.entry_penalties["no_zone_present"] * self.shaping_scale
                     note += "no_zone "
             else:
-                # Bonuses for quality setup (all shaping — scaled to zero over time)
+                # Bonuses for quality setup — NOT scaled by shaping_scale.
+                # Entry quality signals must remain active throughout training so the
+                # agent continues to discriminate high-confluence from low-confluence setups.
                 score = order_zone_state.confluence_score
 
                 if score >= 0.85:
-                    entry_bonus += self.entry_bonuses["full_order_zone_confluence"] * self.shaping_scale
+                    entry_bonus += self.entry_bonuses["full_order_zone_confluence"]
                     note += "full_confluence "
                 else:
                     if order_zone_state.in_bearish_order_zone or order_zone_state.in_bullish_order_zone:
-                        entry_bonus += self.entry_bonuses["in_supply_demand_zone"] * self.shaping_scale
+                        entry_bonus += self.entry_bonuses["in_supply_demand_zone"]
                     # Pillar 3 (rejection candle) removed
 
                 # ATR room bonus: neither direction exhausted = still has room
                 atr_has_room = not atr_state.atr_short_exhausted and not atr_state.atr_long_exhausted
                 if atr_has_room:
-                    entry_bonus += self.entry_bonuses["atr_has_room"] * self.shaping_scale
+                    entry_bonus += self.entry_bonuses["atr_has_room"]
 
                 if order_zone_state.rr_ratio >= min_rr_ratio:
-                    entry_bonus += self.entry_bonuses["high_rr_ratio"] * self.shaping_scale
+                    entry_bonus += self.entry_bonuses["high_rr_ratio"]
 
-            # Loss streak discipline (keep always — not shaping, it's a guardrail)
+            # Loss streak discipline — scaled with shaping_scale (lowered penalty, fades as training matures)
             if portfolio_state.get("consecutive_losses", 0) >= self.discipline["loss_streak_threshold"]:
-                entry_penalty += self.discipline["re_entry_after_loss_streak_penalty"]
+                entry_penalty += self.discipline["re_entry_after_loss_streak_penalty"] * self.shaping_scale
                 note += "loss_streak_reentry "
 
         # ── Trail stop bonus (shaping — scaled) ──────────────
@@ -372,8 +382,8 @@ class RewardCalculator:
 
         # ── Exit quality assessment ───────────────────────────
         if trade.exit_reason == ExitReason.TAKE_PROFIT:
-            exit_bonus += self.exit_bonuses.get("exit_at_atr_target", 0.0)
-            note += "hit_target "
+            exit_bonus += self.exit_bonuses.get("tp_hit_bonus", 0.20)
+            note += "hit_tp "
 
         if was_trailing:
             exit_bonus += self.exit_bonuses.get("trailing_stop_correctly", 0.0) * self.shaping_scale
@@ -384,24 +394,24 @@ class RewardCalculator:
             exit_penalty += self.exit_penalties.get("held_past_4r_no_trail", 0.0) * self.shaping_scale
             note += "no_trail_at_4r "
 
+        # Symmetrized: apply giveback penalty to ALL exit types (not just SL/AGENT_EXIT).
+        # A TP hit that gave back 2R before reaching target is worse than a clean SL.
         r_given_back = peak_unrealised_r - trade.pnl_r
-        if r_given_back > 1.0 and trade.exit_reason in (ExitReason.STOP_LOSS, ExitReason.AGENT_EXIT):
+        if r_given_back > 1.0:
             exit_penalty -= self.gave_back_profit_weight * r_given_back * self.shaping_scale
             note += f"gave_back_{r_given_back:.1f}r "
 
         # ── MAE penalty: sniper entries should have minimal adverse excursion ──
-        # Good entry = price immediately moves in direction → low MAE.
-        # Bad entry = price first moves against → high MAE, even if trade wins.
+        # Threshold raised to 0.60R (was 0.40R) to reduce false positives on
+        # valid zone touches that retrace slightly before continuation.
         mae_excess = max(0.0, trade.max_adverse_excursion - self.mae_threshold_r)
         if mae_excess > 0.0:
             exit_penalty -= self.mae_penalty_weight * mae_excess * self.shaping_scale
             note += f"mae_{trade.max_adverse_excursion:.2f}r "
 
         # ── MFE efficiency: reward capturing a high fraction of the max move ──
-        # Only applies when the trade had meaningful upside (MFE > 0.1R).
-        # efficiency = pnl_r / mfe_r — capped at 1.5 to handle TP overshoots.
-        # Losing trades with prior upside score 0 (not additionally penalised;
-        # MAE penalty and core_r loss already handle that).
+        # Weight reduced to 0.05 (was 0.15) — TP bonus already rewards good exits;
+        # high MFE weight was double-counting and distorting the signal.
         # SCALE_OUT excluded — partial exits always score < 1 by construction.
         mfe_r = getattr(trade, "max_favorable_excursion", 0.0)
         if (mfe_r > 0.1
@@ -410,6 +420,11 @@ class RewardCalculator:
             efficiency = float(np.clip(trade.pnl_r / mfe_r, 0.0, 1.5))
             exit_bonus += self.mfe_efficiency_weight * efficiency * self.shaping_scale
             note += f"mfe_eff_{efficiency:.2f} "
+
+        # ── Scale-out reward ──────────────────────────────────────────────────
+        if trade.exit_reason == ExitReason.SCALE_OUT:
+            exit_bonus += self.exit_bonuses.get("scale_out_success", 0.15)
+            note += "scale_out "
 
         # ── Duration rewards / penalties ──────────────────────────────────────
         # Penalise agent-initiated exits that close far too quickly (noise trades).
@@ -422,8 +437,9 @@ class RewardCalculator:
             exit_penalty += self.time_management.get("too_fast_penalty", -0.10) * self.shaping_scale
             note += f"too_fast_exit_{duration_bars}bars "
         elif (min_hold <= duration_bars <= fast_bars
-              and trade.exit_reason == ExitReason.TAKE_PROFIT
+              and trade.exit_reason in (ExitReason.TAKE_PROFIT, ExitReason.STOP_LOSS)
               and trade.pnl_r > 0):
+            # Broadened: SL exits that are profitable (e.g. after trailing) count too
             exit_bonus += self.time_management.get("bonus_fast_resolution", 0.10) * self.shaping_scale
             note += "fast_resolution "
 

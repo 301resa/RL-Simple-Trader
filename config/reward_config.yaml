@@ -8,67 +8,68 @@ core:
 
 step:
   # ── Hold-flat penalty ────────────────────────────────────────────────────
-  # CRITICAL FOR TRADE FREQUENCY: this must make holding costlier than a bad
-  # entry.  At -0.025/bar the daily hold cost (≈ 78 RTH bars × 0.025 ≈ 1.95/day)
-  # exceeds a typical loss (-1R × 0.5 WR ≈ -0.5), forcing at least 4-5
-  # trades per day to break even on the inactivity penalty alone.
-  hold_flat_penalty: -0.01             # 5× increase: forces agent to seek entries
+  # At -0.01/bar in-zone, agent is penalised for sitting idle when a valid
+  # setup is present.  Applied only when in a zone with no pending order.
+  hold_flat_penalty: -0.01
 
 entry_bonuses:
-  full_order_zone_confluence: 0.50      # price inside a valid zone with ATR room
-  in_supply_demand_zone: 0.3          # price is inside a valid zone
+  # ── Always-on (NOT multiplied by shaping_scale) ───────────────────────
+  # Entry quality signals must remain active late in training so the agent
+  # continues to discriminate high-confluence from low-confluence setups.
+  full_order_zone_confluence: 0.50      # price inside a valid zone, high confluence (≥0.85)
+  in_supply_demand_zone: 0.30          # price inside a valid zone (any confluence)
   atr_has_room: 0.15                   # ATR not yet in warning territory
-  high_rr_ratio: 0.7                  # R:R >= minimum
-  # liquidity_sweep_present removed — sweep pillar removed from system
-  # rejection_candle_present removed — Pillar 3 not used
+  high_rr_ratio: 0.70                  # R:R >= minimum threshold
 
 entry_penalties:
   # ── Entry cost ────────────────────────────────────────────────────────────
-  entry_cost: -0.0015                         # near-zero: don't penalise exploration
+  entry_cost: -0.01                    # transaction cost proxy; deters random exploration
 
   # ── Zone/setup penalties ──────────────────────────────────────────────────
-  no_zone_present: -0.15               # increased: entering outside a zone is a clear mistake
-  atr_exhausted: -0.40
-  rr_below_minimum: -0.2             # increased: bad R:R is a sniper failure
-  overtrading: 0.0                      # daily loss limit (-3R) is the brake
+  no_zone_present: -0.15               # entering outside a valid zone
+  atr_exhausted: -0.40                 # entering in an ATR-exhausted direction (shaping-scaled)
+  rr_below_minimum: -0.20             # R:R below minimum gate (shaping-scaled)
+  overtrading: 0.0                     # daily loss limit (-3R) is the brake
 
   # ── MAE (max adverse excursion) ───────────────────────────────────────────
-  # Penalises entries where price moved significantly against before resolving.
-  # Good entries (sniper) should have minimal adverse excursion before working.
+  # Sniper entries should move immediately in direction.  Threshold raised to
+  # 0.60R (was 0.40R) to reduce false positives on valid zone touches.
   mae_penalty_weight: 0.40             # weight × max(0, mae_r - mae_threshold_r)
-  mae_threshold_r: 0.40               # MAE below this is acceptable (R multiples)
+  mae_threshold_r: 0.60               # MAE below this is acceptable (raised from 0.40)
 
 exit_rewards:
-  trailing_stop_correctly: 0.5       # used trail stop before exit
+  trailing_stop_correctly: 0.50       # used trail stop before exit
   aggressive_trail_at_4r: 0.20        # trailed aggressively at 4R profit
-  exit_at_atr_target: 0.20            # hit the ATR-based profit target
-  mfe_efficiency_weight: 0.15         # reward for capturing fraction of max favorable move
+  tp_hit_bonus: 1.50                  # hit the structural take-profit target
+  mfe_efficiency_weight: 0.05         # reduced: capturing fraction of max move (was 0.15)
+  scale_out_success: 0.15             # partial exit (scale-out) reward
 
 exit_penalties:
   held_past_4r_no_trail: -0.50        # held past 4R without trailing
-  gave_back_profit_pct: 0.30          # weight applied to R given back from peak
+  gave_back_profit_pct: 0.30          # weight applied to R given back from peak (all exits)
 
 violations:
   max_drawdown_breach: -2.00          # hard guardrail breach
   daily_loss_limit_breach: -1.50      # daily loss limit hit
 
 discipline:
-  re_entry_after_loss_streak_penalty: -0.5
+  # Loss streak penalty scaled with shaping_scale (lowered from -0.5 to -0.15)
+  # so it fades as training matures and agent learns from core_r signal alone.
+  re_entry_after_loss_streak_penalty: -0.15
   loss_streak_threshold: 4
 
-
-# need to be written in a way that allows for easy tuning of selectivity vs. frequency tradeoff
 selectivity:
-  no_trade_reward: 0.05
+  # no_trade_reward = 0.0: do NOT reward inaction — waiting in a no-setup zone
+  # is neutral.  Positive value was backwards (rewarded laziness).
+  no_trade_reward: 0.0
   weak_zone_penalty: -0.05
   min_confluence_for_entry: 0.5
 
-
-
 time_management:
-  max_bars_before_penalty: 12        # ~1 hour on 5min TF
-  penalty_per_bar: -0.01             # per-bar penalty after threshold
-  bonus_fast_resolution: 0.10        # if TP hit within fast_trade_bars
-  fast_trade_bars: 6                 # reward if TP within this
+  penalty_start_bar: 6               # begin graduated overstay penalty here
+  max_bars_before_penalty: 12        # ramp reaches full penalty_per_bar at this bar
+  penalty_per_bar: -0.01             # full per-bar penalty (ramp starts at 50%)
+  bonus_fast_resolution: 0.10        # fast clean exit (TP or SL) within fast_trade_bars
+  fast_trade_bars: 6                 # reward if TP/SL within this many bars
   min_hold_bars: 2                   # penalize agent_exit before this many bars
   too_fast_penalty: -0.10            # penalty for agent-exiting too quickly

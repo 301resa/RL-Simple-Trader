@@ -7,7 +7,7 @@
 # under contracts.<SYMBOL> and is loaded via utils.instrument.
 
 position:
-  max_drawdown_r: 5.0            # episode ends if cumulative loss exceeds this R
+  max_drawdown_r: 7.0            # episode ends if cumulative loss exceeds this R
 
 sizing:
   risk_per_trade_pct: 0.01       # risk 1% of account per trade
@@ -19,11 +19,12 @@ stop_loss:
 
 take_profit:
   min_rr_ratio: 1.75            # minimum R:R required to enter
+  swing_multiplier: 0.6         # use 60% of swing-high/low distance as TP (encourages more TP hits)
 
 trailing:
-  activate_at_r: 1.0            # activate trailing stop at 1.2R unrealised profit
+  activate_at_r: 1.0            # activate trailing stop at 1.0R unrealised profit
   trail_aggressively_at_r: 3.0   # tighten trail at 4R
-  lock_in_r_at_trail: 0.5        # lock in at least 1.2R when trailing activates
+  lock_in_r_at_trail: 0.5        # lock in at least 0.5R when trailing activates
 
 atr_gate:
   block_entries_above_pct: 0.95  # block entries in the EXHAUSTED DIRECTION only at 95% ATR

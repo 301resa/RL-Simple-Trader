@@ -155,6 +155,7 @@ class TradingEnv(gym.Env):
         random_start: bool = False,
         seed: Optional[int] = None,
         zone_lookback_bars: int = 500,
+        tp_swing_multiplier: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -190,6 +191,7 @@ class TradingEnv(gym.Env):
         self.session_type = session_type.upper()
         self.random_start = random_start
         self.zone_lookback_bars = zone_lookback_bars
+        self.tp_swing_multiplier = tp_swing_multiplier
 
         # State variables (initialised in reset())
         self._current_day: Optional[str] = None
@@ -318,31 +320,27 @@ class TradingEnv(gym.Env):
         self.zone_detector.reset()
         self.reward_calculator.reset_episode_stats()
 
-        # Random start: purely random within two trading windows.
-        # Window 1: 8:15 PM – 10:50 PM ET (evening Asia/London)
-        # Window 2: 12:00 PM – 2:30 PM ET (NY Afternoon)
+        # Random start: 8:30 PM – 10:30 PM ET (early Asian/London session).
+        # Once started, agent trades continuously until 3:55 PM ET force-close next day.
+        # Gap: 4:00 PM (RTH close) → 8:30 PM (next episode start) — no trading.
         from datetime import time as dt_time
 
         n_bars = len(self._session_bars)
         start_offset = 0
         if self.random_start and n_bars > 5:
-            evening_start = dt_time(20, 15)  # 8:15 PM ET
-            evening_end   = dt_time(22, 50)  # 10:50 PM ET
-            afternoon_start = dt_time(12, 0)   # 12:00 PM ET (noon)
-            afternoon_end   = dt_time(14, 30)  # 2:30 PM ET
+            evening_start = dt_time(20, 30)  # 8:30 PM ET
+            evening_end   = dt_time(22, 30)  # 10:30 PM ET
 
             session_times = [ts.time() for ts in self._session_bars.index]
             valid_indices = []
 
             for i, bar_time in enumerate(session_times):
-                # Include bars in either trading window
-                in_evening = evening_start <= bar_time <= evening_end
-                in_afternoon = afternoon_start <= bar_time <= afternoon_end
-                if in_evening or in_afternoon:
+                # Random start window: 8:30 PM – 10:30 PM ET
+                if evening_start <= bar_time <= evening_end:
                     valid_indices.append(i)
 
             if len(valid_indices) > 0:
-                # Randomly pick a bar from the valid time windows
+                # Randomly pick a bar from the 8:30–10:30 PM window
                 start_offset = int(self._rng.choice(valid_indices))
             else:
                 # Fallback: if no bars in window, start at 0
@@ -949,14 +947,28 @@ class TradingEnv(gym.Env):
             return
 
         # ── R:R guard — hard minimum from risk_config.yaml ───────────────────
-        # Use actual computed prices, not an ATR estimate.
-        _risk_pts   = abs(stop_price   - limit_price)
-        _reward_pts = abs(target_price - limit_price)
-        _min_rr     = self.order_zone_engine.min_rr_ratio
-        if _risk_pts > 0 and _reward_pts / _risk_pts < _min_rr:
+        # IMPORTANT: R:R gate uses the FULL swing distance (no swing_multiplier),
+        # while the actual target_price uses swing_multiplier for tighter TP.
+        # This keeps entry validation conservative while allowing easier TP hits.
+        _risk_pts = abs(stop_price - limit_price)
+
+        # Get FULL swing distance (without multiplier) for R:R validation
+        _swing_full = None
+        if direction == 1:
+            _swing_full = self._nearest_session_high_above(limit_price)
+        else:
+            _swing_full = self._nearest_session_low_below(limit_price)
+
+        if _swing_full is not None:
+            _reward_pts_for_rr = abs(_swing_full - limit_price)
+        else:
+            _reward_pts_for_rr = abs(target_price - limit_price)
+
+        _min_rr = self.order_zone_engine.min_rr_ratio
+        if _risk_pts > 0 and _reward_pts_for_rr / _risk_pts < _min_rr:
             log.debug(
                 "Pending order skipped — R:R below minimum",
-                rr=round(_reward_pts / max(_risk_pts, 1e-9), 2),
+                rr=round(_reward_pts_for_rr / max(_risk_pts, 1e-9), 2),
                 min_rr=_min_rr,
                 direction="LONG" if direction == 1 else "SHORT",
             )
@@ -1092,6 +1104,30 @@ class TradingEnv(gym.Env):
 
         self._pending_order = None
 
+    def _nearest_session_high_above(self, entry_price: float) -> Optional[float]:
+        """Prior swing high — the highest session bar high above entry_price.
+
+        Targets the most significant structural peak that was swept through
+        to create the order block setup (matches chart pattern exactly).
+        """
+        if self._session_bars is None or self._current_step < 1:
+            return None
+        highs = self._session_bars["high"].values[: self._current_step + 1]
+        above = highs[highs > entry_price + 1e-6]
+        return float(above.max()) if len(above) else None
+
+    def _nearest_session_low_below(self, entry_price: float) -> Optional[float]:
+        """Prior swing low — the lowest session bar low below entry_price.
+
+        Targets the most significant structural trough that was swept through
+        to create the order block setup.
+        """
+        if self._session_bars is None or self._current_step < 1:
+            return None
+        lows = self._session_bars["low"].values[: self._current_step + 1]
+        below = lows[lows < entry_price - 1e-6]
+        return float(below.min()) if len(below) else None
+
     def _compute_target_price(
         self,
         direction: int,
@@ -1103,16 +1139,29 @@ class TradingEnv(gym.Env):
         Determine the take-profit target.
 
         Priority:
-          1. Opposing zone near edge — the structural liquidity target.
-             LONG: nearest_supply.bottom (resistance ceiling above entry).
-             SHORT: nearest_demand.top  (support floor below entry).
-             This matches the range-high / range-low that price was rejected
-             from before the sweep that created the entry setup.
-          2. Impulse extreme of the entry zone — fallback when no opposing
-             zone exists on the correct side.
-          3. ATR projection — final fallback.
+          1. Prior swing high/low — the most significant structural peak (LONG)
+             or trough (SHORT) above/below entry seen so far this session.
+             Matches the classic Order Block / Liquidity Sweep / Target pattern:
+             price swept through a prior swing level, then reversed into the OB.
+             The TP targets that original swing level.
+          2. Opposing zone near edge — structural liquidity target.
+             LONG: nearest_supply.bottom; SHORT: nearest_demand.top.
+          3. Impulse extreme of the entry zone.
+          4. ATR projection — final fallback.
         """
-        # ── Priority 1: opposing zone near edge ───────────────────────────────
+        # ── Priority 1: nearest session bar high/low (with swing_multiplier applied) ──
+        if direction == 1:
+            swing = self._nearest_session_high_above(entry_price)
+            if swing is not None:
+                # Apply multiplier: TP = entry + (swing - entry) × multiplier
+                return entry_price + (swing - entry_price) * self.tp_swing_multiplier
+        else:
+            swing = self._nearest_session_low_below(entry_price)
+            if swing is not None:
+                # Apply multiplier: TP = entry + (swing - entry) × multiplier
+                return entry_price + (swing - entry_price) * self.tp_swing_multiplier
+
+        # ── Priority 2: opposing zone near edge ───────────────────────────────
         if zone_state is not None:
             if direction == 1 and zone_state.nearest_supply is not None:
                 candidate = zone_state.nearest_supply.bottom
@@ -1123,7 +1172,7 @@ class TradingEnv(gym.Env):
                 if candidate < entry_price:
                     return candidate
 
-        # ── Priority 2: impulse extreme of the entry zone ─────────────────────
+        # ── Priority 3: impulse extreme of the entry zone ─────────────────────
         zone = None
         if direction == 1 and zone_state and zone_state.nearest_demand:
             zone = zone_state.nearest_demand
@@ -1137,7 +1186,7 @@ class TradingEnv(gym.Env):
             if direction == -1 and extreme < entry_price:
                 return extreme
 
-        # ── Priority 3: ATR projection ────────────────────────────────────────
+        # ── Priority 4: ATR projection ────────────────────────────────────────
         return ATRCalculator.compute_atr_target_price(entry_price, direction, atr_state)
 
     def _sample_episode_day(self) -> str:

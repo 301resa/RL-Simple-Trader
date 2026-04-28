@@ -1379,6 +1379,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             random_start=False,
             seed=agent_cfg.get("seed", 42) + 999,
             zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
+            tp_swing_multiplier=risk_cfg.get("take_profit", {}).get("swing_multiplier", 1.0),
         )
 
     # ── Resolve episode count ──────────────────────────────────────────────────

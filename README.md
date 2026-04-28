@@ -159,17 +159,35 @@ Stop widening is **never** allowed once placed.
 
 ### Take Profit
 
-Three-priority target selection (`_compute_target_price`):
+Four-priority target selection (`_compute_target_price`):
 
-1. **Opposing zone near edge** *(primary)* — the structural liquidity level on the far side of the range:
-   - LONG: `nearest_supply.bottom` (bottom of the nearest overhead supply zone)
-   - SHORT: `nearest_demand.top` (top of the nearest underlying demand zone)
-   This mirrors how the trade is entered: range low for shorts, range high for longs.
+1. **Prior swing high/low (with swing multiplier)** *(primary)* — the most significant structural peak above entry (LONG)
+   or trough below entry (SHORT) seen so far in the session. The target distance is multiplied by `swing_multiplier`
+   (default **0.6**) to encourage more TP hits and reduce overreach:
+   ```
+   TP = entry + (swing - entry) × swing_multiplier
+   ```
+   For example, if entry = 5000, swing high = 5100, and swing_multiplier = 0.6:
+   ```
+   TP = 5000 + (5100 - 5000) × 0.6 = 5000 + 60 = 5060
+   ```
+   This targets 60% of the structural distance instead of the full swing, making wins more achievable.
+   Configurable via `risk_config.yaml → take_profit.swing_multiplier`.
 
-2. **Impulse extreme of the entry zone** *(fallback 1)* — the actual high (supply) or low (demand)
-   of the impulse bar that confirmed the zone, used when no valid opposing zone is present.
+   **⚠️ Key Design**: The `swing_multiplier` affects TP but NOT the R:R gate:
+   - **TP (actual trade target)**: Uses `0.6 × swing` → easier to hit
+   - **R:R gate (entry validation)**: Uses `1.0 × swing` → conservative gating
+   
+   The `min_rr_ratio: 1.75` gate (in `risk_config.yaml`) validates against the **FULL swing distance** (no multiplier), ensuring conservative entry acceptance. The actual `target_price` uses the reduced 0.6 multiplier for tighter TP hits. This decoupling allows easier TP achievement while maintaining strict entry standards. **Do NOT change TP or SL without explicit user request.**
 
-3. **ATR projection** *(fallback 2)* — 1× ATR from entry, used only when both zone-based
+2. **Opposing zone near edge** *(fallback 1)* — structural liquidity level on the far side:
+   - LONG: `nearest_supply.bottom`
+   - SHORT: `nearest_demand.top`
+
+3. **Impulse extreme of the entry zone** *(fallback 2)* — the actual high (demand) or low
+   (supply) of the impulse bar that confirmed the zone.
+
+4. **ATR projection** *(fallback 3)* — 1× ATR from entry, used only when all zone-based
    targets are unavailable.
 
 ### Trailing Stop
@@ -182,6 +200,41 @@ The trailing stop is a **two-phase mechanism**:
 | Ratcheting | Every subsequent bar while `trailing_active` | Stop advances mechanically toward price — agent does **not** need to keep pressing `TRAIL_STOP` |
 
 Once active, the stop is a one-way ratchet: it only moves in the profitable direction (`max` for LONG, `min` for SHORT). The agent's only remaining decision is when to activate it.
+
+### Conservative Same-Candle Exit Rules
+
+To prevent exploitation of unreliable intrabar fills, the following conservative rules apply when **entry and exit occur within the same 5-minute candle**:
+
+**Same-Bar Entry Detection:**
+```python
+same_bar_entry = (current_bar_idx == entry_bar_idx)
+```
+
+**Exit Hierarchy for Same-Bar Entries:**
+
+1. **Stop loss skipped** — When a position opens on bar N, the stop cannot trigger on the same bar (line 475: `if exit_reason is None and not same_bar_entry`). The position must survive the bar to be eligible for stop loss.
+
+2. **Take-profit forced to loss** — If the candle also touches the TP level (line 488-490):
+   ```
+   if same_bar_entry:
+       exit_price = active_stop  # Exit at SL price (loss), not TP
+       exit_reason = STOP_LOSS
+   ```
+   This treats fill-and-TP-within-one-candle as an unreliable sweep-and-recover, not a genuine win. The position exits at the stop loss price instead.
+
+3. **Ambiguous both-filled candle** (lines 460-471) — If a single candle touches both SL and TP:
+   ```
+   if bar_low <= stop AND bar_high >= target:
+       exit_price = stop  # Assume SL was hit first (worst-case)
+   ```
+   This prevents the model from learning to exploit ambiguous price action as free take-profits.
+
+**Result:** Positions that open and close on the same candle face:
+- No stop loss protection (can run to TP without exit)
+- TP treated as a loss (exit at stop price)
+- Conservative fill order assumption (SL first if both touched)
+
+This conservative approach prevents the agent from over-fitting to intrabar noise and ensures only genuine, multi-candle trades are rewarded.
 
 ### Risk Per Trade
 
@@ -396,6 +449,38 @@ metrics and log results without writing any model files (useful for exploration 
 
 ---
 
+## Session Configuration & Trading Hours
+
+**Session Type**: Set in `environment_config.yaml → session.session_type`:
+
+| Type | Hours | Use Case |
+|------|-------|----------|
+| `RTH` | 9:30 AM – 4:00 PM ET | Regular trading hours only |
+| `GLOBEX` | 4:01 PM – 9:29 AM next day | Pre/post-market (extended hours outside RTH) |
+| `FULL` | 4:01 PM → 4:00 PM next day (23 hours) | Full Globex + RTH session |
+
+**Random Start Option** (`TradingEnv → random_start: bool`):
+
+When `random_start=True` (used during training):
+- Agent begins at a **random bar** between **8:30 PM – 10:30 PM ET** (early Asian/London session)
+- Agent then trades **continuously** until **3:55 PM ET force-close** (next day)
+- **Gap**: 4:00 PM (RTH close) → 8:30 PM (next episode start) — no trading
+- **Day boundary**: Calendar day changes at 4:00 PM; daily ATR is calculated from that day's RTH bars (9:30 AM – 4:00 PM)
+
+When `random_start=False` (used during backtest/eval):
+- Episode begins at the **first bar** of the session
+
+**Example Episode Flow** (random start mode):
+```
+Tuesday 8:30 PM  ──start randomly──>  Tuesday 8:30 PM – Wednesday 3:55 PM
+              ↓
+         Trade continuously through
+      Tue 23:30 → Wed 09:30 (Asia/London)
+      Wed 09:30 → Wed 15:55 (RTH, force-close at 15:55)
+```
+
+---
+
 ## Configuration Files
 
 | File | Controls |
@@ -411,19 +496,25 @@ metrics and log results without writing any model files (useful for exploration 
 
 ## Key Design Decisions
 
-- **60-candle sliding window + 17 engineered features**: `lookback_bars: 60` — the last
-  60 bars of OHLC log-returns form the price block (volume excluded — the strategy is
-  price-structure based). Structured features (36) cover: ATR (4), zone signals (10:
-  dist_norm×2, in_zone×2, width_norm×2, age_norm×2, swept×2), order zone / confluence
-  (10), portfolio state (8), session timing (4: session_time_pct, bars_remaining_pct,
-  `is_rth`, `rth_time_pct`). An additional 17 engineered features complete the vector:
-  price location (5), momentum (4), volatility regime (2), bar character (1), HTF context
-  (5: 1h/2h close-in-range, prior-day range position, multi-TF momentum coherence, HTF
-  vol expansion). Wide zones (> 10 pts) are zeroed in all zone features before building
-  the obs. The zone detector uses its own 500-bar history internally. Zone features
-  include `supply_swept` and `demand_swept` binary flags. Observation vector size:
-  `60 × 4 + 36 + 17 = 293` features. The LSTM (256 units) carries within-session state
-  across steps.
+- **40-candle OHLC window + 53 engineered features** (`environment_config.yaml → observation.lookback_bars: 40`):
+  The last 40 bars of OHLC log-returns form the price block (5-min bars ≈ 200 minutes ≈ 3.3 hours lookback).
+  Volume excluded — price-structure strategy. **Structured features (53)** cover:
+  - ATR (4): exhaustion %, remaining room
+  - Zone signals (10): distance norm, in-zone flags, width norm, age norm, sweep weight
+  - Order zone / confluence (10): confluence score, R:R ratio, pending order state
+  - Portfolio state (8): position, unrealised PnL, drawdown, trade counts
+  - Session timing (6): session_time_pct, bars_remaining_pct, is_rth, rth_time_pct, sin(time), cos(time)
+  
+  **Engineered features (15)**:
+  - Price location (5): session drift, dist from session high/low, prior-day high/low
+  - Momentum (2): 5-bar, 12-bar log-returns
+  - Volatility regime (2): short/long vol ratio, close-in-range
+  - Bar character (1): candle body/range ratio
+  - HTF context (5): 1h/2h close-in-range, prior-day range position, multi-TF momentum, HTF vol expansion
+  
+  **Observation vector size**: `40 × 4 + 53 = 213` features per timestep.
+  The zone detector uses its own 500-bar history internally (separate from observation lookback).
+  The LSTM (256 units) carries within-session state across all bars.
 
 - **OHLCV augmentation** (`data/data_augmentor.py`): Three-stage augmentation applied
   to every training episode to prevent the agent memorising price-to-outcome mappings:
@@ -482,10 +573,19 @@ metrics and log results without writing any model files (useful for exploration 
   demand zone whose `top` edge is nearest (LONG limit placed at demand.top).
   Selection is by the entry-side edge so the closest actionable zone is always chosen.
 
-- **Opposing-zone take-profit** (three-priority): primary target is the near edge of the
-  opposing zone (`nearest_supply.bottom` for LONG, `nearest_demand.top` for SHORT) — the
-  structural liquidity level at the far side of the range. Falls back to the entry zone's
-  `impulse_extreme` when no opposing zone is present, then to ATR projection as last resort.
+- **Swing-high/low take-profit** (four-priority): primary target is the nearest session bar
+  high above entry (LONG) or bar low below entry (SHORT) — the prior structural level that
+  was swept to create the order block setup. Falls back to the opposing zone near edge, then
+  the entry zone `impulse_extreme`, then ATR projection.
+
+- **Conservative same-candle exit rule**: Positions entering and exiting within the same 5-minute bar
+  are penalised to prevent exploitation of intrabar noise:
+  - Stop loss is **skipped** on the entry candle (cannot trigger same bar as fill)
+  - Take-profit is **forced to loss** (exits at SL price instead of TP, marked as loss)
+  - Ambiguous both-hit candles assume **SL was hit first** (worst-case)
+  
+  This prevents the agent from over-fitting to unreliable sweep-and-recover moves and forces
+  multi-candle holding periods for genuine trades. Code: `environment/position_manager.py:440–510`.
 
 - **Stationary core reward**: `core_reward = pnl_r` (raw R-multiple). A previous
   `pnl_r × win_rate` formulation was removed — it violated reward stationarity because

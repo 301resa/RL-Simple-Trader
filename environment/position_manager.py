@@ -440,8 +440,10 @@ class PositionManager:
         # ── Same-bar fill guard ───────────────────────────────
         # A pending limit filled on THIS bar: the position did not exist when
         # the bar opened, so it is unrealistic for the stop to trigger on the
-        # same candle.  Skip stop checks; take-profit checks are still allowed
-        # (an immediate TP fill on a runaway bar is realistic).
+        # same candle.  Stop checks are skipped.
+        # TP on the same bar is treated as a LOSS (conservative): a sweep-and-
+        # recover that fills AND hits TP within one 5-min candle is unreliable
+        # price action — we exit at stop price rather than booking a win.
         same_bar_entry = (current_bar_idx == s.entry_bar_idx)
 
         # ── Conservative same-bar rule ────────────────────────
@@ -479,13 +481,23 @@ class PositionManager:
                 exit_reason = stop_type
 
         # 2. Take-profit hit (only reached when stop was NOT hit)
+        # Same-bar entries exit at stop price (loss) — not TP — since a fill-and-TP
+        # within one candle is an unreliable sweep-and-recover, not a genuine win.
         if exit_reason is None and s.target_price > 0:
             if direction == PositionDirection.LONG and current_bar_high >= s.target_price:
-                exit_price  = s.target_price
-                exit_reason = ExitReason.TAKE_PROFIT
+                if same_bar_entry:
+                    exit_price  = active_stop
+                    exit_reason = stop_type
+                else:
+                    exit_price  = s.target_price
+                    exit_reason = ExitReason.TAKE_PROFIT
             elif direction == PositionDirection.SHORT and current_bar_low <= s.target_price:
-                exit_price  = s.target_price
-                exit_reason = ExitReason.TAKE_PROFIT
+                if same_bar_entry:
+                    exit_price  = active_stop
+                    exit_reason = stop_type
+                else:
+                    exit_price  = s.target_price
+                    exit_reason = ExitReason.TAKE_PROFIT
 
         # 3. Agent requests exit
         if exit_reason is None and agent_wants_exit:

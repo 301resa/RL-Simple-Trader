@@ -44,8 +44,8 @@ contracts:
     min_zone_ticks: 4              # reject zones < 1.0 pt
     max_zone_ticks: 40             # reject zones > 10.0 pts
     fallback_stop_ticks: 12        # 3.0 pts emergency stop
-    contract_tiers: [1, 2,3]
-    confluence_tier_thresholds: [0.55, 0.75]
+    contract_tiers: [ 2,4]
+    confluence_tier_thresholds: [0.65]
 
   MES:
     micro_point_value: 5.0
@@ -70,8 +70,8 @@ contracts:
     min_zone_ticks: 16             # 4.0 pts
     max_zone_ticks: 160            # 40.0 pts
     fallback_stop_ticks: 48        # 12.0 pts
-    contract_tiers: [1, 2, 3, 5, 8]
-    confluence_tier_thresholds: [0.55,0.75]
+    contract_tiers: [ 2, 4]
+    confluence_tier_thresholds: [0.65]
 
   MNQ:
     micro_point_value: 2.0
@@ -93,7 +93,7 @@ account:
 observation:
   clip_observations: 10.0       # clip obs vector to [-N, N]
   normalize_observations: false # running normalisation (enable for production)
-  lookback_bars: 100             # sliding window of recent candles fed as OHLCV log-returns
+  lookback_bars: 40              # sliding window of recent candles fed as OHLCV log-returns (5-min bars = 200 min ≈ 3.3 hours)
                                 # Zone detector still uses 500-bar history (zone_lookback_bars in
                                 # features_config.yaml) — this only controls the obs window.
 

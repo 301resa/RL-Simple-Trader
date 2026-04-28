@@ -117,6 +117,21 @@ class ZoneDetector:
         A zero or negative value disables the wick-break path and falls back to the
         close-based ATR-pct rule. Typically set to the instrument's stop_buffer_pts
         (the same level at which a just-entered trade would be stopped out).
+    detection_mode : str
+        "consolidation" (default) — tight coil + impulse bar detection.
+        "wugamlo" — last down candle before N consecutive up candles (bullish OB)
+        or last up candle before N consecutive down candles (bearish OB).
+        "sonarlab" — ROC momentum crossover triggers a search for the first
+        opposing candle 4–15 bars back; that candle becomes the OB.
+    ob_length : int
+        Consecutive confirming candles in "wugamlo" mode (default 3).
+    ob_threshold_pct : float
+        Min % move filter in "wugamlo" mode (default 0.0 = off).
+    ob_use_wicks : bool
+        wugamlo: extend zone to full H-L instead of Open-L / Open-H (default False).
+    ob_sensitivity : int
+        Sonarlab ROC threshold ÷ 100. Default 28 → 0.28% open-to-open move
+        required to fire. Lower = more zones, higher = fewer but stronger.
     """
 
     def __init__(
@@ -130,6 +145,11 @@ class ZoneDetector:
         max_zone_age_bars: int = 200,
         zone_buffer_atr_pct: float = 0.02,
         break_buffer_pts: float = 0.0,
+        detection_mode: str = "consolidation",
+        ob_length: int = 3,
+        ob_threshold_pct: float = 0.0,
+        ob_use_wicks: bool = False,
+        ob_sensitivity: int = 28,
     ) -> None:
         self.consolidation_min_bars = consolidation_min_bars
         self.consolidation_max_bars = consolidation_max_bars
@@ -140,6 +160,11 @@ class ZoneDetector:
         self.max_zone_age_bars = max_zone_age_bars
         self.zone_buffer_atr_pct = zone_buffer_atr_pct
         self.break_buffer_pts = float(break_buffer_pts)
+        self.detection_mode = detection_mode
+        self.ob_length = ob_length
+        self.ob_threshold_pct = ob_threshold_pct
+        self.ob_use_wicks = ob_use_wicks
+        self.ob_sensitivity = ob_sensitivity
 
         self._supply_zones: List[Zone] = []
         self._demand_zones: List[Zone] = []
@@ -147,20 +172,28 @@ class ZoneDetector:
 
         # Numpy array cache — set via set_bars_numpy() before the precompute loop.
         # Using numpy indexing instead of pandas .iloc is ~50x faster in tight loops.
-        self._np_open:  Optional[np.ndarray] = None
-        self._np_high:  Optional[np.ndarray] = None
-        self._np_low:   Optional[np.ndarray] = None
-        self._np_close: Optional[np.ndarray] = None
-        self._np_atr:   Optional[np.ndarray] = None
+        self._np_open:   Optional[np.ndarray] = None
+        self._np_high:   Optional[np.ndarray] = None
+        self._np_low:    Optional[np.ndarray] = None
+        self._np_close:  Optional[np.ndarray] = None
+        self._np_atr:    Optional[np.ndarray] = None
+        self._np_volume: Optional[np.ndarray] = None
+
+        # Sonarlab incremental state
+        self._snl_prev_pc: float = 0.0       # PC value at previous bar
+        self._snl_last_cross_idx: int = -999  # bar index of last triggered cross
 
     def reset(self) -> None:
         """Reset zone lists for a new episode."""
         self._supply_zones = []
         self._demand_zones = []
         self._last_scanned_idx = -1
+        self._snl_prev_pc = 0.0
+        self._snl_last_cross_idx = -999
         # Numpy cache is invalidated each episode — caller must call set_bars_numpy()
         # again after reset() if they want fast path for the new episode's bars.
         self._np_open = self._np_high = self._np_low = self._np_close = self._np_atr = None
+        self._np_volume = None
 
     def set_bars_numpy(
         self,
@@ -169,6 +202,7 @@ class ZoneDetector:
         low_arr: np.ndarray,
         close_arr: np.ndarray,
         atr_arr: Optional[np.ndarray] = None,
+        volume_arr: Optional[np.ndarray] = None,
     ) -> None:
         """
         Cache numpy arrays extracted from the bars DataFrame.
@@ -177,11 +211,12 @@ class ZoneDetector:
         so that _try_detect_zone and scan_and_update use direct array indexing
         instead of pandas .iloc row access (~50x faster in tight loops).
         """
-        self._np_open  = open_arr
-        self._np_high  = high_arr
-        self._np_low   = low_arr
-        self._np_close = close_arr
-        self._np_atr   = atr_arr
+        self._np_open   = open_arr
+        self._np_high   = high_arr
+        self._np_low    = low_arr
+        self._np_close  = close_arr
+        self._np_atr    = atr_arr
+        self._np_volume = volume_arr
 
     def scan_and_update(
         self,
@@ -288,6 +323,21 @@ class ZoneDetector:
         atr_series: pd.Series,
         impulse_idx: int,
     ) -> None:
+        """Dispatch to the active detection mode."""
+        if self.detection_mode == "wugamlo":
+            self._try_detect_zone_wugamlo(impulse_idx)
+            return
+        if self.detection_mode == "sonarlab":
+            self._try_detect_zone_sonarlab(impulse_idx)
+            return
+        self._try_detect_zone_consolidation(bars, atr_series, impulse_idx)
+
+    def _try_detect_zone_consolidation(
+        self,
+        bars: pd.DataFrame,
+        atr_series: pd.Series,
+        impulse_idx: int,
+    ) -> None:
         """
         Try to detect a zone whose impulse bar is at impulse_idx.
 
@@ -376,6 +426,146 @@ class ZoneDetector:
                 self._demand_zones.append(zone)
                 self._prune(self._demand_zones)
             return
+
+    # ── Wugamlo Order Block detection ────────────────────────────────────────
+
+    def _try_detect_zone_wugamlo(self, scan_idx: int) -> None:
+        """Detect an Order Block using the wugamlo Order Block Finder logic.
+
+        At scan_idx the OB candle is at ob_idx = scan_idx - ob_length - 1,
+        confirmed by ob_length consecutive candles in one direction.
+
+        Bullish OB (demand zone):
+          - OB candle is a DOWN bar (close < open)
+          - Followed by ob_length consecutive UP bars (close > open)
+          - % move from OB close to last confirming bar's close >= ob_threshold_pct
+          - Zone: bottom = low[ob_idx],  top = open[ob_idx]  (or high if ob_use_wicks)
+
+        Bearish OB (supply zone):
+          - OB candle is an UP bar (close > open)
+          - Followed by ob_length consecutive DOWN bars (close < open)
+          - Same threshold check
+          - Zone: top = high[ob_idx],  bottom = open[ob_idx]  (or low if ob_use_wicks)
+
+        was_swept=True at creation: the consecutive move away from the OB already
+        confirms that price left the zone; the next return is the entry trigger.
+        """
+        if self._np_close is None:
+            return
+        periods = self.ob_length
+        ob_idx = scan_idx - periods - 1
+        if ob_idx < 0:
+            return
+        # confirming bars run from ob_idx+1 to ob_idx+periods (= scan_idx-1)
+        if ob_idx + periods >= len(self._np_close):
+            return
+
+        ob_open  = float(self._np_open[ob_idx])
+        ob_high  = float(self._np_high[ob_idx])
+        ob_low   = float(self._np_low[ob_idx])
+        ob_close = float(self._np_close[ob_idx])
+
+        # Count up/down confirming candles
+        up_count = down_count = 0
+        for j in range(ob_idx + 1, ob_idx + periods + 1):
+            c = float(self._np_close[j]); o = float(self._np_open[j])
+            if c > o:
+                up_count += 1
+            elif c < o:
+                down_count += 1
+
+        # Minimum % move filter
+        last_close = float(self._np_close[ob_idx + periods])
+        pct_move = abs(ob_close - last_close) / max(abs(ob_close), 1e-9) * 100.0
+
+        if ob_close < ob_open and up_count == periods and pct_move >= self.ob_threshold_pct:
+            # ── Bullish OB → demand zone ───────────────────────────────────
+            top = ob_high if self.ob_use_wicks else ob_open
+            zone = Zone(
+                top=top,
+                bottom=ob_low,
+                zone_type=ZoneType.DEMAND,
+                bar_formed_idx=ob_idx,
+                impulse_extreme=ob_high,
+                was_swept=True,
+            )
+            self._demand_zones.append(zone)
+            self._prune(self._demand_zones)
+
+        elif ob_close > ob_open and down_count == periods and pct_move >= self.ob_threshold_pct:
+            # ── Bearish OB → supply zone ───────────────────────────────────
+            bottom = ob_low if self.ob_use_wicks else ob_open
+            zone = Zone(
+                top=ob_high,
+                bottom=bottom,
+                zone_type=ZoneType.SUPPLY,
+                bar_formed_idx=ob_idx,
+                impulse_extreme=ob_low,
+                was_swept=True,
+            )
+            self._supply_zones.append(zone)
+            self._prune(self._supply_zones)
+
+    def _try_detect_zone_sonarlab(self, scan_idx: int) -> None:
+        if self._np_open is None:
+            return
+        sens = self.ob_sensitivity / 100.0
+        if scan_idx < 4:
+            return
+        pc_now = (
+            (float(self._np_open[scan_idx]) - float(self._np_open[scan_idx - 4]))
+            / max(abs(float(self._np_open[scan_idx - 4])), 1e-9) * 100.0
+        )
+        pc_prev = self._snl_prev_pc
+        self._snl_prev_pc = pc_now
+        if scan_idx < 5:
+            return
+        is_bear_cross = pc_prev >= -sens and pc_now < -sens
+        is_bull_cross = pc_prev <= sens and pc_now > sens
+        if not (is_bear_cross or is_bull_cross):
+            return
+        if scan_idx - self._snl_last_cross_idx <= 5:
+            return
+        self._snl_last_cross_idx = scan_idx
+        ob_idx = -1
+        for i in range(4, 16):
+            idx = scan_idx - i
+            if idx < 0:
+                break
+            c = float(self._np_close[idx])
+            o = float(self._np_open[idx])
+            if is_bear_cross and c > o:
+                ob_idx = idx
+                break
+            if is_bull_cross and c < o:
+                ob_idx = idx
+                break
+        if ob_idx < 0:
+            return
+        ob_high = float(self._np_high[ob_idx])
+        ob_low = float(self._np_low[ob_idx])
+        if is_bull_cross:
+            zone = Zone(
+                top=ob_high,
+                bottom=ob_low,
+                zone_type=ZoneType.DEMAND,
+                bar_formed_idx=ob_idx,
+                impulse_extreme=ob_high,
+                was_swept=True,
+            )
+            self._demand_zones.append(zone)
+            self._prune(self._demand_zones)
+        else:
+            zone = Zone(
+                top=ob_high,
+                bottom=ob_low,
+                zone_type=ZoneType.SUPPLY,
+                bar_formed_idx=ob_idx,
+                impulse_extreme=ob_low,
+                was_swept=True,
+            )
+            self._supply_zones.append(zone)
+            self._prune(self._supply_zones)
 
     def _prune(self, zone_list: List[Zone]) -> None:
         """Expire the oldest valid zone when the per-side limit is exceeded."""

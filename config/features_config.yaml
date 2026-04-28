@@ -37,8 +37,8 @@ zones:
   zone_buffer_atr_pct: 0.03        # slightly wider membership buffer
 
 order_zone:
-  min_confluence_score: 0.25
+  min_confluence_score: 0.45
   weights:
-    zone: 0.50                     # supply/demand zone quality score
-    atr: 0.30                      # ATR room remaining (directional)
-    sweep: 0.20                    # sweep freshness (1.0=just swept → 0.0 at 40 bars)
+    zone: 0.45                    # supply/demand zone quality score
+    atr: 0.10                      # ATR room remaining (directional)
+    sweep: 0.45                   # sweep freshness (1.0=just swept → 0.0 at 40 bars)
