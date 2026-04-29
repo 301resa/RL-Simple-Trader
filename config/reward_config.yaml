@@ -40,7 +40,7 @@ entry_penalties:
 exit_rewards:
   trailing_stop_correctly: 0.50       # used trail stop before exit
   aggressive_trail_at_4r: 0.20        # trailed aggressively at 4R profit
-  tp_hit_bonus: 1.50                  # hit the structural take-profit target
+  tp_hit_bonus: 2.50                  # hit the structural take-profit target
   mfe_efficiency_weight: 0.05         # reduced: capturing fraction of max move (was 0.15)
   scale_out_success: 0.15             # partial exit (scale-out) reward
 

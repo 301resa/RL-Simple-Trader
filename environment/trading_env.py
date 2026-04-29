@@ -227,6 +227,9 @@ class TradingEnv(gym.Env):
 
         # Build filtered day list for curriculum
         self._available_days: List[str] = list(trading_days)
+        # Sequential day counter — used when random_start=False (eval mode).
+        # Persists across resets so each reset advances to the next day in order.
+        self._day_idx: int = 0
 
     # ── Gymnasium API ─────────────────────────────────────────
 
@@ -1190,7 +1193,13 @@ class TradingEnv(gym.Env):
         return ATRCalculator.compute_atr_target_price(entry_price, direction, atr_state)
 
     def _sample_episode_day(self) -> str:
-        """Sample a trading day, applying curriculum filter if set."""
+        """Sample a trading day, applying curriculum filter if set.
+
+        When random_start=False (eval / deterministic mode) days are visited
+        in sequential order so each day in the worker's slice is covered
+        exactly once per pass.  When random_start=True (training) days are
+        sampled randomly as before.
+        """
         candidates = self._available_days
         if self.curriculum_filter_fn is not None:
             filtered = []
@@ -1199,6 +1208,12 @@ class TradingEnv(gym.Env):
                 if daily_bar is not None and self.curriculum_filter_fn(d, daily_bar):
                     filtered.append(d)
             candidates = filtered if filtered else self._available_days
+
+        if not self.random_start:
+            # Sequential cycling: each reset advances to the next day.
+            idx = self._day_idx % len(candidates)
+            self._day_idx += 1
+            return candidates[idx]
 
         idx = int(self._rng.integers(0, len(candidates)))
         return candidates[idx]

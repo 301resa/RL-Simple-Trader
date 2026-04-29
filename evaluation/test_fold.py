@@ -185,7 +185,8 @@ def _run_checkpoint(
 
     # Distribute days across workers in round-robin (interleaved slices).
     # Worker i handles days: i, i+n_workers, i+2*n_workers, ...
-    # This guarantees each day is assigned to exactly one worker → no duplicates.
+    # Each day is assigned to exactly one worker.  TradingEnv (random_start=False)
+    # cycles days sequentially, so worker i runs its days in order.
     worker_days = [test_days[i::n_workers] for i in range(n_workers)]
     factories   = [make_env(days) for days in worker_days]
 
@@ -204,6 +205,12 @@ def _run_checkpoint(
     all_episodes: List[dict] = []
     completed = 0
 
+    # Per-worker quota: how many unique episodes each worker should contribute.
+    # Prevents collecting a second time if a fast worker laps its day list before
+    # the outer loop exits.
+    worker_quota = [len(wd) for wd in worker_days]
+    worker_done  = [0] * n_workers
+
     obs = vec_env.reset()
     lstm_states = None
     episode_starts = np.ones((n_workers,), dtype=bool)
@@ -218,11 +225,12 @@ def _run_checkpoint(
         obs, _reward, dones, infos = vec_env.step(action)
         episode_starts = dones.copy()
 
-        for done, info in zip(dones, infos):
-            if done and info:
+        for w_idx, (done, info) in enumerate(zip(dones, infos)):
+            if done and info and worker_done[w_idx] < worker_quota[w_idx]:
                 all_episodes.append(info)
                 all_trades.extend(info.get("trades_list", []))
                 completed += 1
+                worker_done[w_idx] += 1
                 if completed >= n_episodes:
                     break
 
@@ -341,13 +349,80 @@ def _run_ensemble(
 # Metrics
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
-    """Compute summary metrics from raw trade list.
-
-    SCALE_OUT partial closes are excluded from win-rate / count / W:L
-    calculations (they always win at 1R and would inflate those stats),
-    but their P&L is included in total_pnl totals.
+def _merge_scale_out_trades(trades: List[dict]) -> List[dict]:
     """
+    Merge scale_out partial closes with their corresponding final position close.
+
+    When scale_out is enabled a 2-contract position generates two records:
+      1. exit_reason="scale_out"  (1 contract at ~1R)
+      2. exit_reason=<final>      (1 contract at final exit)
+    Both share the same (date, direction, entry_bar_idx, entry_price, stop_price).
+
+    This function folds them into one record so the journal shows a single row
+    per position entry.  The merged record:
+      - n_contracts = sum of all legs
+      - pnl_r / pnl_points / pnl_dollars = sum across legs
+      - exit_price = contracts-weighted average exit price
+      - exit_time / exit_bar_idx / exit_reason / duration_min = from the final leg
+      - mae_r = worst (max) across legs
+      - is_win = combined pnl_r > 0
+    """
+    from collections import defaultdict
+
+    if not trades:
+        return trades
+
+    pos_groups: dict = defaultdict(list)
+    for t in trades:
+        key = (
+            t.get("date", ""),
+            t.get("direction", ""),
+            int(t.get("entry_bar_idx", 0)),
+            t.get("entry_price", 0),
+            t.get("stop_price", 0),
+        )
+        pos_groups[key].append(t)
+
+    merged: List[dict] = []
+    for group in pos_groups.values():
+        scale_outs = [t for t in group if t.get("exit_reason") == "scale_out"]
+        finals     = [t for t in group if t.get("exit_reason") != "scale_out"]
+
+        if not scale_outs or not finals:
+            # No scale_out pair — keep as-is
+            merged.extend(group)
+            continue
+
+        # Merge all legs into one record based on the final (non-scale_out) close
+        base = finals[-1].copy()
+        total_contracts   = sum(t.get("n_contracts", 1) for t in group)
+        total_pnl_r       = sum(t["pnl_r"] for t in group)
+        total_pnl_points  = sum(t.get("pnl_points", 0.0) for t in group)
+        total_pnl_dollars = sum(t.get("pnl_dollars", 0.0) for t in group)
+        total_exit_value  = sum(
+            t.get("exit_price", 0.0) * t.get("n_contracts", 1) for t in group
+        )
+        avg_exit_price = (
+            total_exit_value / total_contracts if total_contracts > 0
+            else base.get("exit_price", 0.0)
+        )
+
+        base["n_contracts"]   = total_contracts
+        base["pnl_r"]         = round(total_pnl_r, 4)
+        base["pnl_points"]    = round(total_pnl_points, 4)
+        base["pnl_dollars"]   = round(total_pnl_dollars, 2)
+        base["exit_price"]    = round(avg_exit_price, 4)
+        base["is_win"]        = total_pnl_r > 0
+        base["mae_r"]         = max(t.get("mae_r", 0.0) for t in group)
+        merged.append(base)
+
+    # Restore chronological order
+    merged.sort(key=lambda t: (t.get("date", ""), int(t.get("entry_bar_idx", 0))))
+    return merged
+
+
+def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
+    """Compute summary metrics from a merged trade list (scale_out already folded in)."""
     if not trades:
         return {
             "n_trades": 0, "win_rate": 0.0,
@@ -359,10 +434,10 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
             "avg_duration_min": 0.0,
         }
 
-    # Separate scale-out partials from complete trades
-    full_trades = [t for t in trades if t.get("exit_reason") != "scale_out"]
-    if not full_trades:
-        full_trades = trades  # fallback — shouldn't happen in normal runs
+    # After _merge_scale_out_trades, every record is a complete position close.
+    # Scale_out partials have been folded into their paired final close, so we
+    # treat all records uniformly.
+    full_trades = trades
 
     pnl_r   = [t["pnl_r"] for t in full_trades]
     pnl_usd = [t.get("pnl_dollars", 0.0) for t in full_trades]
@@ -373,7 +448,6 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
     n = len(pnl_r)
 
     win_rate   = len(wins_r) / n
-    # Total P&L includes scale-out partial contributions (real money)
     total_pnl  = sum(t["pnl_r"] for t in trades)
     total_usd  = sum(t.get("pnl_dollars", 0.0) for t in trades)
     avg_win    = float(np.mean(wins_r))   if wins_r   else 0.0
@@ -400,7 +474,7 @@ def _compute_metrics(trades: List[dict], episodes: List[dict]) -> dict:
         sd = float(np.std(ep_pnls))
         sharpe = (mu / sd) * np.sqrt(252) if sd > 1e-9 else 0.0
 
-    # Max drawdown using all trades in chronological order (including scale-outs)
+    # Max drawdown using all trades in chronological order
     all_pnl_r   = [t["pnl_r"] for t in trades]
     all_pnl_usd = [t.get("pnl_dollars", 0.0) for t in trades]
     eq_r   = np.cumsum(all_pnl_r)
@@ -1554,11 +1628,12 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(f"     FAILED: {exc}")
             continue
 
-        # Enrich trades with entry/exit timestamps
+        # Enrich trades with entry/exit timestamps, then merge scale_out pairs
         try:
             trades = _resolve_trade_times(trades, data_loader)
         except Exception:
             pass
+        trades = _merge_scale_out_trades(trades)
 
         m     = _compute_metrics(trades, episodes)
         score = _composite(m)
@@ -1637,6 +1712,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 top_k_ckpts, make_env, test_days, vote_threshold=vote_threshold,
             )
             ens_trades = _resolve_trade_times(ens_trades, data_loader)
+            ens_trades = _merge_scale_out_trades(ens_trades)
         except Exception as exc:
             _log.warning("Ensemble evaluation failed", error=str(exc))
             ens_trades, ens_episodes = [], []

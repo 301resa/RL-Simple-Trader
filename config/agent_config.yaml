@@ -57,7 +57,7 @@ evaluation:
   # Below the threshold the committee defaults to HOLD (most conservative action).
   # Set ensemble_top_k to 1 to use only the single best model. Set to 0 to skip.
   ensemble_top_k:         3
-  ensemble_vote_threshold: 0.75   # 75% of models must agree to execute any action
+  ensemble_vote_threshold: 0.60   # 60% of models must agree to execute any action
   # Composite save score weights
   w_sharpe: 0.40                   # Sharpe ratio (primary signal)
   w_pnl:    0.30                   # Total P&L in R

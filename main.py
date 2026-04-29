@@ -526,7 +526,7 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
 
     from datetime import datetime
     run_id  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = Path(args.log_dir)
+    log_dir = Path(args.log_dir).resolve()
 
     # ── Folder layout ─────────────────────────────────────────
     #   logs/
@@ -798,7 +798,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     # CLI --val-weeks overrides config when explicitly passed; otherwise config wins.
     _cli_val_weeks = getattr(args, "val_weeks", None)
     n_val_days = (_cli_val_weeks if _cli_val_weeks is not None else val_weeks) * 5
-    output_root    = Path(wf_cfg.get("output_dir", "logs/walk_forward"))
+    output_root    = Path(wf_cfg.get("output_dir", "logs/walk_forward")).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
     # ── Common infrastructure (shared across folds) ────────────
