@@ -16,7 +16,7 @@ a multi-bar lookback window in the observation vector.
 R1/
 ├── main.py                          # Entry point — train / evaluate / walk_forward / analyse
 ├── config/
-│   ├── agent_config.yaml            # PPO hyperparameters, LSTM, eval schedule, walk-forward
+│   ├── agent_config.yaml            # PPO hyperparameters, LSTM, eval schedule, ensemble_top_k, walk-forward
 │   ├── environment_config.yaml      # Instruments (ES/NQ/MES/MNQ), session, account
 │   ├── features_config.yaml         # ATR, zone detection, liquidity sweep thresholds
 │   ├── risk_config.yaml             # Stop loss, take profit, position sizing, daily limits
@@ -57,7 +57,7 @@ R1/
 │   └── curriculum.py                # Optional curriculum scheduler
 │
 ├── evaluation/
-│   ├── test_fold.py                 # Load all checkpoints; cleans previous results, parallel rollout, ranked leaderboard + per-model HTML/Excel
+│   ├── test_fold.py                 # Two-pass eval: (1) rank all checkpoints; (2) ensemble top-K vote → leaderboard + per-model + ensemble HTML/Excel
 │   ├── backtester.py                # Deterministic backtest on test data
 │   ├── metrics_calculator.py        # Sharpe, profit factor, drawdown, etc.
 │   ├── trade_journal.py             # Trade-level logging (Excel + CSV)
@@ -295,15 +295,44 @@ python main.py --mode test_fold \
     --n-workers 8
 ```
 Every run **automatically deletes** all `.xlsx` and `*_<suffix>.html` files in
-`--out-dir` before writing new results. Produces:
+`--out-dir` before writing new results.
+
+#### Two-pass evaluation
+
+**Pass 1 — Individual checkpoint ranking**
+
+Each checkpoint is evaluated independently. Every test day is assigned to exactly
+one parallel worker (round-robin distribution), so each day runs once with no
+duplicate trades. Produces:
 - Per-model Plotly HTML journal (candlestick + per-trade PnL bars + cumulative PnL)
 - Per-model Excel journal (Trades / Daily / Metrics sheets)
 - `leaderboard.xlsx` — all models ranked best-first by composite score
 
-Extra flags (passed through to `evaluation/test_fold.py`):
-- `--best-only` — only write a journal for the single best model.
+**Pass 2 — Ensemble committee vote (top-K)**
+
+After ranking, the top `ensemble_top_k` checkpoints (configured in
+`agent_config.yaml → evaluation.ensemble_top_k`, default `3`) form a voting
+committee. For every bar of every test day, all K models observe the same
+normalised price data and each votes for an action. The **majority vote** wins
+and is executed as a single trade — a lone weak model cannot override the
+committee. Ties fall back to the most conservative action (HOLD).
+
+Each model carries its own independent LSTM hidden state across bars.
+Observation normalisation uses the VecNormalize statistics from the rank-1 model.
+
+Output files named `ensemble_top{K}_journal.html` and `ensemble_top{K}_journal.xlsx`.
+
+To override `ensemble_top_k` at runtime:
+```bash
+--ensemble-top-k 5     # use top 5 instead of config value
+--ensemble-top-k -1    # skip ensemble entirely
+```
+
+Extra flags:
+- `--best-only` — only write a journal for the single best model (Pass 1).
 - `--rank-by` — `score` (default) | `pnl_dollars` | `pnl_r` | `sharpe`.
 - `--journal-suffix` — suffix used in journal filenames (default: `journal`).
+- `--ensemble-top-k` — override `agent_config.yaml → evaluation.ensemble_top_k`.
 
 ### Training journal (pick best model on TRAIN data, one HTML)
 ```bash

@@ -925,12 +925,8 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     )
     action_masker.max_pending_order_bars = session_risk.get("max_pending_order_bars", 5)
     reward_calculator = RewardCalculator.from_config(reward_cfg)
-    aug_cfg = agent_cfg.get("augmentation", {})
-    train_augmentor   = OHLCVAugmentor(
-        rng=np.random.default_rng(agent_cfg.get("seed", 42)),
-        max_jitter_pts=instrument_profile.jitter_pts,
-        trend_scale=float(aug_cfg.get("trend_scale", 0.15)),
-    )
+    aug_cfg        = agent_cfg.get("augmentation", {})
+    _base_seed_wf  = int(agent_cfg.get("seed", 42))
     _scale_out_cfg = risk_cfg.get("scale_out", {})
 
     def make_position_manager():
@@ -959,6 +955,14 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         )
 
     def make_env(day_list, is_eval=False, worker_seed_offset=0):
+        # Each worker gets a unique seed so their RNG states diverge from the start:
+        # different random day selection, different random start bar, different augmentation.
+        env_seed  = _base_seed_wf + worker_seed_offset + (100 if is_eval else 0)
+        augmentor = None if is_eval else OHLCVAugmentor(
+            rng=np.random.default_rng(env_seed),
+            max_jitter_pts=instrument_profile.jitter_pts,
+            trend_scale=float(aug_cfg.get("trend_scale", 0.15)),
+        )
         return TradingEnv(
             data_loader=data_loader,
             trading_days=day_list,
@@ -980,10 +984,10 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             early_terminate_on_max_dd=env_cfg.get("episode", {}).get("early_termination_on_max_drawdown", True),
             bar_minutes=bar_minutes,
             curriculum_filter_fn=None,
-            augmentor=None if is_eval else train_augmentor,
+            augmentor=augmentor,
             session_type=session_type,
             random_start=not is_eval,
-            seed=agent_cfg.get("seed", 42) + worker_seed_offset + (100 if is_eval else 0),
+            seed=env_seed,
             zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
             tp_swing_multiplier=risk_cfg.get("take_profit", {}).get("swing_multiplier", 1.0),
         )

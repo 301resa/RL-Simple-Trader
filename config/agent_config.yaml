@@ -50,6 +50,12 @@ evaluation:
   save_enabled:    true            # false = log eval metrics without saving any models
   warmup_steps:    600_000         # no early stopping before this step
   patience_steps:  750_000         # stop if no composite improvement for N steps
+  # ── Ensemble evaluation (test_fold Pass 2) ────────────────────────────────
+  # After all checkpoints are ranked, the top ensemble_top_k are loaded together.
+  # At every bar of each test day they each vote; the majority action is executed
+  # as a single trade. Weak models cannot override the committee consensus.
+  # Set to 1 to use only the single best model. Set to 0 to skip ensemble.
+  ensemble_top_k: 3
   # Composite save score weights
   w_sharpe: 0.40                   # Sharpe ratio (primary signal)
   w_pnl:    0.30                   # Total P&L in R

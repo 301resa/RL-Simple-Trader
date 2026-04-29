@@ -149,15 +149,27 @@ def _step_from_name(p: Path) -> int:
 def _run_checkpoint(
     ckpt_path: Path,
     vn_path: Optional[Path],
-    env_factory,
-    n_episodes: int = 20,
+    make_env,
+    test_days: List[str],
+    n_episodes: int = 0,
     n_workers: int = 8,
 ) -> Tuple[List[dict], List[dict]]:
     """
-    Load checkpoint + VecNormalize, run n_episodes deterministically.
+    Load checkpoint + VecNormalize, run one episode per test day deterministically.
 
-    Uses SubprocVecEnv with n_workers parallel envs so episodes execute
-    in parallel rather than one-by-one, matching training throughput.
+    Days are distributed across workers in round-robin order so each day is
+    evaluated by exactly one worker — no duplicate trades in the journal.
+
+    Parameters
+    ----------
+    make_env : callable(days: List[str]) -> callable() -> TradingEnv
+        Factory factory.  Called once per worker with that worker's day slice.
+    test_days : List[str]
+        Full list of test dates.  Each date is covered exactly once.
+    n_episodes : int
+        Number of episodes to run.  0 (default) = len(test_days).
+    n_workers : int
+        Maximum parallel workers.
 
     Returns
     -------
@@ -168,9 +180,16 @@ def _run_checkpoint(
     from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
     from sb3_contrib import RecurrentPPO
 
+    n_episodes = n_episodes if n_episodes > 0 else len(test_days)
     n_workers = min(n_workers, n_episodes, multiprocessing.cpu_count())
 
-    vec_env = SubprocVecEnv([env_factory] * n_workers, start_method="spawn")
+    # Distribute days across workers in round-robin (interleaved slices).
+    # Worker i handles days: i, i+n_workers, i+2*n_workers, ...
+    # This guarantees each day is assigned to exactly one worker → no duplicates.
+    worker_days = [test_days[i::n_workers] for i in range(n_workers)]
+    factories   = [make_env(days) for days in worker_days]
+
+    vec_env = SubprocVecEnv(factories, start_method="spawn")
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False,
                            clip_obs=10.0, training=False)
 
@@ -208,6 +227,105 @@ def _run_checkpoint(
                     break
 
     vec_env.close()
+    return all_trades, all_episodes
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ensemble evaluation  (Pass 2 — top-K committee vote)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_ensemble(
+    top_ckpts: List[Tuple[Path, Optional[Path]]],
+    make_env_fn,
+    test_days: List[str],
+) -> Tuple[List[dict], List[dict]]:
+    """
+    Run an ensemble of the top-K checkpoints on every test day.
+
+    At each bar all K models observe the same (normalised) observation and each
+    votes for an action.  The majority action is executed as a single trade.
+    Ties are broken by choosing the lowest action index (HOLD = 0 is the most
+    conservative fallback).
+
+    Observation normalisation uses the VecNormalize statistics saved alongside
+    the rank-1 (best) checkpoint so that all models see consistently scaled
+    inputs.
+
+    Parameters
+    ----------
+    top_ckpts : list of (ckpt_path, vn_path) tuples, best model first
+    make_env_fn : callable(days: List[str]) -> callable() -> TradingEnv
+    test_days : list of date strings to evaluate (each run exactly once)
+
+    Returns
+    -------
+    trades   : list of trade dicts
+    episodes : list of episode-level summary dicts
+    """
+    from collections import Counter
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from sb3_contrib import RecurrentPPO
+
+    k = len(top_ckpts)
+    vn_path_top1 = top_ckpts[0][1]  # VecNorm from rank-1 model
+
+    # Load all K models (env=None — we handle normalisation manually via VecNormalize)
+    models = []
+    for ckpt_path, _ in top_ckpts:
+        models.append(RecurrentPPO.load(str(ckpt_path), env=None))
+
+    all_trades:   List[dict] = []
+    all_episodes: List[dict] = []
+
+    for day in test_days:
+        # One fresh single-day env per test day ensures deterministic, non-repeating episodes
+        day_factory = make_env_fn([day])
+        dvec = DummyVecEnv([day_factory])
+
+        if vn_path_top1 is not None:
+            vnorm = VecNormalize.load(str(vn_path_top1), dvec)
+            vnorm.training   = False
+            vnorm.norm_reward = False
+        else:
+            vnorm = VecNormalize(dvec, norm_obs=False, norm_reward=False, training=False)
+
+        # Separate LSTM hidden state per model — they carry their own session memory
+        lstm_states    = [None] * k
+        episode_starts = np.ones((1,), dtype=bool)
+        obs            = vnorm.reset()
+
+        while True:
+            actions   = []
+            new_lstms = []
+            for i, model in enumerate(models):
+                action_arr, new_ls = model.predict(
+                    obs,
+                    state=lstm_states[i],
+                    episode_start=episode_starts,
+                    deterministic=True,
+                )
+                actions.append(int(action_arr[0]))
+                new_lstms.append(new_ls)
+
+            lstm_states    = new_lstms
+            episode_starts = np.zeros((1,), dtype=bool)
+
+            # Majority vote; ties broken by lowest action index (conservative)
+            vote_counts  = Counter(actions)
+            max_votes    = max(vote_counts.values())
+            tied_winners = sorted(a for a, c in vote_counts.items() if c == max_votes)
+            winning_action = tied_winners[0]
+
+            obs, _, dones, infos = vnorm.step(np.array([winning_action]))
+
+            if dones[0]:
+                if infos[0]:
+                    all_episodes.append(infos[0])
+                    all_trades.extend(infos[0].get("trades_list", []))
+                break
+
+        vnorm.close()
+
     return all_trades, all_episodes
 
 
@@ -1161,6 +1279,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         default="journal",
         help="Suffix appended to journal filenames (<name>_<suffix>.html/.xlsx). Default: journal.",
     )
+    parser.add_argument(
+        "--ensemble-top-k", type=int, default=0,
+        help="Number of top checkpoints to use in ensemble evaluation (Pass 2). "
+             "0 = read from agent_config.yaml (evaluation.ensemble_top_k). "
+             "-1 = skip ensemble. Default: 0 (use config).",
+    )
     args = parser.parse_args(argv)
 
     models_dir = Path(args.models_dir)
@@ -1351,38 +1475,42 @@ def main(argv: Optional[List[str]] = None) -> None:
     session_end   = session_cfg.get("rth_end_utc",   "15:00")
     session_type  = session_cfg.get("session_type", "RTH").upper()
 
-    def env_factory():
-        return TradingEnv(
-            data_loader=data_loader,
-            trading_days=test_days,
-            position_manager=make_position_manager(),
-            reward_calculator=reward_calculator,
-            observation_builder=observation_builder,
-            atr_calculator=atr_calc,
-            zone_detector=ZoneDetector(
-                **{k: zones_cfg.get(k, v) for k, v in zone_detector_defaults.items()},
-                break_buffer_pts=instrument_profile.stop_buffer_pts,
-            ),
-            order_zone_engine=order_zone_engine,
-            action_masker=action_masker,
-            instrument=instrument_profile,
-            rth_start=session_start,
-            rth_end=session_end,
-            force_close_time=session_risk.get("force_close_time", "15:55"),
-            no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
-            early_terminate_on_max_dd=env_cfg.get("episode", {}).get(
-                "early_termination_on_max_drawdown", True),
-            bar_minutes=bar_minutes,
-            curriculum_filter_fn=None,
-            augmentor=None,
-            session_type=session_type,
-            random_start=False,
-            seed=agent_cfg.get("seed", 42) + 999,
-            zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
-            tp_swing_multiplier=risk_cfg.get("take_profit", {}).get("swing_multiplier", 1.0),
-        )
+    def make_env(days: List[str]):
+        """Return a no-arg factory for a TradingEnv restricted to `days`."""
+        def factory():
+            return TradingEnv(
+                data_loader=data_loader,
+                trading_days=days,          # ← worker-specific day slice; no duplicates
+                position_manager=make_position_manager(),
+                reward_calculator=reward_calculator,
+                observation_builder=observation_builder,
+                atr_calculator=atr_calc,
+                zone_detector=ZoneDetector(
+                    **{k: zones_cfg.get(k, v) for k, v in zone_detector_defaults.items()},
+                    break_buffer_pts=instrument_profile.stop_buffer_pts,
+                ),
+                order_zone_engine=order_zone_engine,
+                action_masker=action_masker,
+                instrument=instrument_profile,
+                rth_start=session_start,
+                rth_end=session_end,
+                force_close_time=session_risk.get("force_close_time", "15:55"),
+                no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
+                early_terminate_on_max_dd=env_cfg.get("episode", {}).get(
+                    "early_termination_on_max_drawdown", True),
+                bar_minutes=bar_minutes,
+                curriculum_filter_fn=None,
+                augmentor=None,
+                session_type=session_type,
+                random_start=False,
+                seed=None,                  # ← None: each subprocess gets unique OS-entropy seed
+                zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
+                tp_swing_multiplier=risk_cfg.get("take_profit", {}).get("swing_multiplier", 1.0),
+            )
+        return factory
 
     # ── Resolve episode count ──────────────────────────────────────────────────
+    # Default: one episode per test day (each day evaluated exactly once).
     n_episodes = args.n_episodes if args.n_episodes > 0 else len(test_days)
     _log.info("Episodes per checkpoint", n_episodes=n_episodes,
               test_days=len(test_days))
@@ -1410,7 +1538,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         print(f"  → Evaluating {name} ...", flush=True)
         try:
             trades, episodes = _run_checkpoint(
-                ckpt, vn, env_factory,
+                ckpt, vn, make_env, test_days,
                 n_episodes=n_episodes,
                 n_workers=args.n_workers,
             )
@@ -1474,6 +1602,66 @@ def main(argv: Optional[List[str]] = None) -> None:
           f"$PF={bm['profit_factor_usd']:.2f}  "
           f"Sharpe={bm['sharpe']:.3f}")
 
+    # ── Pass 2: Ensemble evaluation (top-K committee vote) ────────────────────
+    # Resolve ensemble_top_k: CLI flag overrides config; 0 means "use config".
+    _eval_cfg  = agent_cfg.get("evaluation", {})
+    _cfg_top_k = int(_eval_cfg.get("ensemble_top_k", 3))
+    ensemble_top_k = args.ensemble_top_k if args.ensemble_top_k != 0 else _cfg_top_k
+
+    if ensemble_top_k > 0 and len(results) >= 1:
+        # Clamp to available checkpoints
+        ensemble_top_k = min(ensemble_top_k, len(results))
+        # Take the top-K results (results is sorted ascending → last K = best K)
+        top_k_results  = results[-ensemble_top_k:][::-1]   # best first
+        top_k_ckpts    = [(r["ckpt_path"], _vecnorm_path(r["ckpt_path"])) for r in top_k_results]
+        top_k_names    = [r["name"] for r in top_k_results]
+
+        print(f"\n── Ensemble Evaluation  (top {ensemble_top_k} by {args.rank_by}) ──────────")
+        for i, nm in enumerate(top_k_names):
+            print(f"  [{i+1}] {nm}")
+        print("  Running ...", flush=True)
+
+        try:
+            ens_trades, ens_episodes = _run_ensemble(top_k_ckpts, make_env, test_days)
+            ens_trades = _resolve_trade_times(ens_trades, data_loader)
+        except Exception as exc:
+            _log.warning("Ensemble evaluation failed", error=str(exc))
+            ens_trades, ens_episodes = [], []
+
+        if ens_trades or ens_episodes:
+            em     = _compute_metrics(ens_trades, ens_episodes)
+            escore = _composite(em)
+            ens_name = f"ensemble_top{ensemble_top_k}"
+
+            print(f"\n  Ensemble result ({ens_name}):")
+            print(f"  Score={escore:.3f}  "
+                  f"Trades={em['n_trades']}  "
+                  f"WR={em['win_rate']*100:.1f}%  "
+                  f"PnL=${em['total_pnl_dollars']:+,.0f}  "
+                  f"$PF={em['profit_factor_usd']:.2f}  "
+                  f"Sharpe={em['sharpe']:.3f}")
+
+            if PLOTLY_OK:
+                ens_html = out_dir / f"{ens_name}_{suffix}.html"
+                try:
+                    _build_journal(ens_name, ens_trades, em, escore,
+                                   data_loader, test_days, ens_html)
+                    print(f"  Ensemble HTML  → {ens_html}")
+                except Exception as exc:
+                    _log.warning("Ensemble HTML failed", error=str(exc))
+
+            ens_xlsx = out_dir / f"{ens_name}_{suffix}.xlsx"
+            try:
+                _build_excel_journal(ens_name, ens_trades, em, escore,
+                                     test_days, ens_xlsx)
+                print(f"  Ensemble Excel → {ens_xlsx}")
+            except Exception as exc:
+                _log.warning("Ensemble Excel failed", error=str(exc))
+        else:
+            print("  Ensemble produced no trades.")
+    elif ensemble_top_k == -1:
+        print("\n  Ensemble evaluation skipped (--ensemble-top-k -1).")
+
     # ── Write per-model journals (best-only or all) ───────────────────────────
     to_journal = [best] if args.best_only else results
     print(f"\n  Writing {len(to_journal)} journal file(s) to {out_dir} ...")
@@ -1512,6 +1700,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         f"Models dir : {models_dir}",
         f"Test period: {test_days[0]} → {test_days[-1]}  ({len(test_days)} days)",
         f"Episodes   : {n_episodes} per checkpoint",
+        f"Ensemble   : top {ensemble_top_k} checkpoints (majority vote)",
         "",
         sep,
         _header_row(),
