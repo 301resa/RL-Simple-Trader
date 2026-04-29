@@ -52,10 +52,12 @@ evaluation:
   patience_steps:  750_000         # stop if no composite improvement for N steps
   # ── Ensemble evaluation (test_fold Pass 2) ────────────────────────────────
   # After all checkpoints are ranked, the top ensemble_top_k are loaded together.
-  # At every bar of each test day they each vote; the majority action is executed
-  # as a single trade. Weak models cannot override the committee consensus.
-  # Set to 1 to use only the single best model. Set to 0 to skip ensemble.
-  ensemble_top_k: 3
+  # At every bar of each test day they each vote; an action is only executed when
+  # the fraction of models agreeing meets or exceeds ensemble_vote_threshold.
+  # Below the threshold the committee defaults to HOLD (most conservative action).
+  # Set ensemble_top_k to 1 to use only the single best model. Set to 0 to skip.
+  ensemble_top_k:         3
+  ensemble_vote_threshold: 0.75   # 75% of models must agree to execute any action
   # Composite save score weights
   w_sharpe: 0.40                   # Sharpe ratio (primary signal)
   w_pnl:    0.30                   # Total P&L in R

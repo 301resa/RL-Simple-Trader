@@ -320,9 +320,19 @@ committee. Ties fall back to the most conservative action (HOLD).
 Each model carries its own independent LSTM hidden state across bars.
 Observation normalisation uses the VecNormalize statistics from the rank-1 model.
 
+Config knobs (`agent_config.yaml → evaluation`):
+```yaml
+ensemble_top_k:          3     # number of top checkpoints in the committee
+ensemble_vote_threshold: 0.75  # fraction that must agree — else HOLD
+```
+
+At 75% with 3 models: all 3 must agree (100%) or 2/3 agree (67%) → 2/3 < 75% → HOLD.
+Effectively requires **unanimity** at K=3. Raise K to 5 for a true 3/5 = 60% threshold,
+or lower `ensemble_vote_threshold` to 0.50 for simple majority.
+
 Output files named `ensemble_top{K}_journal.html` and `ensemble_top{K}_journal.xlsx`.
 
-To override `ensemble_top_k` at runtime:
+To override at runtime:
 ```bash
 --ensemble-top-k 5     # use top 5 instead of config value
 --ensemble-top-k -1    # skip ensemble entirely

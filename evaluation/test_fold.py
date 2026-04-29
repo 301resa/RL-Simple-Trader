@@ -238,14 +238,15 @@ def _run_ensemble(
     top_ckpts: List[Tuple[Path, Optional[Path]]],
     make_env_fn,
     test_days: List[str],
+    vote_threshold: float = 0.75,
 ) -> Tuple[List[dict], List[dict]]:
     """
     Run an ensemble of the top-K checkpoints on every test day.
 
     At each bar all K models observe the same (normalised) observation and each
-    votes for an action.  The majority action is executed as a single trade.
-    Ties are broken by choosing the lowest action index (HOLD = 0 is the most
-    conservative fallback).
+    votes for an action.  The action is executed only when the fraction of models
+    voting for it meets or exceeds vote_threshold.  Below the threshold the
+    committee defaults to HOLD (action index 0 — most conservative).
 
     Observation normalisation uses the VecNormalize statistics saved alongside
     the rank-1 (best) checkpoint so that all models see consistently scaled
@@ -256,6 +257,10 @@ def _run_ensemble(
     top_ckpts : list of (ckpt_path, vn_path) tuples, best model first
     make_env_fn : callable(days: List[str]) -> callable() -> TradingEnv
     test_days : list of date strings to evaluate (each run exactly once)
+    vote_threshold : float
+        Minimum fraction of models that must agree on an action for it to
+        execute.  Default 0.75 (75%).  Loaded from
+        agent_config.yaml → evaluation.ensemble_vote_threshold.
 
     Returns
     -------
@@ -310,11 +315,14 @@ def _run_ensemble(
             lstm_states    = new_lstms
             episode_starts = np.zeros((1,), dtype=bool)
 
-            # Majority vote; ties broken by lowest action index (conservative)
-            vote_counts  = Counter(actions)
-            max_votes    = max(vote_counts.values())
-            tied_winners = sorted(a for a, c in vote_counts.items() if c == max_votes)
-            winning_action = tied_winners[0]
+            # Threshold vote: an action executes only when its share of votes
+            # meets or exceeds vote_threshold.  Otherwise default to HOLD (0).
+            vote_counts = Counter(actions)
+            top_action, top_votes = vote_counts.most_common(1)[0]
+            if top_votes / k >= vote_threshold:
+                winning_action = top_action
+            else:
+                winning_action = 0  # HOLD — committee did not reach consensus
 
             obs, _, dones, infos = vnorm.step(np.array([winning_action]))
 
@@ -1611,18 +1619,23 @@ def main(argv: Optional[List[str]] = None) -> None:
     if ensemble_top_k > 0 and len(results) >= 1:
         # Clamp to available checkpoints
         ensemble_top_k = min(ensemble_top_k, len(results))
+        vote_threshold = float(_eval_cfg.get("ensemble_vote_threshold", 0.75))
+
         # Take the top-K results (results is sorted ascending → last K = best K)
         top_k_results  = results[-ensemble_top_k:][::-1]   # best first
         top_k_ckpts    = [(r["ckpt_path"], _vecnorm_path(r["ckpt_path"])) for r in top_k_results]
         top_k_names    = [r["name"] for r in top_k_results]
 
-        print(f"\n── Ensemble Evaluation  (top {ensemble_top_k} by {args.rank_by}) ──────────")
+        print(f"\n── Ensemble Evaluation  (top {ensemble_top_k} by {args.rank_by}, "
+              f"threshold {vote_threshold*100:.0f}%) ──────────")
         for i, nm in enumerate(top_k_names):
             print(f"  [{i+1}] {nm}")
         print("  Running ...", flush=True)
 
         try:
-            ens_trades, ens_episodes = _run_ensemble(top_k_ckpts, make_env, test_days)
+            ens_trades, ens_episodes = _run_ensemble(
+                top_k_ckpts, make_env, test_days, vote_threshold=vote_threshold,
+            )
             ens_trades = _resolve_trade_times(ens_trades, data_loader)
         except Exception as exc:
             _log.warning("Ensemble evaluation failed", error=str(exc))
@@ -1700,7 +1713,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         f"Models dir : {models_dir}",
         f"Test period: {test_days[0]} → {test_days[-1]}  ({len(test_days)} days)",
         f"Episodes   : {n_episodes} per checkpoint",
-        f"Ensemble   : top {ensemble_top_k} checkpoints (majority vote)",
+        f"Ensemble   : top {ensemble_top_k} checkpoints  (vote threshold {vote_threshold*100:.0f}%)",
         "",
         sep,
         _header_row(),
