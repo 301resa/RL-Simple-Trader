@@ -19,7 +19,7 @@ session:
   #   RTH    → 09:30–16:00 ET  (Regular Trading Hours)
   #   GLOBEX → bars outside RTH in the same day file (pre/post market)
   #   FULL   → all bars in the day file (23-hour session)
-  session_type: "FULL"
+  session_type: "RTH"
 
   rth_start_utc: "09:30"        # RTH open  (America/New_York local)
   rth_end_utc:   "16:00"        # RTH close (America/New_York local)

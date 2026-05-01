@@ -225,8 +225,9 @@ class TradingEnv(gym.Env):
         # RNG
         self._rng = np.random.default_rng(seed)
 
-        # Build filtered day list for curriculum
-        self._available_days: List[str] = list(trading_days)
+        # Build filtered day list — drop days with insufficient session bars upfront
+        # so reset() never hits the "Too few session bars" fallback path.
+        self._available_days: List[str] = self._prefilter_days_by_session(list(trading_days))
         # Sequential day counter — used when random_start=False (eval mode).
         # Persists across resets so each reset advances to the next day in order.
         self._day_idx: int = 0
@@ -1221,6 +1222,39 @@ class TradingEnv(gym.Env):
     def _set_shaping_scale(self, scale: float) -> None:
         """Called by ShapingDecayCallback to update reward shaping weight."""
         self.reward_calculator.shaping_scale = scale
+
+    def _prefilter_days_by_session(self, days: List[str]) -> List[str]:
+        """Drop days that yield fewer than 5 bars under the configured session filter."""
+        if self.session_type == "FULL":
+            return days
+        valid: List[str] = []
+        excluded: List[str] = []
+        for day in days:
+            bars = self.data_loader.get_day_bars(day)
+            if bars.empty:
+                excluded.append(day)
+                continue
+            tz = bars.index.tz
+            if self.session_type == "RTH":
+                start = pd.Timestamp(f"{day} {self.rth_start}").tz_localize(tz)
+                end   = pd.Timestamp(f"{day} {self.rth_end}").tz_localize(tz)
+                n = int(((bars.index >= start) & (bars.index <= end)).sum())
+            else:  # GLOBEX
+                rth_s = pd.Timestamp(f"{day} {self.rth_start}").tz_localize(tz)
+                rth_e = pd.Timestamp(f"{day} {self.rth_end}").tz_localize(tz)
+                n = int(((bars.index < rth_s) | (bars.index > rth_e)).sum())
+            if n >= 5:
+                valid.append(day)
+            else:
+                excluded.append(day)
+        if excluded:
+            log.debug(
+                "Days excluded from pool (insufficient session bars)",
+                session=self.session_type,
+                count=len(excluded),
+                dates=excluded,
+            )
+        return valid
 
     def _filter_rth(self, bars: pd.DataFrame) -> pd.DataFrame:
         """Keep only Regular Trading Hours bars."""

@@ -66,10 +66,10 @@ selectivity:
   min_confluence_for_entry: 0.5
 
 time_management:
-  penalty_start_bar: 6               # begin graduated overstay penalty here
-  max_bars_before_penalty: 12        # ramp reaches full penalty_per_bar at this bar
+  penalty_start_bar: 12              # begin graduated overstay penalty here
+  max_bars_before_penalty: 20       # ramp reaches full penalty_per_bar at this bar
   penalty_per_bar: -0.01             # full per-bar penalty (ramp starts at 50%)
-  bonus_fast_resolution: 0.10        # fast clean exit (TP or SL) within fast_trade_bars
-  fast_trade_bars: 6                 # reward if TP/SL within this many bars
-  min_hold_bars: 2                   # penalize agent_exit before this many bars
-  too_fast_penalty: -0.10            # penalty for agent-exiting too quickly
+  bonus_fast_resolution: 0.15        # fast clean exit (TP or SL) within fast_trade_bars
+  fast_trade_bars:  12                # reward if TP/SL within this many bars
+  min_hold_bars: 3                   # penalize agent_exit before this many bars
+  too_fast_penalty: -0.15           # penalty for agent-exiting too quickly
