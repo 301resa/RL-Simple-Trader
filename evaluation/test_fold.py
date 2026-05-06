@@ -1415,6 +1415,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     reward_cfg  = configs["reward"]
     agent_cfg   = configs["agent"]
 
+    def _resolve_zone_lookback(fc: dict, tf: str) -> int:
+        val = fc.get("zone_lookback_bars", 500)
+        if isinstance(val, dict):
+            return int(val.get(tf, val.get("5min", 500)))
+        return int(val)
+
     from data.data_loader     import DataLoader
     from data.data_splitter   import DataSplitter
     from environment.action_space       import ActionMasker
@@ -1430,13 +1436,16 @@ def main(argv: Optional[List[str]] = None) -> None:
     instrument  = env_cfg.get("instruments", {}).get("default", "NQ")
     instrument_profile = load_instrument_profile(env_cfg)
     session_cfg = env_cfg.get("session", {})
-    bar_minutes = int(session_cfg.get("bar_timeframe_minutes", 5))
+    data_cfg    = env_cfg.get("data", {})
+    _tf         = data_cfg.get("timeframe", f"{session_cfg.get('bar_timeframe_minutes', 5)}min")
+    bar_minutes = int(_tf.lower().replace("min", "").strip())
 
     data_loader = DataLoader(
         data_dir=args.data,
-        instrument=instrument,
-        intraday_tf=f"{bar_minutes}min",
+        instrument=data_cfg.get("instrument", instrument),
+        timeframe=_tf,
         daily_tf=session_cfg.get("daily_timeframe", "1D"),
+        file_format=data_cfg.get("file_format", "feather"),
         tz=session_cfg.get("timezone", "America/New_York"),
     )
     data_loader.load()
@@ -1485,13 +1494,33 @@ def main(argv: Optional[List[str]] = None) -> None:
     real_capital = float(account_cfg.get("initial_balance", 100000.0))
     point_value  = instrument_profile.point_value
 
+    def _scale_bars(val: int, bm: int) -> int:
+        return int(round(val * 5 / bm)) if bm != 5 and bm > 0 else val
+
+    def _resolve_ob_sensitivity_local(zc: dict, tf: str) -> int:
+        v = zc.get("ob_sensitivity", 20)
+        if isinstance(v, dict):
+            return int(v.get(tf, v.get("5min", 20)))
+        return int(v)
+
+    _sweep_decay_local = _scale_bars(40, bar_minutes)
+    _log.info(
+        "test_fold timeframe-aware feature params",
+        timeframe=_tf,
+        bar_minutes=bar_minutes,
+        ob_sensitivity=_resolve_ob_sensitivity_local(zones_cfg, _tf),
+        sweep_decay_bars=_sweep_decay_local,
+    )
+
     observation_builder = ObservationBuilder(
         clip_value=obs_cfg.get("clip_observations", 10.0),
         normalize_observations=obs_cfg.get("normalize_observations", True),
         lookback_bars=obs_cfg.get("lookback_bars", 20),
-        max_zone_age_bars=zones_cfg.get("max_zone_age_bars", 300),
+        timeframe=_tf,
+        max_zone_age_bars=_scale_bars(zones_cfg.get("max_zone_age_bars", 300), bar_minutes),
         max_zone_pts=instrument_profile.max_zone_pts,
         min_zone_pts=instrument_profile.min_zone_pts,
+        sweep_decay_bars=_sweep_decay_local,
     )
     order_zone_engine = OrderZoneEngine(
         weights=oz_cfg.get("weights"),
@@ -1500,16 +1529,20 @@ def main(argv: Optional[List[str]] = None) -> None:
         max_zone_pts=instrument_profile.max_zone_pts,
         stop_buffer_pts=instrument_profile.stop_buffer_pts,
         fallback_stop_pts=instrument_profile.fallback_stop_pts,
+        sweep_decay_bars=_sweep_decay_local,
     )
+
+    _tm_cfg = reward_cfg.get("time_management", {})
     action_masker = ActionMasker(
         atr_exhaustion_threshold=atr_gate.get("block_entries_above_pct", 0.95),
         trail_min_r=trail_cfg.get("activate_at_r", 2.0),
         max_trades_per_day=daily_lim.get("max_trades_per_day", 5),
-        no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
-        min_bars_between_trades=session_risk.get("min_bars_between_trades", 3),
+        no_entry_last_n_bars=_scale_bars(session_risk.get("no_entry_last_n_bars", 3), bar_minutes),
+        min_bars_between_trades=_scale_bars(session_risk.get("min_bars_between_trades", 3), bar_minutes),
+        min_hold_bars=_tm_cfg.get("min_hold_bars", 3),  # Hard floor — blocks 1-2 bar exits
     )
-    action_masker.max_pending_order_bars = session_risk.get("max_pending_order_bars", 5)
-    reward_calculator = RewardCalculator.from_config(reward_cfg)
+    action_masker.max_pending_order_bars = _scale_bars(session_risk.get("max_pending_order_bars", 5), bar_minutes)
+    reward_calculator = RewardCalculator.from_config(reward_cfg, bar_minutes=bar_minutes)
 
     zone_detector_defaults = {
         "consolidation_min_bars":       2,
@@ -1568,7 +1601,13 @@ def main(argv: Optional[List[str]] = None) -> None:
                 observation_builder=observation_builder,
                 atr_calculator=atr_calc,
                 zone_detector=ZoneDetector(
-                    **{k: zones_cfg.get(k, v) for k, v in zone_detector_defaults.items()},
+                    **{k: (_scale_bars(zones_cfg.get(k, v), bar_minutes)
+                           if k in ("consolidation_min_bars", "consolidation_max_bars",
+                                    "max_zone_age_bars", "ob_length")
+                           else (_resolve_ob_sensitivity_local(zones_cfg, _tf)
+                                 if k == "ob_sensitivity"
+                                 else zones_cfg.get(k, v)))
+                       for k, v in zone_detector_defaults.items()},
                     break_buffer_pts=instrument_profile.stop_buffer_pts,
                 ),
                 order_zone_engine=order_zone_engine,
@@ -1577,7 +1616,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 rth_start=session_start,
                 rth_end=session_end,
                 force_close_time=session_risk.get("force_close_time", "15:55"),
-                no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
+                no_entry_last_n_bars=_scale_bars(session_risk.get("no_entry_last_n_bars", 3), bar_minutes),
                 early_terminate_on_max_dd=env_cfg.get("episode", {}).get(
                     "early_termination_on_max_drawdown", True),
                 bar_minutes=bar_minutes,
@@ -1586,7 +1625,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 session_type=session_type,
                 random_start=False,
                 seed=None,                  # ← None: each subprocess gets unique OS-entropy seed
-                zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
+                zone_lookback_bars=_resolve_zone_lookback(feat_cfg, _tf),
                 tp_swing_multiplier=risk_cfg.get("take_profit", {}).get("swing_multiplier", 1.0),
             )
         return factory

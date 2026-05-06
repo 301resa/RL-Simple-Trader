@@ -31,21 +31,22 @@ _ZONE_MAX_TOUCHES: int   = 3     # matches max_zone_touches in features_config.y
 _SWEEP_DECAY_BARS: float = 40.0  # sweep score decays from 1.0 → 0.0 over this many bars
 
 
-def _sweep_freshness_score(zone, current_bar_idx: int) -> float:
+def _sweep_freshness_score(zone, current_bar_idx: int, decay_bars: float = _SWEEP_DECAY_BARS) -> float:
     """
     Sweep recency weight.
 
     Returns 1.0 if the zone was swept very recently, decaying linearly to 0.0
-    at _SWEEP_DECAY_BARS bars after formation.  Returns 0.0 if the zone was
+    at ``decay_bars`` bars after formation.  Returns 0.0 if the zone was
     never swept.
 
     For Sonarlab zones, was_swept=True at creation and bar_formed_idx is the
     ROC crossover bar — so this naturally rewards fresh institutional setups.
+    ``decay_bars`` is timeframe-aware (passed from OrderZoneEngine instance).
     """
     if zone is None or not zone.is_valid or not zone.was_swept:
         return 0.0
     bars_since = current_bar_idx - zone.bar_formed_idx
-    return float(max(0.0, 1.0 - bars_since / _SWEEP_DECAY_BARS))
+    return float(max(0.0, 1.0 - bars_since / max(decay_bars, 1.0)))
 
 
 def _zone_quality_score(zone, current_bar_idx: int, max_zone_width_pts: float) -> float:
@@ -130,12 +131,14 @@ class OrderZoneEngine:
         max_zone_pts: float = 10.0,
         stop_buffer_pts: float = 1.5,
         fallback_stop_pts: float = 3.0,
+        sweep_decay_bars: int = 40,
     ) -> None:
         self.min_confluence_score = min_confluence_score
         self.min_rr_ratio         = min_rr_ratio
         self.max_zone_pts         = max_zone_pts
         self.stop_buffer_pts      = stop_buffer_pts
         self.fallback_stop_pts    = fallback_stop_pts
+        self._sweep_decay_bars    = float(sweep_decay_bars)
 
         if weights is not None:
             self.zone_weight  = float(weights.get("zone",  zone_weight))
@@ -209,8 +212,8 @@ class OrderZoneEngine:
         # making trade_worthwhile harder to achieve without a confirmed sweep.
         s_zone = zone_state.nearest_supply if zone_state else None
         d_zone = zone_state.nearest_demand if zone_state else None
-        sweep_score_bearish = _sweep_freshness_score(s_zone, current_bar_idx)
-        sweep_score_bullish = _sweep_freshness_score(d_zone, current_bar_idx)
+        sweep_score_bearish = _sweep_freshness_score(s_zone, current_bar_idx, self._sweep_decay_bars)
+        sweep_score_bullish = _sweep_freshness_score(d_zone, current_bar_idx, self._sweep_decay_bars)
 
         # ── 4. Weighted confluence scores ─────────────────────────────────────
         raw_bearish = (

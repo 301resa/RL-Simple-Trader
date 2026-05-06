@@ -17,12 +17,14 @@ import pandas as pd
 
 class DataValidator:
     """
-    Validates an OHLCV DataFrame for minimum integrity requirements.
+    Validates an OHLC(V) DataFrame for minimum integrity requirements.
 
-    Expected columns (lowercase): open, high, low, close, volume.
+    Required columns (lowercase): open, high, low, close.
+    Optional columns: volume (may be missing when using Ninja Trader loader).
     """
 
-    REQUIRED_COLUMNS: List[str] = ["open", "high", "low", "close", "volume"]
+    REQUIRED_COLUMNS: List[str] = ["open", "high", "low", "close"]
+    OPTIONAL_COLUMNS: List[str] = ["volume"]
 
     def validate(self, df: pd.DataFrame, context: str = "") -> None:
         """
@@ -75,10 +77,11 @@ class DataValidator:
         if bad_low:
             raise ValueError(f"{label}{bad_low} bars where Low > Open/Close.")
 
-        # 6. Volume non-negative
-        neg_vol = (df["volume"] < 0).sum()
-        if neg_vol:
-            raise ValueError(f"{label}{neg_vol} bars with negative volume.")
+        # 6. Volume non-negative (only if volume column present)
+        if "volume" in df.columns:
+            neg_vol = (df["volume"] < 0).sum()
+            if neg_vol:
+                raise ValueError(f"{label}{neg_vol} bars with negative volume.")
 
         # 7. DatetimeIndex
         if not isinstance(df.index, pd.DatetimeIndex):

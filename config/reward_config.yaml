@@ -38,15 +38,15 @@ entry_penalties:
   mae_threshold_r: 0.60               # MAE below this is acceptable (raised from 0.40)
 
 exit_rewards:
-  trailing_stop_correctly: 0.50       # used trail stop before exit
+  trailing_stop_correctly: 0.30       # used trail stop before exit
   aggressive_trail_at_4r: 0.20        # trailed aggressively at 4R profit
-  tp_hit_bonus: 2.50                  # hit the structural take-profit target
+  tp_hit_bonus: 3.50                  # hit the structural take-profit target
   mfe_efficiency_weight: 0.05         # reduced: capturing fraction of max move (was 0.15)
   scale_out_success: 0.15             # partial exit (scale-out) reward
 
 exit_penalties:
   held_past_4r_no_trail: -0.50        # held past 4R without trailing
-  gave_back_profit_pct: 0.30          # weight applied to R given back from peak (all exits)
+  gave_back_profit_pct: 0.45          # weight applied to R given back from peak (all exits)
 
 violations:
   max_drawdown_breach: -2.00          # hard guardrail breach

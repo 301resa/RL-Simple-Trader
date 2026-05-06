@@ -714,21 +714,90 @@ Contract tiers (from confluence-graded sizing):
 - **Minis (ES / NQ)**: `[1, 2]` — integer contracts only, capped at 2.
 - **Micros (MES / MNQ)**: `[1, 2, 3, 5, 8]` — integer contracts only.
 
-### Switching instruments
+### Switching instruments and timeframes
 
-Instrument switching is a **one-line config change**. In `config/environment_config.yaml`:
+Instrument and timeframe switching is a **one-line config change** (no code edits). In `config/environment_config.yaml`:
 
 ```yaml
-instruments:
-  default: NQ        # ES | MES | NQ | MNQ
+data:
+  instrument: ES          # ES | NQ | GC | MES | MNQ
+  timeframe: "5min"       # 5min | 1min (extensible)
+  file_format: "feather"  # feather (fastest) | npy | pkl | csv
 ```
 
-All geometry (stop buffer, zone width bounds, jitter, target, contract tiers, confluence
-thresholds) is expressed in **ticks** under `contracts.<SYMBOL>` and materialised into
+**Timeframe-aware observation window:**
+
+The system maintains the **same TIME window** (3.3 hours) across different bar frequencies:
+
+| Timeframe | Bars | Duration | Observation Dim | Use Case |
+|-----------|------|----------|-----------------|----------|
+| 5-min | 40 | 200 min | 40×4+53 = 213 | Proven profitable (current default) |
+| 1-min | 200 | 200 min | 200×4+53 = 853 | Higher resolution, for live trading precision |
+
+**Example: Switch from ES 5-min to NQ 1-min**
+```yaml
+data:
+  instrument: NQ
+  timeframe: "1min"
+
+observation:
+  lookback_bars:
+    "5min": 40
+    "1min": 200    # ObservationBuilder reads this automatically
+```
+
+No other changes needed — the system:
+- Loads NQ 1-min from `data/Ninja/NQ 1 min.csv`
+- Caches as Feather (10× faster than CSV on resets)
+- Computes obs_dim = 853 automatically
+- Trains with 200-bar history (same 3.3-hour context as 5-min)
+
+**Timeframe-aware feature parameters:**
+
+When switching timeframes, two critical feature parameters automatically scale to maintain 
+consistent real-world sensitivity across bar frequencies:
+
+| Parameter | 5-min | 1-min | Config Path | Purpose |
+|-----------|-------|-------|-------------|---------|
+| `ob_sensitivity` | 20 (0.20% ROC) | 10 (0.10% ROC) | `features_config.yaml → zones.ob_sensitivity` | SONARLAB momentum threshold for zone detection |
+| `sweep_decay_bars` | 40 bars (200 min) | 200 bars (200 min) | Derived from `_scale_bars(40, bar_minutes)` | Sweep freshness weight decay duration |
+
+**Configuration:**
+```yaml
+zones:
+  ob_sensitivity:
+    "5min": 20     # ±0.20% ROC threshold over 4 bars = ~20 minutes
+    "1min": 10     # ±0.10% ROC threshold over 4 bars = ~4 minutes (ES 1-min volatility)
+```
+
+The `sweep_decay_bars` parameter is automatically calculated in code via `_scale_bars()`:
+- **5-min**: 40 bars × (5/5) = 40 bars ≈ 200 minutes (same as wall-clock decay period)
+- **1-min**: 40 bars × (5/1) = 200 bars ≈ 200 minutes (same wall-clock duration, scaled to bar count)
+
+**Why scale?** On 1-min bars, the same institutional setup matures over 5× more bars. 
+Without scaling, sweep freshness would decay too quickly, disqualifying valid setups that 
+took longer to form. The wall-clock-based scaling ensures consistency: a zone swept 
+40 minutes ago has the same confidence score on both timeframes.
+
+**Ninja Trader CSV Support:**
+
+Data is expected in `data/Ninja/` with format:
+```
+{INSTRUMENT} {TIMEFRAME}.csv    (e.g., "ES 5 min.csv", "NQ 1 min.csv")
+Columns: Date, Time, Open, High, Low, Close, Volume, ...
+Volume columns are dropped automatically.
+```
+
+First load from CSV is slow (~5 seconds); subsequent loads use Feather cache (~0.5 seconds).
+
+**Instrument geometry:**
+
+All price-based thresholds (stop buffer, zone widths, jitter, contract tiers, confluence
+thresholds) are expressed in **ticks** under `contracts.<SYMBOL>` and materialised into
 points by `utils/instrument.py → load_instrument_profile()`. Every consumer
 (`OrderZoneEngine`, `PositionManager`, `ObservationBuilder`, `TradingEnv`,
 `OHLCVAugmentor`) accepts an `InstrumentProfile` and pulls its numbers from there — so
-ES↔NQ↔MES↔MNQ requires no code edits.
+ES↔NQ↔GC↔MES↔MNQ requires no code edits.
 
 ---
 

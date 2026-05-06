@@ -77,6 +77,10 @@ class ActionMasker:
         Minimum bars that must elapse after a trade closes before a new
         entry is allowed.  Prevents re-entering the same zone immediately
         after a fill (eliminates 0-min duplicate trades).
+    min_hold_bars : int
+        Minimum bars a position must be held before the agent can choose EXIT.
+        SL/TP can still trigger mechanically; this only masks the voluntary exit action.
+        Scaled by timeframe: 3 bars on 5-min = 15 bars on 1-min (same 15-min lockout).
     """
 
     def __init__(
@@ -86,12 +90,14 @@ class ActionMasker:
         max_trades_per_day: int = 5,
         no_entry_last_n_bars: int = 3,
         min_bars_between_trades: int = 3,
+        min_hold_bars: int = 2,
     ) -> None:
         self.atr_exhaustion_threshold = atr_exhaustion_threshold
         self.trail_min_r = trail_min_r
         self.max_trades_per_day = max_trades_per_day
         self.no_entry_last_n_bars = no_entry_last_n_bars
         self.min_bars_between_trades = min_bars_between_trades
+        self.min_hold_bars = min_hold_bars
 
     def compute_mask(
         self,
@@ -105,6 +111,7 @@ class ActionMasker:
         bars_remaining_in_session: int,
         max_drawdown_breached: bool,
         bars_since_last_trade: int = 9999,
+        bars_in_trade: int = 9999,
     ) -> np.ndarray:
         """
         Compute the action mask for the current timestep.
@@ -144,6 +151,9 @@ class ActionMasker:
         if not is_position_open:
             mask[Action.EXIT] = 0.0       # Nothing to exit
             mask[Action.TRAIL_STOP] = 0.0  # Nothing to trail
+        elif bars_in_trade < self.min_hold_bars:
+            # Position too young — block voluntary exit (SL/TP still fire mechanically)
+            mask[Action.EXIT] = 0.0
 
         # ── TRAIL_STOP conditions ─────────────────────────────
         if is_position_open and unrealised_r < self.trail_min_r:

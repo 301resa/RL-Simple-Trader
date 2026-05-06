@@ -191,9 +191,12 @@ def _cli() -> None:
     sess  = env_cfg.get("session", {})
     instr = env_cfg.get("instruments", {}).get("default", "ES")
 
+    data_cfg = env_cfg.get("data", {})
+    _tf = data_cfg.get("timeframe", f"{sess.get('bar_timeframe_minutes', 5)}min")
     dl = DataLoader(
-        data_dir=args.data, instrument=instr,
-        intraday_tf=f"{sess.get('bar_timeframe_minutes', 5)}min",
+        data_dir=args.data,
+        instrument=data_cfg.get("instrument", instr),
+        timeframe=_tf,
         tz=sess.get("timezone", "America/New_York"),
     )
     dl.load()

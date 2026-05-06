@@ -102,6 +102,38 @@ def load_configs(config_dir: str) -> dict:
 
 # ── Factory functions (wire components together) ──────────────────────────────
 
+def _bar_minutes_from_timeframe(timeframe: str) -> int:
+    """Extract bar duration in minutes from timeframe string e.g. '5min' → 5, '1min' → 1."""
+    return int(timeframe.lower().replace("min", "").strip())
+
+
+def _resolve_zone_lookback(feat_cfg: dict, timeframe: str) -> int:
+    """Resolve zone_lookback_bars from config, supporting timeframe-aware dict or flat int."""
+    val = feat_cfg.get("zone_lookback_bars", 500)
+    if isinstance(val, dict):
+        return int(val.get(timeframe, val.get("5min", 500)))
+    return int(val)
+
+
+def _resolve_ob_sensitivity(zones_cfg: dict, timeframe: str) -> int:
+    """Resolve zones.ob_sensitivity from config, supporting timeframe-aware dict or flat int."""
+    val = zones_cfg.get("ob_sensitivity", 20)
+    if isinstance(val, dict):
+        return int(val.get(timeframe, val.get("5min", 20)))
+    return int(val)
+
+
+def _scale_bars(value: int, bar_minutes: int) -> int:
+    """Scale a bar-count config value to maintain same real-time duration.
+
+    All bar-count configs are authored for 5-min bars. On 1-min bars the same
+    real-time duration requires 5× more bars.
+    """
+    if bar_minutes == 5 or bar_minutes <= 0:
+        return value
+    return int(round(value * 5 / bar_minutes))
+
+
 def build_components(
     configs: dict,
     data_dir: str,
@@ -145,11 +177,13 @@ def build_components(
 
     # ── Data ─────────────────────────────────────────────────
     session_cfg = env_cfg.get("session", {})
+    data_cfg = env_cfg.get("data", {})
     data_loader = DataLoader(
         data_dir=data_dir,
-        instrument=instrument,
-        intraday_tf=f"{session_cfg.get('bar_timeframe_minutes', 5)}min",
+        instrument=data_cfg.get("instrument", instrument),
+        timeframe=data_cfg.get("timeframe", f"{session_cfg.get('bar_timeframe_minutes', 5)}min"),
         daily_tf=session_cfg.get("daily_timeframe", "1D"),
+        file_format=data_cfg.get("file_format", "feather"),
         tz=session_cfg.get("timezone", "America/New_York"),
     )
     data_loader.load()
@@ -228,20 +262,30 @@ def build_components(
 
     # ── Zone Detector ─────────────────────────────────────────
     zones_cfg = feat_cfg.get("zones", {})
+    timeframe = data_cfg.get("timeframe", f"{session_cfg.get('bar_timeframe_minutes', 5)}min")
+    _bm = _bar_minutes_from_timeframe(timeframe)
+    _sweep_decay = _scale_bars(40, _bm)  # 40 on 5-min, 200 on 1-min — same wall-clock freshness window
+    log.info(
+        "Timeframe-aware feature params resolved",
+        timeframe=timeframe,
+        bar_minutes=_bm,
+        ob_sensitivity=_resolve_ob_sensitivity(zones_cfg, timeframe),
+        sweep_decay_bars=_sweep_decay,
+    )
     zone_detector = ZoneDetector(
-        consolidation_min_bars=zones_cfg.get("consolidation_min_bars", 2),
-        consolidation_max_bars=zones_cfg.get("consolidation_max_bars", 8),
+        consolidation_min_bars=_scale_bars(zones_cfg.get("consolidation_min_bars", 2), _bm),
+        consolidation_max_bars=_scale_bars(zones_cfg.get("consolidation_max_bars", 8), _bm),
         consolidation_range_atr_pct=zones_cfg.get("consolidation_range_atr_pct", 0.20),
         impulse_min_body_atr_pct=zones_cfg.get("impulse_min_body_atr_pct", 0.15),
-        max_zone_age_bars=zones_cfg.get("max_zone_age_bars", 200),
+        max_zone_age_bars=_scale_bars(zones_cfg.get("max_zone_age_bars", 200), _bm),
         max_zone_touches=zones_cfg.get("max_zone_touches", 3),
         zone_buffer_atr_pct=zones_cfg.get("zone_buffer_atr_pct", 0.02),
         break_buffer_pts=instrument_profile.stop_buffer_pts,
         detection_mode=zones_cfg.get("detection_mode", "consolidation"),
-        ob_length=zones_cfg.get("ob_length", 3),
+        ob_length=_scale_bars(zones_cfg.get("ob_length", 3), _bm),
         ob_threshold_pct=zones_cfg.get("ob_threshold_pct", 0.0),
         ob_use_wicks=zones_cfg.get("ob_use_wicks", False),
-        ob_sensitivity=zones_cfg.get("ob_sensitivity", 28),
+        ob_sensitivity=_resolve_ob_sensitivity(zones_cfg, timeframe),
     )
 
     # ── Order Zone Engine ─────────────────────────────────────
@@ -253,6 +297,7 @@ def build_components(
         max_zone_pts=instrument_profile.max_zone_pts,
         stop_buffer_pts=instrument_profile.stop_buffer_pts,
         fallback_stop_pts=instrument_profile.fallback_stop_pts,
+        sweep_decay_bars=_sweep_decay,
     )
 
     # ── Observation Builder ───────────────────────────────────
@@ -261,23 +306,27 @@ def build_components(
         clip_value=obs_cfg.get("clip_observations", 10.0),
         normalize_observations=obs_cfg.get("normalize_observations", True),
         lookback_bars=obs_cfg.get("lookback_bars", 20),
-        max_zone_age_bars=zones_cfg.get("max_zone_age_bars", 300),
+        timeframe=timeframe,
+        max_zone_age_bars=_scale_bars(zones_cfg.get("max_zone_age_bars", 300), _bm),
         max_zone_pts=instrument_profile.max_zone_pts,
         min_zone_pts=instrument_profile.min_zone_pts,
+        sweep_decay_bars=_sweep_decay,
     )
 
     # ── Action Masker ─────────────────────────────────────────
     atr_gate_cfg = risk_cfg.get("atr_gate", {})
     daily_lim_cfg = risk_cfg.get("daily_limits", {})
     session_risk_cfg = risk_cfg.get("session", {})
+    _tm_cfg = reward_cfg.get("time_management", {})
     action_masker = ActionMasker(
         atr_exhaustion_threshold=atr_gate_cfg.get("block_entries_above_pct", 0.95),
         trail_min_r=risk_cfg.get("trailing", {}).get("activate_at_r", 2.0),
         max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
-        no_entry_last_n_bars=session_risk_cfg.get("no_entry_last_n_bars", 3),
-        min_bars_between_trades=session_risk_cfg.get("min_bars_between_trades", 3),
+        no_entry_last_n_bars=_scale_bars(session_risk_cfg.get("no_entry_last_n_bars", 3), _bm),
+        min_bars_between_trades=_scale_bars(session_risk_cfg.get("min_bars_between_trades", 3), _bm),
+        min_hold_bars=_tm_cfg.get("min_hold_bars", 3),  # Hard floor — blocks 1-2 bar exits on any timeframe
     )
-    action_masker.max_pending_order_bars = session_risk_cfg.get("max_pending_order_bars", 5)
+    action_masker.max_pending_order_bars = _scale_bars(session_risk_cfg.get("max_pending_order_bars", 5), _bm)
 
     # ── Position Manager ──────────────────────────────────────
     account_cfg = env_cfg.get("account", {})
@@ -313,7 +362,7 @@ def build_components(
         )
 
     # ── Reward Calculator ─────────────────────────────────────
-    reward_calculator = RewardCalculator.from_config(reward_cfg)
+    reward_calculator = RewardCalculator.from_config(reward_cfg, bar_minutes=_bar_minutes_from_timeframe(timeframe))
 
     # ── Curriculum ────────────────────────────────────────────
     curriculum_cfg = env_cfg.get("curriculum", {})
@@ -329,7 +378,7 @@ def build_components(
     session_end     = session_cfg.get("rth_end_utc",   "15:00")
     session_type    = session_cfg.get("session_type", "RTH").upper()
 
-    bar_minutes = int(session_cfg.get("bar_timeframe_minutes", 5))
+    bar_minutes = _bar_minutes_from_timeframe(timeframe)
     aug_cfg     = agent_cfg.get("augmentation", {})
     base_seed   = int(agent_cfg.get("seed", 42))
 
@@ -350,7 +399,13 @@ def build_components(
             observation_builder=observation_builder,
             atr_calculator=atr_calculator,
             zone_detector=ZoneDetector(
-                **{k: zones_cfg.get(k, v) for k, v in _ZONE_DETECTOR_DEFAULTS.items()},
+                **{k: (_scale_bars(zones_cfg.get(k, v), bar_minutes)
+                       if k in ("consolidation_min_bars", "consolidation_max_bars",
+                                "max_zone_age_bars", "ob_length")
+                       else (_resolve_ob_sensitivity(zones_cfg, timeframe)
+                             if k == "ob_sensitivity"
+                             else zones_cfg.get(k, v)))
+                   for k, v in _ZONE_DETECTOR_DEFAULTS.items()},
                 break_buffer_pts=instrument_profile.stop_buffer_pts,
             ),
             order_zone_engine=order_zone_engine,
@@ -359,7 +414,7 @@ def build_components(
             rth_start=session_start,
             rth_end=session_end,
             force_close_time=session_risk_cfg.get("force_close_time", "15:55"),
-            no_entry_last_n_bars=session_risk_cfg.get("no_entry_last_n_bars", 3),
+            no_entry_last_n_bars=_scale_bars(session_risk_cfg.get("no_entry_last_n_bars", 3), _bm),
             early_terminate_on_max_dd=env_cfg.get("episode", {}).get("early_termination_on_max_drawdown", True),
             bar_minutes=bar_minutes,
             curriculum_filter_fn=None,
@@ -367,7 +422,7 @@ def build_components(
             session_type=session_type,
             random_start=not is_eval,
             seed=env_seed,
-            zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
+            zone_lookback_bars=_resolve_zone_lookback(feat_cfg, timeframe),
             tp_swing_multiplier=risk_cfg.get("take_profit", {}).get("swing_multiplier", 1.0),
         )
 
@@ -606,7 +661,10 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
     hotsave_min_trades = max(10, n_training_days * min_trades_per_wk // 5)
     env_cfg_t  = configs.get("environment", {})
     instrument_t  = env_cfg_t.get("instruments", {}).get("default", "ES")
-    bar_minutes_t = env_cfg_t.get("session", {}).get("bar_timeframe_minutes", 5)
+    bar_minutes_t = _bar_minutes_from_timeframe(
+        env_cfg_t.get("data", {}).get("timeframe",
+            f"{env_cfg_t.get('session', {}).get('bar_timeframe_minutes', 5)}min")
+    )
 
     trainer = Trainer(
         agent=agent,
@@ -804,6 +862,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     # ── Common infrastructure (shared across folds) ────────────
     instrument   = env_cfg.get("instruments", {}).get("default", "NQ")
     session_cfg  = env_cfg.get("session", {})
+    data_cfg     = env_cfg.get("data", {})
     atr_cfg      = feat_cfg.get("atr", {})
     zones_cfg    = feat_cfg.get("zones", {})
     oz_cfg       = feat_cfg.get("order_zone", {})
@@ -816,11 +875,13 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     trail_cfg    = risk_cfg.get("trailing", {})
     instrument_profile = load_instrument_profile(env_cfg)
 
+    _wf_timeframe = data_cfg.get("timeframe", f"{session_cfg.get('bar_timeframe_minutes', 5)}min")
     data_loader = DataLoader(
         data_dir=args.data,
-        instrument=instrument,
-        intraday_tf=f"{session_cfg.get('bar_timeframe_minutes', 5)}min",
+        instrument=data_cfg.get("instrument", instrument),
+        timeframe=_wf_timeframe,
         daily_tf=session_cfg.get("daily_timeframe", "1D"),
+        file_format=data_cfg.get("file_format", "feather"),
         tz=session_cfg.get("timezone", "America/New_York"),
     )
     data_loader.load()
@@ -896,9 +957,17 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     session_start= session_cfg.get("rth_start_utc", "08:30")
     session_end  = session_cfg.get("rth_end_utc",   "15:00")
     session_type = session_cfg.get("session_type", "RTH").upper()
-    bar_minutes  = int(session_cfg.get("bar_timeframe_minutes", 5))
+    bar_minutes  = _bar_minutes_from_timeframe(_wf_timeframe)
     n_envs       = int(mp_cfg.get("n_envs", 4))
     use_subproc  = mp_cfg.get("use_subprocess", True)
+    _sweep_decay = _scale_bars(40, bar_minutes)  # 40 on 5-min, 200 on 1-min
+    log.info(
+        "Walk-forward timeframe-aware feature params",
+        timeframe=_wf_timeframe,
+        bar_minutes=bar_minutes,
+        ob_sensitivity=_resolve_ob_sensitivity(zones_cfg, _wf_timeframe),
+        sweep_decay_bars=_sweep_decay,
+    )
 
     order_zone_engine = OrderZoneEngine(
         weights=oz_cfg.get("weights"),
@@ -907,24 +976,29 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         max_zone_pts=instrument_profile.max_zone_pts,
         stop_buffer_pts=instrument_profile.stop_buffer_pts,
         fallback_stop_pts=instrument_profile.fallback_stop_pts,
+        sweep_decay_bars=_sweep_decay,
     )
     observation_builder = ObservationBuilder(
         clip_value=obs_cfg.get("clip_observations", 10.0),
         normalize_observations=obs_cfg.get("normalize_observations", True),
         lookback_bars=obs_cfg.get("lookback_bars", 20),
-        max_zone_age_bars=zones_cfg.get("max_zone_age_bars", 300),
+        timeframe=_wf_timeframe,
+        max_zone_age_bars=_scale_bars(zones_cfg.get("max_zone_age_bars", 300), bar_minutes),
         max_zone_pts=instrument_profile.max_zone_pts,
         min_zone_pts=instrument_profile.min_zone_pts,
+        sweep_decay_bars=_sweep_decay,
     )
+    _tm_cfg_wf = reward_cfg.get("time_management", {})
     action_masker = ActionMasker(
         atr_exhaustion_threshold=atr_gate_cfg.get("block_entries_above_pct", 0.95),
         trail_min_r=trail_cfg.get("activate_at_r", 2.0),
         max_trades_per_day=daily_lim_cfg.get("max_trades_per_day", 5),
-        no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
-        min_bars_between_trades=session_risk.get("min_bars_between_trades", 3),
+        no_entry_last_n_bars=_scale_bars(session_risk.get("no_entry_last_n_bars", 3), bar_minutes),
+        min_bars_between_trades=_scale_bars(session_risk.get("min_bars_between_trades", 3), bar_minutes),
+        min_hold_bars=_tm_cfg_wf.get("min_hold_bars", 3),  # Hard floor — blocks 1-2 bar exits
     )
-    action_masker.max_pending_order_bars = session_risk.get("max_pending_order_bars", 5)
-    reward_calculator = RewardCalculator.from_config(reward_cfg)
+    action_masker.max_pending_order_bars = _scale_bars(session_risk.get("max_pending_order_bars", 5), bar_minutes)
+    reward_calculator = RewardCalculator.from_config(reward_cfg, bar_minutes=bar_minutes)
     aug_cfg        = agent_cfg.get("augmentation", {})
     _base_seed_wf  = int(agent_cfg.get("seed", 42))
     _scale_out_cfg = risk_cfg.get("scale_out", {})
@@ -971,7 +1045,13 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             observation_builder=observation_builder,
             atr_calculator=atr_calculator,
             zone_detector=ZoneDetector(
-                **{k: zones_cfg.get(k, v) for k, v in _ZONE_DETECTOR_DEFAULTS.items()},
+                **{k: (_scale_bars(zones_cfg.get(k, v), bar_minutes)
+                       if k in ("consolidation_min_bars", "consolidation_max_bars",
+                                "max_zone_age_bars", "ob_length")
+                       else (_resolve_ob_sensitivity(zones_cfg, _wf_timeframe)
+                             if k == "ob_sensitivity"
+                             else zones_cfg.get(k, v)))
+                   for k, v in _ZONE_DETECTOR_DEFAULTS.items()},
                 break_buffer_pts=instrument_profile.stop_buffer_pts,
             ),
             order_zone_engine=order_zone_engine,
@@ -980,7 +1060,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             rth_start=session_start,
             rth_end=session_end,
             force_close_time=session_risk.get("force_close_time", "15:55"),
-            no_entry_last_n_bars=session_risk.get("no_entry_last_n_bars", 3),
+            no_entry_last_n_bars=_scale_bars(session_risk.get("no_entry_last_n_bars", 3), bar_minutes),
             early_terminate_on_max_dd=env_cfg.get("episode", {}).get("early_termination_on_max_drawdown", True),
             bar_minutes=bar_minutes,
             curriculum_filter_fn=None,
@@ -988,7 +1068,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             session_type=session_type,
             random_start=not is_eval,
             seed=env_seed,
-            zone_lookback_bars=feat_cfg.get("zone_lookback_bars", 500),
+            zone_lookback_bars=_resolve_zone_lookback(feat_cfg, _wf_timeframe),
             tp_swing_multiplier=risk_cfg.get("take_profit", {}).get("swing_multiplier", 1.0),
         )
 

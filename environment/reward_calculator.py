@@ -484,9 +484,30 @@ class RewardCalculator:
     # ── Class method: from config dict ───────────────────────
 
     @classmethod
-    def from_config(cls, cfg: dict) -> "RewardCalculator":
-        """Construct from a parsed reward_config.yaml dict."""
+    def from_config(cls, cfg: dict, bar_minutes: int = 5) -> "RewardCalculator":
+        """
+        Construct from a parsed reward_config.yaml dict.
+
+        Parameters
+        ----------
+        cfg : dict
+            Parsed reward_config.yaml.
+        bar_minutes : int
+            Bar duration in minutes (1 or 5). Time-management bar-count
+            thresholds are scaled by (5 / bar_minutes) so that the real-time
+            durations remain equivalent across timeframes.
+        """
         ep = cfg.get("entry_penalties", {})
+        tm = dict(cfg.get("time_management", {}))  # copy to avoid mutating config
+
+        # Scale bar-count thresholds to maintain same real-time duration across timeframes.
+        # Reference timeframe is 5-min; on 1-min bars all bar counts multiply by 5.
+        if bar_minutes != 5 and bar_minutes > 0:
+            scale = 5 / bar_minutes
+            for key in ("min_hold_bars", "fast_trade_bars", "penalty_start_bar", "max_bars_before_penalty"):
+                if key in tm:
+                    tm[key] = int(round(tm[key] * scale))
+
         return cls(
             core_scale=cfg.get("core", {}).get("scale", 1.0),
             hold_flat_penalty=cfg.get("step", {}).get("hold_flat_penalty", -0.001),
@@ -496,7 +517,7 @@ class RewardCalculator:
             exit_penalties=cfg.get("exit_penalties", {}),
             violations=cfg.get("violations", {}),
             discipline=cfg.get("discipline", {}),
-            time_management=cfg.get("time_management", {}),
+            time_management=tm,
             selectivity=cfg.get("selectivity", {}),
             entry_cost=ep.get("entry_cost", -0.05),
             gave_back_profit_weight=cfg.get("exit_penalties", {}).get("gave_back_profit_pct", 0.30),

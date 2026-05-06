@@ -6,12 +6,19 @@
 # Switch instruments by changing `instruments.default` — every downstream
 # module reads geometry from utils.instrument.InstrumentProfile.
 
+# Data loading configuration
+data:
+  instrument: ES             # ES | NQ | GC | MES | MNQ
+  timeframe: "1min"          # 5min | 1min (extensible for future)
+  file_format: "feather"     # feather (fastest) | npy | pkl | csv (slowest)
+                             # Auto-detects in priority order: feather → npy → pkl → csv
+
 instruments:
-  allowed: [ES, MES, NQ, MNQ]
+  allowed: [ES, MES, NQ, MNQ, GC]
   default: ES
 
 session:
-  bar_timeframe_minutes: 5
+  bar_timeframe_minutes: 1       # Must match data.timeframe (1 for 1-min, 5 for 5-min)
   daily_timeframe: "1D"
   timezone: "America/New_York"  # NY/ET timezone
 
@@ -86,16 +93,37 @@ contracts:
     contract_tiers: [1, 2, 3, 5, 8]
     confluence_tier_thresholds: [0.60, 0.70, 0.80, 0.90]
 
+  GC:
+    micro_point_value: 100.0        # $ per point per contract (100 oz)
+    tick_size: 0.1
+    tick_value: 10.0
+    stop_buffer_ticks: 50           # 5.0 pts (GC typical range ≈ 10-15 pts/day)
+    min_target_ticks: 20            # 2.0 pts
+    jitter_ticks: 10                # 1.0 pt
+    min_zone_ticks: 10              # 1.0 pt
+    max_zone_ticks: 100             # 10.0 pts
+    fallback_stop_ticks: 50         # 5.0 pts
+    contract_tiers: [1, 2, 3]
+    confluence_tier_thresholds: [0.65]
+
 account:
   initial_balance: 100000.0      # starting account equity ($)
   max_drawdown_limit: 2000.0    # hard daily drawdown limit ($) for guardrail check
 
 observation:
-  clip_observations: 10.0       # clip obs vector to [-N, N]
-  normalize_observations: false # running normalisation (enable for production)
-  lookback_bars: 40              # sliding window of recent candles fed as OHLCV log-returns (5-min bars = 200 min ≈ 3.3 hours)
-                                # Zone detector still uses 500-bar history (zone_lookback_bars in
-                                # features_config.yaml) — this only controls the obs window.
+  clip_observations: 10.0        # clip obs vector to [-N, N]
+  normalize_observations: false  # running normalisation (enable for production)
+
+  # Timeframe-based lookback_bars: maintains same TIME window across different bar frequencies
+  # 5-min:  40 bars × 5 min = 200 min = 3.3 hours (obs_dim = 40×4 + 53 = 213)
+  # 1-min: 200 bars × 1 min = 200 min = 3.3 hours (obs_dim = 200×4 + 53 = 853)
+  # Agent reads: lookback_bars[timeframe_from_config]
+  lookback_bars:
+    "5min": 40
+    "1min": 200
+
+  # Zone detector still uses 500-bar history (zone_lookback_bars in
+  # features_config.yaml) — this only controls the obs window.
 
 episode:
   early_termination_on_max_drawdown: true

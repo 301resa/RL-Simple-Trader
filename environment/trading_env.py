@@ -559,6 +559,7 @@ class TradingEnv(gym.Env):
         agent_wants_exit = (action == Action.EXIT)
         agent_wants_trail = (action == Action.TRAIL_STOP)
 
+        was_trailing_before_update = self.position_manager.state.trailing_active
         pos_closed, exit_reason, closed_trade = self.position_manager.update(
             current_price=current_price,
             current_bar_high=current_high,
@@ -575,7 +576,10 @@ class TradingEnv(gym.Env):
                 trade=closed_trade,
                 order_zone_state=self._entry_order_zone_state or self._get_current_order_zone_state(),
                 atr_state=self._entry_atr_state or atr_state,
-                was_trailing=self.position_manager.state.trailing_active,
+                was_trailing=(
+                    was_trailing_before_update
+                    or closed_trade.exit_reason == ExitReason.TRAILING_STOP
+                ),
                 peak_unrealised_r=self._peak_unrealised_r,
             )
             self._peak_unrealised_r = 0.0  # Reset for next trade
@@ -825,6 +829,9 @@ class TradingEnv(gym.Env):
 
         bars_since_last_trade = _s - self.position_manager.state.last_close_bar
 
+        _pm_state = self.position_manager.state
+        _bars_in_trade = (_s - _pm_state.entry_bar_idx) if _pm_state.is_open else 9999
+
         mask = self.action_masker.compute_mask(
             is_position_open=portfolio_state["position_open"],
             position_direction=portfolio_state["position_direction"],
@@ -832,10 +839,11 @@ class TradingEnv(gym.Env):
             atr_state=atr_state,
             order_zone_state=order_zone_state,
             trades_today=portfolio_state.get("trades_today", 0),
-            in_loss_streak_pause=self.position_manager.state.in_loss_streak_pause,
+            in_loss_streak_pause=_pm_state.in_loss_streak_pause,
             bars_remaining_in_session=bars_remaining,
             max_drawdown_breached=self.position_manager.is_max_drawdown_breached(_close_now),
             bars_since_last_trade=bars_since_last_trade,
+            bars_in_trade=_bars_in_trade,
         )
 
         # Block entries at/after RTH end for FULL/GLOBEX sessions.

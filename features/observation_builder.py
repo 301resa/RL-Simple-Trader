@@ -63,26 +63,48 @@ class ObservationBuilder:
     """
     Assembles the flat observation vector fed to the policy network.
 
+    Supports timeframe-aware lookback_bars: maintains same TIME window across
+    different bar frequencies (5-min 40 bars = 1-min 200 bars = 3.3 hours).
+
     Parameters
     ----------
     clip_value : float
         All observation components clipped to [-clip_value, clip_value].
-    lookback_bars : int
-        Number of most recent bars as OHLC log-returns (default 20).
+    lookback_bars : int or dict
+        If int: number of most recent bars as OHLC log-returns (for backward compat).
+        If dict: maps timeframe strings (e.g. "5min", "1min") to bar counts.
+            Example: {"5min": 40, "1min": 200}
+    timeframe : str, optional
+        Timeframe string (e.g. "5min", "1min"). Required when lookback_bars is a dict.
     """
 
     def __init__(
         self,
         normalize_observations: bool = False,
         clip_value: float = 10.0,
-        lookback_bars: int = 20,
+        lookback_bars: int | dict = 20,
+        timeframe: str = "5min",
         max_zone_age_bars: int = 300,
         max_zone_pts: float = 10.0,
         min_zone_pts: float = 1.0,
+        sweep_decay_bars: int = 40,
     ) -> None:
         self.normalize_observations = normalize_observations
         self.clip_value = clip_value
-        self.price_history_len = lookback_bars
+        self.timeframe = timeframe
+        self._sweep_decay_bars = float(sweep_decay_bars)
+
+        # Resolve lookback_bars based on timeframe
+        if isinstance(lookback_bars, dict):
+            if timeframe not in lookback_bars and "5min" not in lookback_bars:
+                raise ValueError(
+                    f"lookback_bars dict has no entry for timeframe '{timeframe}' or fallback '5min'. "
+                    f"Available keys: {list(lookback_bars.keys())}"
+                )
+            self.price_history_len = lookback_bars.get(timeframe, lookback_bars.get("5min", 20))
+        else:
+            self.price_history_len = int(lookback_bars)
+
         self._max_zone_age = float(max_zone_age_bars)
         self._max_zone_pts = float(max_zone_pts)
         self._min_zone_pts = float(min_zone_pts)
@@ -234,12 +256,14 @@ class ObservationBuilder:
                 return 1.0
             return float(np.clip((current_idx - z.bar_formed_idx) / _max_zone_age, 0.0, 1.0))
 
+        _decay = self._sweep_decay_bars
+
         def _sweep_weight(z, current_idx: int) -> float:
-            """Sweep recency weight: 1.0 = just swept, decays to 0.0 over _SWEEP_DECAY_BARS."""
+            """Sweep recency weight: 1.0 = just swept, decays to 0.0 over sweep_decay_bars."""
             if z is None or not z.is_valid or not z.was_swept:
                 return 0.0
             bars_since = current_idx - z.bar_formed_idx
-            return float(max(0.0, 1.0 - bars_since / _SWEEP_DECAY_BARS))
+            return float(max(0.0, 1.0 - bars_since / _decay))
 
         features.extend([
             _dist_norm(supply),

@@ -22,7 +22,7 @@ take_profit:
   swing_multiplier: 0.6         # use 60% of swing-high/low distance as TP (encourages more TP hits)
 
 trailing:
-  activate_at_r: 1.0            # activate trailing stop at 1.0R unrealised profit
+  activate_at_r: 1.00           # activate trailing stop at 1.00R unrealised profit
   trail_aggressively_at_r: 3.0   # tighten trail at 4R
   lock_in_r_at_trail: 0.5        # lock in at least 0.5R when trailing activates
 
@@ -45,5 +45,5 @@ session:
 
 scale_out:
   enabled: true
-  at_r: 1.0           # close fraction at this unrealised R (intrabar high/low)
+  at_r: 1.00          # close fraction at this unrealised R (intrabar high/low)
   fraction: 0.5        # fraction of contracts to close (0.5 = half)

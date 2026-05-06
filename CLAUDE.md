@@ -1,55 +1,18 @@
 # Claude Code Instructions — Simple Trader R1
 
-## Session Start
+## Project Overview
 
-At the beginning of every conversation, before doing anything else:
-1. Read `README.md` to understand the current state of the project.
-2. Think Before Coding. Don't assume. Don't hide confusion. Surface tradeoffs.
-3. Before you write the code, plan it out. Explain each step. If something is unclear, ask." This one line doubles the quality of the output. Claude guesses less when he thinks.
-4. Write the tests first. Then write code that passes the tests. Then refactor."
+RL trading agent (RecurrentPPO / LSTM) trained on ES/NQ futures using Stable-Baselines3.
+See README.md for full architecture, file layout, and training pipeline details.
 
-5. Touch only what you must. Clean up only your own mess.
-
-    When editing existing code:
-
-        Don't "improve" adjacent code, comments, or formatting
-        Don't refactor things that aren't broken
-        Match existing style, even if you'd do it differently
-        If you notice unrelated dead code, mention it — don't delete it
-
-
-6. Just the code I asked for. No further explanation, No introduction, or explanation  unless otherwised asked by user.
-
-7. when agents saves models and /or jounalls gets saved the filing and directory system must be clean tidy and intitive - no messy files and folders
-
-## ⚠️ IMPORTANT — For AI Assistants / Low-Context Sessions
-> always start any task by refering or carefully reading readme file.
-
-> **Do NOT remove, rename, or stub out any existing function, class, method, callback,
-> or file unless the user explicitly asks you to delete it.**
-
->work through this systematically, starting with a file-by-file plan. Set up the todo list and start working systematically.
-
-> This codebase is large. If you are running low on context or tokens:
-> - Edit only the specific lines/functions you were asked to change.
-> - Leave all surrounding code untouched.
-> - Do not "clean up" imports, remove unused variables, or refactor adjacent code.
-> - Do not replace working implementations with `pass` or `raise NotImplementedError`.
-> - If unsure whether something is used, assume it IS used and leave it alone.
-> - before you change the code read Readme.md and if you change code update the READme.md for the change that made
-
- > -  work through this systematically, starting with a file-by-file plan. Set up the todo list and start working systematically.  Tidy up the codes without losing functionalities or breaking the codes, make sure the speed and accuracy of the code is achieved - double checks before you go to next part of the code. everything should be clean code, fast  and performance to  highest quality
-
->- make sure you remove the redudant codes, variables and tidy up the code without losing functionalities or breaking the codes.  make sure codes are clean, readable, professional and comply with highest coding standards.
-> - once you review the code, make a note of all the bottleknecks in the codes and let user know the effect of improving on the speed , perforamce and stabilty or anyother metric in the code execution.
->- update the Readme file once finish 
-
->- all python test shall be executed in cmd not Powershell
 ---
 
+## Critical ⚠️ Project Rules — DO NOT CHANGE
 
+**Do NOT remove, rename, or stub out any function, class, method, callback, or file unless explicitly requested.**
+ALWYAS USE CMD instead of PowerShell.
 
-## Critical TP and SL Configuration (⚠️ DO NOT CHANGE)
+### Critical TP and SL Configuration
 
 **Take-Profit and Stop-Loss settings are tightly coupled and must remain synchronized.**
 
@@ -73,13 +36,8 @@ At the beginning of every conversation, before doing anything else:
 
 **Note on swing_multiplier**: Changing it only affects TP distance, NOT entry acceptance (R:R gate uses full swing). Safer to tune TP without destabilizing entry validation.
 
----
-
-## Critical Trade Management Rules (⚠️ DO NOT CHANGE)
-
-These rules are foundational to the agent's risk management and must remain unchanged unless explicitly requested:
-
 ### Conservative Same-Candle Exit Rule
+
 **Location:** `environment/position_manager.py` — `check_exit()` method (lines 440–510)
 
 **Rule:** When a position **enters and exits within the same 5-minute candle**, apply conservative penalties:
@@ -101,8 +59,88 @@ if same_bar_entry and s.target_price > 0:
 
 ---
 
-## Project Overview
+## General Coding Principles
 
-RL trading agent (RecurrentPPO / LSTM) trained on ES/NQ futures using Stable-Baselines3.
-See README.md for full architecture, file layout, and training pipeline details.
-""  https://raw.githubusercontent.com/forrestchang/andrej-karpathy-skills/main/CLAUDE.md 
+These principles directly address common issues with AI-assisted development:
+
+### 1. Think Before Coding
+Don't assume. Don't hide confusion. Surface tradeoffs.
+
+LLMs often pick an interpretation silently and run with it. This principle forces explicit reasoning:
+- State assumptions explicitly — If uncertain, ask rather than guess
+- Present multiple interpretations — Don't pick silently when ambiguity exists
+- Push back when warranted — If a simpler approach exists, say so
+- Stop when confused — Name what's unclear and ask for clarification
+
+### 2. Simplicity First
+Minimum code that solves the problem. Nothing speculative.
+
+Combat the tendency toward overengineering:
+- No features beyond what was asked
+- No abstractions for single-use code
+- No "flexibility" or "configurability" that wasn't requested
+- No error handling for impossible scenarios
+- If 200 lines could be 50, rewrite it
+
+The test: Would a senior engineer say this is overcomplicated? If yes, simplify.
+
+### 3. Surgical Changes
+Touch only what you must. Clean up only your own mess.
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting
+- Don't refactor things that aren't broken
+- Match existing style, even if you'd do it differently
+- **Dead code/unused variables**: Flag them for user review — don't delete without approval
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused
+- Don't remove pre-existing dead code unless asked
+
+The test: Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+Define success criteria. Loop until verified.
+
+Transform imperative tasks into verifiable goals:
+- Instead of "Add validation" → "Write tests for invalid inputs, then make them pass"
+- Instead of "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- Instead of "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+
+---
+
+## Session Start Workflow
+
+At the beginning of every conversation, before doing anything else:
+1. Read `README.md` to understand the current state of the project.
+2. Think before coding — surface assumptions and tradeoffs before implementation.
+3. Plan systematically — set up a todo list and work file-by-file.
+4. Make surgical edits only — change what you're asked to change, match existing style.
+5. No speculative features — just the code requested, nothing more.
+
+## Code Quality & Maintenance
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting
+- Don't refactor things that aren't broken
+- Match existing style, even if you'd do it differently
+- **Dead code/unused variables**: Flag them for user review — don't delete without approval
+
+When low on context:
+- Edit only the specific lines/functions you were asked to change
+- Leave all surrounding code untouched
+- Do not replace working implementations with `pass` or `raise NotImplementedError`
+- If unsure whether something is used, assume it IS used and leave it alone
+
+After changes:
+- Update README.md to reflect what changed
+- Run tests in **cmd** (not PowerShell)
+- Review code for bottlenecks and report performance implications
+
+Model/journal outputs:
+- Maintain clean, tidy, intuitive directory structure — no messy files/folders

@@ -75,7 +75,7 @@ def write_trade_chart(
     dl = DataLoader(
         data_dir=str(data_dir),
         instrument=instrument,
-        intraday_tf=f"{bar_minutes}min",
+        timeframe=f"{bar_minutes}min",
     )
     dl.load()
 
