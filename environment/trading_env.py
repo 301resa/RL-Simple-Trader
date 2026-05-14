@@ -516,6 +516,10 @@ class TradingEnv(gym.Env):
         portfolio_state = self.position_manager.get_portfolio_state(current_price)
         is_open = self.position_manager.state.is_open
         mask = self._compute_action_mask(atr_state, portfolio_state=portfolio_state)
+        entry_is_masked = (
+            mask[Action.ENTER_LONG] < 0.5
+            and mask[Action.ENTER_SHORT] < 0.5
+        )
         masked_action_penalty = 0.0
         if mask[action] == 0.0:
             # Agent chose a masked/invalid action — override to HOLD and penalise.
@@ -535,18 +539,19 @@ class TradingEnv(gym.Env):
         if is_open and unrealised_r > self._peak_unrealised_r:
             self._peak_unrealised_r = unrealised_r
 
+        order_placed = False
         if action == Action.ENTER_SHORT:
             # Replacement policy lives inside _place_pending_order: a new order at
             # the same direction + same limit price as the existing pending is
             # rejected (preserving the original placed_bar_idx / expiry timer);
             # a new order in a different direction or at a different price
             # overwrites.  If no valid zone exists, the existing pending is kept.
-            self._place_pending_order(
+            order_placed = self._place_pending_order(
                 direction=-1, current_price=current_price, atr_state=atr_state,
                 current_high=current_high, current_low=current_low,
             )
         elif action == Action.ENTER_LONG:
-            self._place_pending_order(
+            order_placed = self._place_pending_order(
                 direction=1, current_price=current_price, atr_state=atr_state,
                 current_high=current_high, current_low=current_low,
             )
@@ -597,8 +602,11 @@ class TradingEnv(gym.Env):
                 atr_state=atr_state,
                 order_zone_state=order_zone_state,
                 portfolio_state=portfolio_state,
+                min_rr_ratio=self.order_zone_engine.min_rr_ratio,
                 pending_order=self._pending_order,
                 bars_in_trade=bars_in_trade,
+                order_placed=order_placed,
+                entry_is_masked=entry_is_masked,
             )
 
         # ── Check termination conditions ──────────────────────
@@ -863,7 +871,7 @@ class TradingEnv(gym.Env):
         atr_state: ATRState,
         current_high: float = 0.0,
         current_low: float = 0.0,
-    ) -> None:
+    ) -> bool:
         """
         Compute limit price (near zone edge), stop (beyond far edge), target,
         and store a pending limit order.
@@ -904,10 +912,10 @@ class TradingEnv(gym.Env):
             w = zone.top - zone.bottom
             if not zone.was_swept:
                 log.debug("Pending order skipped — supply zone not yet swept")
-                return
+                return False
             if w < min_zone_pts or w > max_zone_pts:
                 log.debug("Pending order skipped — supply zone width out of range", width=round(w, 2))
-                return
+                return False
             # ── 50% midpoint guard (SHORT) ─────────────────────────────────────
             # If the current bar high is above the zone midpoint, the candle cut
             # through the upper half of the supply zone — entry is invalid.
@@ -916,7 +924,7 @@ class TradingEnv(gym.Env):
                     "Pending order skipped — bar high above supply zone midpoint",
                     bar_high=current_high, zone_midpoint=round(zone.midpoint, 2),
                 )
-                return
+                return False
             zone_width_pts = w
             limit_price  = zone.bottom                 # near edge
             stop_price   = zone.top + stop_buffer      # beyond far edge
@@ -928,10 +936,10 @@ class TradingEnv(gym.Env):
             w = zone.top - zone.bottom
             if not zone.was_swept:
                 log.debug("Pending order skipped — demand zone not yet swept")
-                return
+                return False
             if w < min_zone_pts or w > max_zone_pts:
                 log.debug("Pending order skipped — demand zone width out of range", width=round(w, 2))
-                return
+                return False
             # ── 50% midpoint guard (LONG) ──────────────────────────────────────
             # If the current bar low is below the zone midpoint, the candle cut
             # through the lower half of the demand zone — entry is invalid.
@@ -940,7 +948,7 @@ class TradingEnv(gym.Env):
                     "Pending order skipped — bar low below demand zone midpoint",
                     bar_low=current_low, zone_midpoint=round(zone.midpoint, 2),
                 )
-                return
+                return False
             zone_width_pts = w
             limit_price  = zone.top                    # near edge
             stop_price   = zone.bottom - stop_buffer   # beyond far edge
@@ -956,7 +964,7 @@ class TradingEnv(gym.Env):
                 "Pending order skipped — no valid zone for direction",
                 direction="LONG" if direction == 1 else "SHORT",
             )
-            return
+            return False
 
         # ── R:R guard — hard minimum from risk_config.yaml ───────────────────
         # IMPORTANT: R:R gate uses the FULL swing distance (no swing_multiplier),
@@ -984,7 +992,7 @@ class TradingEnv(gym.Env):
                 min_rr=_min_rr,
                 direction="LONG" if direction == 1 else "SHORT",
             )
-            return
+            return False
 
         # ── Duplicate guard ───────────────────────────────────────────────────
         # Never stack two pending orders at the same spot.  If an existing pending
@@ -1002,7 +1010,7 @@ class TradingEnv(gym.Env):
                 limit_price=limit_price,
                 existing_placed_bar_idx=existing["placed_bar_idx"],
             )
-            return
+            return False
 
         self._pending_order = {
             "direction":       direction,
@@ -1019,6 +1027,7 @@ class TradingEnv(gym.Env):
             direction="LONG" if direction == 1 else "SHORT",
             limit_price=limit_price,
         )
+        return True
 
     def _check_pending_fill(self, bar_high: float, bar_low: float) -> bool:
         """Return True if the current bar's range contains the pending limit price.
@@ -1315,15 +1324,18 @@ class TradingEnv(gym.Env):
         win_loss_ratio  = n_wins / max(n_losses, 1)           # count ratio (matches eval_callback)
         expected_return = win_rate * avg_win_r - (1.0 - win_rate) * avg_loss_r
 
-        # ── Sharpe (annualised, from per-trade returns) ───────
-        # Formula: (mean_r / std_r) × √252  — same annualisation
-        # used by the eval callback and V7 reference code.
+        # ── Sharpe (intra-episode, NOT annualised) ────────────
+        # Single-episode Sharpe uses raw mean/std with NO √252 factor.
+        # Annualising within one day is meaningless: 3–10 trades all near
+        # 0.5R produces std≈0 → Sharpe→∞.  The cross-episode annualised
+        # Sharpe is computed by metrics_calculator.py and
+        # trading_eval_callback.py, which have the required N.
         # Require ≥5 trades; clamp to [-9.99, 9.99] for column display.
         if n_trades >= 5:
             tr  = np.array([t.pnl_r for t in trades], dtype=np.float32)
             std = float(np.std(tr))
             raw = np.mean(tr) / std if std > 0.01 else 0.0
-            sharpe_ratio = float(np.clip(raw * np.sqrt(252), -9.99, 9.99))
+            sharpe_ratio = float(np.clip(raw, -9.99, 9.99))
         else:
             sharpe_ratio = 0.0
 
@@ -1426,8 +1438,10 @@ class TradingEnv(gym.Env):
             "eth_wins":                eth_wins_n,
             # Individual trade records (plain dicts — safe across SubprocVecEnv)
             "trades_list": [
-                {
+                (lambda i, t: {
                     "date":           self._current_day,
+                    "entry_date":     self._session_bars.index[t.entry_bar_idx].strftime("%Y-%m-%d") if t.entry_bar_idx < len(self._session_bars) else "",
+                    "exit_date":      self._session_bars.index[t.exit_bar_idx].strftime("%Y-%m-%d") if t.exit_bar_idx < len(self._session_bars) else "",
                     "direction":      t.direction.name,
                     "entry_price":    round(t.entry_price,    2),
                     "stop_price":     round(t.stop_price,     2),
@@ -1439,12 +1453,8 @@ class TradingEnv(gym.Env):
                     "n_contracts":    t.n_contracts,
                     "entry_bar_idx":  t.entry_bar_idx,
                     "exit_bar_idx":   t.exit_bar_idx,
-                    "entry_time":     self._session_bars.index[
-                                          min(t.entry_bar_idx, len(self._session_bars) - 1)
-                                      ].isoformat(),
-                    "exit_time":      self._session_bars.index[
-                                          min(t.exit_bar_idx, len(self._session_bars) - 1)
-                                      ].isoformat(),
+                    "entry_time":     self._session_bars.index[t.entry_bar_idx].isoformat() if t.entry_bar_idx < len(self._session_bars) else "",
+                    "exit_time":      self._session_bars.index[t.exit_bar_idx].isoformat() if t.exit_bar_idx < len(self._session_bars) else "",
                     "duration_bars":  t.duration_bars,
                     "duration_min":   t.duration_bars * self.bar_minutes,
                     "exit_reason":    t.exit_reason.value,
@@ -1452,7 +1462,8 @@ class TradingEnv(gym.Env):
                     "is_rth":         _trade_is_rth[i],
                     "mae_r":          round(t.max_adverse_excursion, 4),
                     "mfe_r":          round(getattr(t, "max_favorable_excursion", 0.0), 4),
-                }
+                    "trailing_stop_price": round(t.trailing_stop_price, 2),
+                })(i, t)
                 for i, t in enumerate(trades)
             ],
         }

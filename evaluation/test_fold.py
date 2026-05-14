@@ -42,6 +42,9 @@ try:
 except ImportError:
     PLOTLY_OK = False
 
+# Per-trade chart builder
+from .test_fold_trade_chart import _build_trade_chart
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -388,9 +391,13 @@ def _merge_scale_out_trades(trades: List[dict]) -> List[dict]:
         scale_outs = [t for t in group if t.get("exit_reason") == "scale_out"]
         finals     = [t for t in group if t.get("exit_reason") != "scale_out"]
 
-        if not scale_outs or not finals:
-            # No scale_out pair — keep as-is
-            merged.extend(group)
+        if not scale_outs:
+            # No scale_out — keep finals as-is
+            merged.extend(finals)
+            continue
+
+        if not finals:
+            # Orphaned scale_out(s) with no final close — skip them
             continue
 
         # Merge all legs into one record based on the final (non-scale_out) close
@@ -675,222 +682,76 @@ def _build_journal(
     ------
     1. Header — model name + test period
     2. Metrics card — all trading metrics in styled tiles
-    3. Candlestick chart — full test period bars with entry/exit/SL/TP overlays
-    4. Equity curve + drawdown chart
-    5. Trade-by-trade table — sortable, win/loss colour coded
+    3. Per-Trade PnL (R) chart, Per-Trade PnL ($) chart, Cumulative PnL (R), Max Drawdown ($)
+    4. Trade-by-trade table — clickable trade # links to per-trade OHLC charts
     """
     if not PLOTLY_OK:
         return
 
     trades = _resolve_trade_times(trades, data_loader)
 
-    # ── Load all bars for the test period ─────────────────────────────────────
-    bars_list = []
-    test_days_loaded = []
-    for d in test_days:
-        try:
-            db = data_loader.get_day_bars(d)
-            if db is not None and not db.empty:
-                bars_list.append(db)
-                test_days_loaded.append(d)
-        except Exception:
-            pass
-
-    has_bars = bool(bars_list)
-    tick_vals = []
-    tick_text = []
-
-    if has_bars:
-        # Build day-offset map: date → first global bar index for that day
-        day_offset_map: dict = {}
-        day_bar_lens: dict = {}
-        offset = 0
-        for d, db in zip(test_days_loaded, bars_list):
-            day_offset_map[d] = offset
-            day_bar_lens[d] = len(db)
-            offset += len(db)
-
-        all_bars = pd.concat(bars_list).sort_index().reset_index()
-        time_col = all_bars.columns[0]
-        all_bars["bar_idx"] = range(len(all_bars))  # sequential integer index
-
-        # Build date tick labels at day boundaries
-        seen_dates = set()
-        for i, row in all_bars.iterrows():
-            date_str = str(row[time_col])[:10]  # "YYYY-MM-DD"
-            if date_str not in seen_dates:
-                seen_dates.add(date_str)
-                tick_vals.append(int(row["bar_idx"]))
-                tick_text.append(date_str[5:])  # "MM-DD" for compact labels
-
-        # Compute global bar indices for each trade
-        for t in trades:
-            date = t["date"]
-            if date in day_offset_map:
-                off = day_offset_map[date]
-                n = day_bar_lens[date]
-                t["entry_bar_global"] = off + min(int(t.get("entry_bar_idx", 0)), n - 1)
-                t["exit_bar_global"] = off + min(int(t.get("exit_bar_idx", 0)), n - 1)
-            else:
-                # Fallback if date not in loaded bars
-                t["entry_bar_global"] = 0
-                t["exit_bar_global"] = 0
-
-    # ── Build candlestick + PnL chart ─────────────────────────────────────────
-    # Rows 2 & 3 use trade-index x-axis (not shared) so bars always fill width
+    # ── Build PnL charts (no candlestick row) ─────────────────────────────────
+    # All use trade-index x-axis so bars always fill width
     fig = make_subplots(
-        rows=3, cols=1,
+        rows=4, cols=1,
         shared_xaxes=False,
-        row_heights=[0.55, 0.22, 0.23],
-        vertical_spacing=0.05,
-        subplot_titles=["Price & Trades", "Per-Trade PnL (R)", "Cumulative PnL (R)"],
+        row_heights=[0.25, 0.25, 0.25, 0.25],
+        vertical_spacing=0.06,
+        subplot_titles=["Per-Trade PnL (R)", "Per-Trade PnL ($)", "Cumulative PnL (R)", "Cumulative Drawdown ($)"],
     )
 
-    if has_bars:
-        fig.add_trace(
-            go.Candlestick(
-                x=all_bars["bar_idx"],  # use continuous integer bar index, not datetime
-                open=all_bars["open"],
-                high=all_bars["high"],
-                low=all_bars["low"],
-                close=all_bars["close"],
-                name="Price",
-                increasing_line_color="#26a69a",
-                decreasing_line_color="#ef5350",
-                showlegend=False,
-            ),
-            row=1, col=1,
-        )
+    # ── Compute PnL values (skip scale-outs) ───────────────────────────────────
+    pnl_vals = [t["pnl_r"] for t in trades if t.get("exit_reason") != "scale_out"]
 
-    # ── Trade overlays ────────────────────────────────────────────────────────
-    pnl_times: list = []
-    pnl_vals:  List[float] = []
-
-    for t in trades:
-        is_long     = t["direction"].upper() == "LONG"
-        is_win      = t["is_win"]
-        is_scale_out = t.get("exit_reason") == "scale_out"
-        entry_px    = t["entry_price"]
-        stop_px     = t["stop_price"]
-        tgt_px      = t["initial_target"]
-        exit_px     = t["exit_price"]
-        pnl_r       = t["pnl_r"]
-        entry_time  = t["entry_time"]
-        exit_time   = t["exit_time"]
-        reason      = t.get("exit_reason", "")
-        dur_min     = t.get("duration_min", 0)
-        contracts   = t.get("n_contracts", 1)
-        pnl_pts     = t.get("pnl_points", 0.0)
-
-        if is_scale_out:
-            # Scale-out partial: render as a single orange diamond at exit price/time.
-            # No entry marker, no SL/TP lines — this is a mid-trade partial exit.
-            exit_bar = t.get("exit_bar_global", 0)
-            fig.add_trace(go.Scatter(
-                x=[exit_bar], y=[exit_px], mode="markers",
-                marker=dict(symbol="diamond", color="#FFA726", size=10,
-                            line=dict(width=1, color="white")),
-                showlegend=False,
-                hovertemplate=(
-                    f"<b>⚡ Scale Out</b><br>"
-                    f"Time : {exit_time}<br>"
-                    f"Price: {exit_px}<br>"
-                    f"Lots : {contracts}<br>"
-                    f"PnL  : {pnl_r:+.2f}R<extra></extra>"
-                ),
-            ), row=1, col=1)
-            pnl_times.append(exit_time)
-            pnl_vals.append(pnl_r)
-            continue  # skip entry marker / SL-TP lines for partial exits
-
-        entry_sym = "triangle-up"   if is_long else "triangle-down"
-        entry_col = "#2196F3"
-        exit_col  = "#26a69a"       if is_win  else "#ef5350"
-
-        entry_bar = t.get("entry_bar_global", 0)
-        exit_bar = t.get("exit_bar_global", 0)
-
-        hover_entry = (
-            f"<b>{'LONG ▲' if is_long else 'SHORT ▼'} Entry</b><br>"
-            f"Time : {entry_time}<br>"
-            f"Price: {entry_px}<br>"
-            f"SL   : {stop_px}<br>"
-            f"TP   : {tgt_px}<br>"
-            f"Lots : {contracts}<br>"
-            f"PnL  : {pnl_r:+.2f}R  ({pnl_pts:+.2f} pts)<extra></extra>"
-        )
-        hover_exit = (
-            f"<b>Exit — {reason}</b><br>"
-            f"Time : {exit_time}<br>"
-            f"Price: {exit_px}<br>"
-            f"PnL  : {pnl_r:+.2f}R<br>"
-            f"Dur  : {dur_min} min<extra></extra>"
-        )
-
-        # Entry marker
-        fig.add_trace(go.Scatter(
-            x=[entry_bar], y=[entry_px], mode="markers",
-            marker=dict(symbol=entry_sym, color=entry_col, size=13,
-                        line=dict(width=1, color="white")),
-            showlegend=False, hovertemplate=hover_entry,
-        ), row=1, col=1)
-
-        # Exit marker
-        fig.add_trace(go.Scatter(
-            x=[exit_bar], y=[exit_px], mode="markers",
-            marker=dict(symbol="x", color=exit_col, size=11,
-                        line=dict(width=2, color=exit_col)),
-            showlegend=False, hovertemplate=hover_exit,
-        ), row=1, col=1)
-
-        # Entry→exit connector (thin white dashed line)
-        fig.add_trace(go.Scatter(
-            x=[entry_bar, exit_bar], y=[entry_px, exit_px],
-            mode="lines",
-            line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dot"),
-            showlegend=False, hoverinfo="skip",
-        ), row=1, col=1)
-
-        # SL line (solid red, entry→exit)
-        fig.add_trace(go.Scatter(
-            x=[entry_bar, exit_bar], y=[stop_px, stop_px],
-            mode="lines",
-            line=dict(color="rgba(239,83,80,0.80)", width=1.5, dash="dash"),
-            showlegend=False,
-            hovertemplate=f"<b>Stop Loss</b>: {stop_px}<extra></extra>",
-        ), row=1, col=1)
-
-        # TP line (solid green, entry→exit)
-        fig.add_trace(go.Scatter(
-            x=[entry_bar, exit_bar], y=[tgt_px, tgt_px],
-            mode="lines",
-            line=dict(color="rgba(38,166,154,0.80)", width=1.5, dash="dash"),
-            showlegend=False,
-            hovertemplate=f"<b>Take Profit</b>: {tgt_px}<extra></extra>",
-        ), row=1, col=1)
-
-        pnl_times.append(exit_time)
-        pnl_vals.append(pnl_r)
-
-    # Trade index x-axis for bottom chart so bars always fill the width
+    # Trade index x-axis for bottom charts so bars always fill width
     trade_idx  = list(range(1, len(pnl_vals) + 1))
+
+    # Compute PnL values in dollars
+    pnl_dollars = [t.get("pnl_dollars", 0.0) for t in trades if t.get("exit_reason") != "scale_out"]
+
     cum_pnl    = list(np.cumsum(pnl_vals)) if pnl_vals else []
+    cum_dollars = list(np.cumsum(pnl_dollars)) if pnl_dollars else []
+
     bar_colors = ["#26a69a" if v >= 0 else "#ef5350" for v in pnl_vals]
+    bar_colors_dollars = ["#26a69a" if v >= 0 else "#ef5350" for v in pnl_dollars]
+
     cum_color  = "#26a69a" if (cum_pnl[-1] if cum_pnl else 0) >= 0 else "#ef5350"
 
-    # Per-trade PnL bars — row 2
+    # Compute max drawdown in dollars
+    peak = 0.0
+    drawdown_dollars = []
+    for v in cum_dollars:
+        if v > peak:
+            peak = v
+        drawdown_dollars.append(v - peak)
+
+    dd_color = "#ef5350"  # Always red for drawdown (negative values)
+
+    # Row 1: Per-trade PnL in R (bar chart)
     fig.add_trace(go.Bar(
         x=trade_idx,
         y=pnl_vals,
         marker_color=bar_colors,
         marker_line_width=0,
-        name="Trade PnL",
+        name="Trade PnL (R)",
         showlegend=False,
         hovertemplate="Trade #%{x}<br>PnL: %{y:+.2f}R<extra></extra>",
+    ), row=1, col=1)
+    fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dash"), row=1, col=1)
+
+    # Row 2: Per-trade PnL in $ (bar chart)
+    fig.add_trace(go.Bar(
+        x=trade_idx,
+        y=pnl_dollars,
+        marker_color=bar_colors_dollars,
+        marker_line_width=0,
+        name="Trade PnL ($)",
+        showlegend=False,
+        hovertemplate="Trade #%{x}<br>PnL: ${y:+.0f}<extra></extra>",
     ), row=2, col=1)
     fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dash"), row=2, col=1)
 
-    # Cumulative PnL line — row 3
+    # Row 3: Cumulative PnL in R (line chart)
     fig.add_trace(go.Scatter(
         x=trade_idx,
         y=cum_pnl,
@@ -898,32 +759,43 @@ def _build_journal(
         line=dict(color=cum_color, width=2),
         fill="tozeroy",
         fillcolor="rgba(38,166,154,0.12)" if cum_color == "#26a69a" else "rgba(239,83,80,0.12)",
-        name="Cumulative PnL",
+        name="Cumulative PnL (R)",
         showlegend=False,
         hovertemplate="Trade #%{x}<br>Cumulative: %{y:+.2f}R<extra></extra>",
     ), row=3, col=1)
     fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dash"), row=3, col=1)
 
+    # Row 4: Max Drawdown in $ (line chart, filled red)
+    fig.add_trace(go.Scatter(
+        x=trade_idx,
+        y=drawdown_dollars,
+        mode="lines",
+        line=dict(color=dd_color, width=2),
+        fill="tozeroy",
+        fillcolor="rgba(239,83,80,0.12)",
+        name="Max Drawdown ($)",
+        showlegend=False,
+        hovertemplate="Trade #%{x}<br>Drawdown: ${y:+.0f}<extra></extra>",
+    ), row=4, col=1)
+    fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dash"), row=4, col=1)
+
     fig.update_layout(
         template="plotly_dark",
-        height=1050,
+        height=1000,
         dragmode="pan",
-        margin=dict(l=60, r=20, t=40, b=40),
+        margin=dict(l=60, r=20, t=60, b=40),
     )
-    fig.update_yaxes(title_text="Price",              row=1, col=1)
-    fig.update_yaxes(title_text="PnL (R)",            row=2, col=1)
-    fig.update_yaxes(title_text="Cumulative PnL (R)", row=3, col=1)
-    fig.update_xaxes(
-        rangeslider=dict(visible=False),
-        tickvals=tick_vals,
-        ticktext=tick_text,
-        tickangle=-45,
-        row=1, col=1,
-    )
+    fig.update_yaxes(title_text="PnL (R)",              row=1, col=1)
+    fig.update_yaxes(title_text="PnL ($)",              row=2, col=1)
+    fig.update_yaxes(title_text="Cumulative (R)",       row=3, col=1)
+    fig.update_yaxes(title_text="Drawdown ($)",         row=4, col=1)
+
+    fig.update_xaxes(rangeslider=dict(visible=False), row=1, col=1)
     fig.update_xaxes(rangeslider=dict(visible=False), row=2, col=1)
+    fig.update_xaxes(rangeslider=dict(visible=False), row=3, col=1)
     fig.update_xaxes(title_text="Trade #",
                      rangeslider=dict(visible=True, thickness=0.04, bgcolor="#1e222d"),
-                     row=3, col=1)
+                     row=4, col=1)
 
     chart_html = fig.to_html(
         full_html=False,
@@ -979,19 +851,28 @@ def _build_journal(
     if scale_out_count:
         table_caption += f" + {scale_out_count} scale-out partials (⚡ orange rows)"
 
+    # Build trade rows with trade numbers (non-scale-outs only)
     rows_html = ""
-    for i, t in enumerate(sorted(trades, key=lambda x: x["entry_time"]), 1):
+    trade_num = 0
+    ckpt_stem = out_path.stem  # e.g. "best_model_2026-03-01_2026-04-09"
+
+    for t in sorted(trades, key=lambda x: x["entry_time"]):
         is_scale_out = t.get("exit_reason") == "scale_out"
+
         if is_scale_out:
             cls = "scaleout-row"
             dir_label = f"⚡ {'▲' if t['direction'].upper()=='LONG' else '▼'} SO"
+            trade_num_str = "—"  # No trade number for scale-outs
         else:
+            trade_num += 1
             cls = "win-row" if t["is_win"] else "loss-row"
             dir_label = "▲ LONG" if t["direction"].upper() == "LONG" else "▼ SHORT"
+            trade_num_str = f'<a href="{ckpt_stem}/trades/T{trade_num}.html" target="_blank" style="color:#90CAF9">{trade_num}</a>'
+
         pnl_cls = "pos" if t["pnl_r"] >= 0 else "neg"
         rows_html += (
             f'<tr class="{cls}">'
-            f'<td>{i}</td>'
+            f'<td>{trade_num_str}</td>'
             f'<td>{t["date"]}</td>'
             f'<td>{dir_label}</td>'
             f'<td>{t["entry_time"][11:16] if len(t["entry_time"]) > 10 else t["entry_time"]}</td>'
@@ -1070,6 +951,27 @@ def _build_journal(
 </html>"""
 
     out_path.write_text(html, encoding="utf-8")
+
+    # ── Generate per-trade OHLC charts ────────────────────────────────────────
+    trades_dir = out_path.parent / ckpt_stem / "trades"
+    trade_num = 0
+    charts_generated = 0
+    charts_failed = 0
+
+    for t in sorted(trades, key=lambda x: x["entry_time"]):
+        if t.get("exit_reason") == "scale_out":
+            continue  # Skip scale-outs
+
+        trade_num += 1
+        try:
+            _build_trade_chart(t, data_loader, trades_dir / f"T{trade_num}.html", trade_num)
+            charts_generated += 1
+        except Exception as e:
+            charts_failed += 1
+            pass  # Non-fatal - continue generating remaining charts
+
+    if charts_generated > 0:
+        print(f"  Per-trade charts → {trades_dir} ({charts_generated} files)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1652,6 +1554,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(_header_row())
     print(sep)
 
+    _eval_cfg = agent_cfg.get("evaluation", {})
+
     for ckpt in checkpoints:
         name = _checkpoint_base(ckpt)
         vn   = _vecnorm_path(ckpt)
@@ -1675,7 +1579,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         trades = _merge_scale_out_trades(trades)
 
         m     = _compute_metrics(trades, episodes)
-        score = _composite(m)
+        score = _composite(m,
+            w_sharpe=_eval_cfg.get("w_sharpe", 0.30),
+            w_pnl=   _eval_cfg.get("w_pnl",    0.30),
+            w_wl=    _eval_cfg.get("w_wl",     0.20),
+            w_dd=    _eval_cfg.get("w_dd",     0.20),
+        )
 
         n_tr = m.get("n_trades", 0)
         print(f"     done — {n_tr} trade(s)")
@@ -1758,7 +1667,12 @@ def main(argv: Optional[List[str]] = None) -> None:
 
         if ens_trades or ens_episodes:
             em     = _compute_metrics(ens_trades, ens_episodes)
-            escore = _composite(em)
+            escore = _composite(em,
+                w_sharpe=_eval_cfg.get("w_sharpe", 0.30),
+                w_pnl=   _eval_cfg.get("w_pnl",    0.30),
+                w_wl=    _eval_cfg.get("w_wl",     0.20),
+                w_dd=    _eval_cfg.get("w_dd",     0.20),
+            )
             ens_name = f"ensemble_top{ensemble_top_k}"
 
             print(f"\n  Ensemble result ({ens_name}):")

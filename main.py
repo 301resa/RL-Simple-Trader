@@ -300,18 +300,8 @@ def build_components(
         sweep_decay_bars=_sweep_decay,
     )
 
-    # ── Observation Builder ───────────────────────────────────
+    # ── Observation Builder (constructed per-env to avoid shared state) ───────
     obs_cfg = env_cfg.get("observation", {})
-    observation_builder = ObservationBuilder(
-        clip_value=obs_cfg.get("clip_observations", 10.0),
-        normalize_observations=obs_cfg.get("normalize_observations", True),
-        lookback_bars=obs_cfg.get("lookback_bars", 20),
-        timeframe=timeframe,
-        max_zone_age_bars=_scale_bars(zones_cfg.get("max_zone_age_bars", 300), _bm),
-        max_zone_pts=instrument_profile.max_zone_pts,
-        min_zone_pts=instrument_profile.min_zone_pts,
-        sweep_decay_bars=_sweep_decay,
-    )
 
     # ── Action Masker ─────────────────────────────────────────
     atr_gate_cfg = risk_cfg.get("atr_gate", {})
@@ -332,7 +322,7 @@ def build_components(
     account_cfg = env_cfg.get("account", {})
     sizing_cfg = risk_cfg.get("sizing", {})
     trail_cfg = risk_cfg.get("trailing", {})
-    real_capital = float(account_cfg.get("initial_balance", 2500))
+    real_capital = float(account_cfg.get("initial_balance", 100000))
     point_value = instrument_profile.point_value
     _scale_out_cfg = risk_cfg.get("scale_out", {})
 
@@ -391,12 +381,22 @@ def build_components(
             max_jitter_pts=instrument_profile.jitter_pts,
             trend_scale=float(aug_cfg.get("trend_scale",    0.15)),
         )
+        _obs_builder = ObservationBuilder(
+            clip_value=obs_cfg.get("clip_observations", 10.0),
+            normalize_observations=obs_cfg.get("normalize_observations", True),
+            lookback_bars=obs_cfg.get("lookback_bars", 20),
+            timeframe=timeframe,
+            max_zone_age_bars=_scale_bars(zones_cfg.get("max_zone_age_bars", 300), _bm),
+            max_zone_pts=instrument_profile.max_zone_pts,
+            min_zone_pts=instrument_profile.min_zone_pts,
+            sweep_decay_bars=_sweep_decay,
+        )
         return TradingEnv(
             data_loader=data_loader,
             trading_days=day_list,
             position_manager=make_position_manager(),
             reward_calculator=reward_calculator,
-            observation_builder=observation_builder,
+            observation_builder=_obs_builder,
             atr_calculator=atr_calculator,
             zone_detector=ZoneDetector(
                 **{k: (_scale_bars(zones_cfg.get(k, v), bar_minutes)
@@ -622,7 +622,7 @@ def run_train(args: argparse.Namespace, configs: dict) -> None:
         ortho_init=net_cfg.get("ortho_init", True),
         device=agent_cfg.get("device", "auto"),
         seed=agent_cfg.get("seed", 42),
-        tensorboard_log=str(log_dir / "tensorboard"),
+        tensorboard_log=None if getattr(args, "no_tensorboard", False) else str(log_dir / "tensorboard"),
     )
 
     if args.checkpoint:
@@ -856,7 +856,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
     # CLI --val-weeks overrides config when explicitly passed; otherwise config wins.
     _cli_val_weeks = getattr(args, "val_weeks", None)
     n_val_days = (_cli_val_weeks if _cli_val_weeks is not None else val_weeks) * 5
-    output_root    = Path(wf_cfg.get("output_dir", "logs/walk_forward")).resolve()
+    output_root    = Path(wf_cfg.get("output_dir", "Log/walk_forward")).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
     # ── Common infrastructure (shared across folds) ────────────
@@ -952,7 +952,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         )
 
     # ── Shared component factories ────────────────────────────
-    real_capital = float(account_cfg.get("initial_balance", 2500))
+    real_capital = float(account_cfg.get("initial_balance", 100000))
     point_value  = instrument_profile.point_value
     session_start= session_cfg.get("rth_start_utc", "08:30")
     session_end  = session_cfg.get("rth_end_utc",   "15:00")
@@ -978,16 +978,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
         fallback_stop_pts=instrument_profile.fallback_stop_pts,
         sweep_decay_bars=_sweep_decay,
     )
-    observation_builder = ObservationBuilder(
-        clip_value=obs_cfg.get("clip_observations", 10.0),
-        normalize_observations=obs_cfg.get("normalize_observations", True),
-        lookback_bars=obs_cfg.get("lookback_bars", 20),
-        timeframe=_wf_timeframe,
-        max_zone_age_bars=_scale_bars(zones_cfg.get("max_zone_age_bars", 300), bar_minutes),
-        max_zone_pts=instrument_profile.max_zone_pts,
-        min_zone_pts=instrument_profile.min_zone_pts,
-        sweep_decay_bars=_sweep_decay,
-    )
+    # ObservationBuilder constructed per-env to avoid shared state in DummyVecEnv
     _tm_cfg_wf = reward_cfg.get("time_management", {})
     action_masker = ActionMasker(
         atr_exhaustion_threshold=atr_gate_cfg.get("block_entries_above_pct", 0.95),
@@ -1037,12 +1028,22 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             max_jitter_pts=instrument_profile.jitter_pts,
             trend_scale=float(aug_cfg.get("trend_scale", 0.15)),
         )
+        _obs_builder = ObservationBuilder(
+            clip_value=obs_cfg.get("clip_observations", 10.0),
+            normalize_observations=obs_cfg.get("normalize_observations", True),
+            lookback_bars=obs_cfg.get("lookback_bars", 20),
+            timeframe=_wf_timeframe,
+            max_zone_age_bars=_scale_bars(zones_cfg.get("max_zone_age_bars", 300), bar_minutes),
+            max_zone_pts=instrument_profile.max_zone_pts,
+            min_zone_pts=instrument_profile.min_zone_pts,
+            sweep_decay_bars=_sweep_decay,
+        )
         return TradingEnv(
             data_loader=data_loader,
             trading_days=day_list,
             position_manager=make_position_manager(),
             reward_calculator=reward_calculator,
-            observation_builder=observation_builder,
+            observation_builder=_obs_builder,
             atr_calculator=atr_calculator,
             zone_detector=ZoneDetector(
                 **{k: (_scale_bars(zones_cfg.get(k, v), bar_minutes)
@@ -1146,7 +1147,7 @@ def run_walk_forward(args: argparse.Namespace, configs: dict) -> None:
             ortho_init=net_cfg.get("ortho_init", True),
             device=agent_cfg.get("device", "auto"),
             seed=agent_cfg.get("seed", 42) + fold_id,
-            tensorboard_log=str(fold_dir / "tensorboard"),
+            tensorboard_log=None if getattr(args, "no_tensorboard", False) else str(fold_dir / "tensorboard"),
         )
 
         # ── Fold journal callback ──────────────────────────────
@@ -1294,7 +1295,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["train", "evaluate", "analyse", "walk_forward", "test_fold"],
+        choices=["train", "evaluate", "analyse", "walk_forward", "test_fold", "zone_test"],
         required=True,
         help="Operation mode.",
     )
@@ -1315,8 +1316,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--log-dir",
-        default="logs/",
-        help="Directory for logs, checkpoints, journal. Default: logs/",
+        default="Log/",
+        help="Directory for logs, checkpoints, journal. Default: Log/",
     )
     parser.add_argument(
         "--journal",
@@ -1388,6 +1389,39 @@ def parse_args() -> argparse.Namespace:
         dest="n_episodes",
         help="(test_fold) Episodes per checkpoint. 0 = run every test day once.",
     )
+    parser.add_argument(
+        "--no-tensorboard",
+        action="store_true",
+        dest="no_tensorboard",
+        help="Disable TensorBoard logging. Use when logs/ is inside OneDrive to prevent mid-training crashes.",
+    )
+    # ── zone_test mode args ───────────────────────────────────────────────────
+    parser.add_argument(
+        "--csv",
+        default=None,
+        help="(zone_test) CSV file to analyse (e.g., data/ES_5min_April26_test.csv).",
+    )
+    parser.add_argument(
+        "--out",
+        default="Log/zone_verify.html",
+        help="(zone_test) Output HTML file path. Default: Log/zone_verify.html",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=3,
+        help="(zone_test) Number of trading days to display. Default: 3",
+    )
+    parser.add_argument(
+        "--instrument",
+        default="NQ",
+        help="(zone_test) Instrument (NQ, ES, MNQ, MES). Default: NQ. Ignored if --csv is provided.",
+    )
+    parser.add_argument(
+        "--timeframe",
+        default="1min",
+        help="(zone_test) Timeframe (1min, 5min, etc). Default: 1min. Ignored if --csv is provided.",
+    )
     return parser.parse_args()
 
 
@@ -1444,6 +1478,8 @@ def main() -> None:
         run_walk_forward(args, configs)
     elif args.mode == "test_fold":
         _run_test_fold(args)
+    elif args.mode == "zone_test":
+        _run_zone_test(args)
 
 
 def _run_test_fold(args) -> None:
@@ -1464,6 +1500,17 @@ def _run_test_fold(args) -> None:
     if getattr(args, "out_dir", None):
         argv += ["--out-dir", args.out_dir]
     _tf_main(argv)
+
+
+def _run_zone_test(args) -> None:
+    """Run zone verification test on feather data or CSV."""
+    from test_zone_visualization import run_test
+    csv_path = getattr(args, "csv", None)
+    instrument = getattr(args, "instrument", "NQ")
+    timeframe = getattr(args, "timeframe", "1min")
+    output_path = getattr(args, "out", "Log/zone_verify.html")
+    n_days = getattr(args, "days", 3)
+    run_test(csv_path, output_path, n_days, instrument, timeframe)
 
 
 if __name__ == "__main__":

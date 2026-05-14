@@ -154,7 +154,7 @@ class RewardCalculator:
         self.exit_bonuses = exit_bonuses or {
             "trailing_stop_correctly": 0.30,
             "aggressive_trail_at_4r": 0.20,
-            "tp_hit_bonus": 0.50,
+            "tp_hit_bonus": 0.25,
         }
         self.exit_penalties = exit_penalties or {
             "held_past_4r_no_trail": -0.50,
@@ -185,6 +185,8 @@ class RewardCalculator:
         min_rr_ratio: float = 2.0,
         pending_order: dict | None = None,
         bars_in_trade: int = 0,
+        order_placed: bool = False,
+        entry_is_masked: bool = False,
     ) -> RewardBreakdown:
         """
         Compute the per-step reward (excluding trade close rewards).
@@ -209,6 +211,14 @@ class RewardCalculator:
             not be penalised.
         bars_in_trade : int
             Number of bars the current position has been open (0 when flat).
+        order_placed : bool
+            True only when _place_pending_order() successfully created a new pending
+            order this step.  Entry bonuses (confluence, ATR room, R:R) are gated
+            on this flag so they only fire when a trade was actually set up.
+        entry_is_masked : bool
+            True when both ENTER_LONG and ENTER_SHORT are masked in the current
+            action mask (e.g. loss_streak_pause, end_of_session, min_bars_between_trades).
+            Suppresses hold_flat_penalty — the agent had no valid entry to make.
         """
         reward = 0.0
         entry_bonus = 0.0
@@ -233,7 +243,7 @@ class RewardCalculator:
                 order_zone_state.in_bearish_order_zone
                 or order_zone_state.in_bullish_order_zone
             )
-            if setup_present and pending_order is None:
+            if setup_present and pending_order is None and not entry_is_masked:
                 # Zone is present but agent is doing nothing — penalise inaction
                 step_penalty += self.hold_flat_penalty
                 note += "hold_flat_in_zone "
@@ -291,26 +301,27 @@ class RewardCalculator:
                     entry_penalty += self.entry_penalties["no_zone_present"] * self.shaping_scale
                     note += "no_zone "
             else:
-                # Bonuses for quality setup — NOT scaled by shaping_scale.
-                # Entry quality signals must remain active throughout training so the
-                # agent continues to discriminate high-confluence from low-confluence setups.
-                score = order_zone_state.confluence_score
+                if order_placed:
+                    # Bonuses for quality setup — NOT scaled by shaping_scale.
+                    # Entry quality signals must remain active throughout training so the
+                    # agent continues to discriminate high-confluence from low-confluence setups.
+                    score = order_zone_state.confluence_score
 
-                if score >= 0.85:
-                    entry_bonus += self.entry_bonuses["full_order_zone_confluence"]
-                    note += "full_confluence "
-                else:
-                    if order_zone_state.in_bearish_order_zone or order_zone_state.in_bullish_order_zone:
-                        entry_bonus += self.entry_bonuses["in_supply_demand_zone"]
-                    # Pillar 3 (rejection candle) removed
+                    if score >= 0.85:
+                        entry_bonus += self.entry_bonuses["full_order_zone_confluence"]
+                        note += "full_confluence "
+                    else:
+                        if order_zone_state.in_bearish_order_zone or order_zone_state.in_bullish_order_zone:
+                            entry_bonus += self.entry_bonuses["in_supply_demand_zone"]
+                        # Pillar 3 (rejection candle) removed
 
-                # ATR room bonus: neither direction exhausted = still has room
-                atr_has_room = not atr_state.atr_short_exhausted and not atr_state.atr_long_exhausted
-                if atr_has_room:
-                    entry_bonus += self.entry_bonuses["atr_has_room"]
+                    # ATR room bonus: neither direction exhausted = still has room
+                    atr_has_room = not atr_state.atr_short_exhausted and not atr_state.atr_long_exhausted
+                    if atr_has_room:
+                        entry_bonus += self.entry_bonuses["atr_has_room"]
 
-                if order_zone_state.rr_ratio >= min_rr_ratio:
-                    entry_bonus += self.entry_bonuses["high_rr_ratio"]
+                    if order_zone_state.rr_ratio >= min_rr_ratio:
+                        entry_bonus += self.entry_bonuses["high_rr_ratio"]
 
             # Loss streak discipline — scaled with shaping_scale (lowered penalty, fades as training matures)
             if portfolio_state.get("consecutive_losses", 0) >= self.discipline["loss_streak_threshold"]:
@@ -382,7 +393,7 @@ class RewardCalculator:
 
         # ── Exit quality assessment ───────────────────────────
         if trade.exit_reason == ExitReason.TAKE_PROFIT:
-            exit_bonus += self.exit_bonuses.get("tp_hit_bonus", 0.20)
+            exit_bonus += self.exit_bonuses.get("tp_hit_bonus", 0.25)
             note += "hit_tp "
 
         if was_trailing:
